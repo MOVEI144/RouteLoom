@@ -1,0 +1,29 @@
+h1-br-cfg-ns: Guard (DRAM, .bss 224696 B, .data 13196 B): free 34056 B vs floor 27648 B — **PASS**
+h1-br-cfg-ns: Boot heap model: 34056 + 12558 (pre-Wi-Fi offset) − 27452 (Wi-Fi/PHY/ESP-NOW peak) = 19162 B after radio start; reserve 12288 B (the floor above is derived from this model)
+h1-br-cfg: Guard (DRAM, .bss 221168 B, .data 13196 B): free 37584 B vs floor 27648 B — **PASS**
+h1-br-cfg: Boot heap model: 37584 + 12558 (pre-Wi-Fi offset) − 27452 (Wi-Fi/PHY/ESP-NOW peak) = 22690 B after radio start; reserve 12288 B (the floor above is derived from this model)
+h1-br-feat: Guard (DRAM, .bss 239720 B, .data 13332 B): free 18896 B vs floor 27648 B — **FAIL**
+h1-br-feat: Boot heap model: 18896 + 12558 (pre-Wi-Fi offset) − 27452 (Wi-Fi/PHY/ESP-NOW peak) = 4002 B after radio start; reserve 12288 B (the floor above is derived from this model)
+h1-br-og: Guard (DRAM, .bss 210736 B, .data 13460 B): free 39944 B vs floor 27648 B — **PASS**
+h1-br-og: Boot heap model: 39944 + 12558 (pre-Wi-Fi offset) − 27452 (Wi-Fi/PHY/ESP-NOW peak) = 25050 B after radio start; reserve 12288 B (the floor above is derived from this model)
+h1-br-os-obs: Guard (DRAM, .bss 207200 B, .data 13196 B): free 51552 B vs floor 27648 B — **PASS**
+h1-br-os-obs: Boot heap model: 51552 + 12558 (pre-Wi-Fi offset) − 27452 (Wi-Fi/PHY/ESP-NOW peak) = 36658 B after radio start; reserve 12288 B (the floor above is derived from this model)
+h1-br-os-plain: Guard (DRAM, .bss 207200 B, .data 13196 B): free 51552 B vs floor 27648 B — **PASS**
+h1-br-os-plain: Boot heap model: 51552 + 12558 (pre-Wi-Fi offset) − 27452 (Wi-Fi/PHY/ESP-NOW peak) = 36658 B after radio start; reserve 12288 B (the floor above is derived from this model)
+h1-br-os: Guard (DRAM, .bss 210728 B, .data 13196 B): free 48024 B vs floor 27648 B — **PASS**
+h1-br-os: Boot heap model: 48024 + 12558 (pre-Wi-Fi offset) − 27452 (Wi-Fi/PHY/ESP-NOW peak) = 33130 B after radio start; reserve 12288 B (the floor above is derived from this model)
+h1-br-plan-ns: Guard (DRAM, .bss 225752 B, .data 13332 B): free 32864 B vs floor 27648 B — **PASS**
+h1-br-plan-ns: Boot heap model: 32864 + 12558 (pre-Wi-Fi offset) − 27452 (Wi-Fi/PHY/ESP-NOW peak) = 17970 B after radio start; reserve 12288 B (the floor above is derived from this model)
+h1-br-plan: Guard (DRAM, .bss 222224 B, .data 13332 B): free 36392 B vs floor 27648 B — **PASS**
+h1-br-plan: Boot heap model: 36392 + 12558 (pre-Wi-Fi offset) − 27452 (Wi-Fi/PHY/ESP-NOW peak) = 21498 B after radio start; reserve 12288 B (the floor above is derived from this model)
+h1-ep-feat: Boot heap model: no bench measurement for this cell (link-time floor only)
+h1-ep-feat2: Boot heap model: no bench measurement for this cell (link-time floor only)
+h1-ep-og: Boot heap model: no bench measurement for this cell (link-time floor only)
+h1-ep-os: Boot heap model: no bench measurement for this cell (link-time floor only)
+h1-rl-feat: Boot heap model: no bench measurement for this cell (link-time floor only)
+h1-rl-feat2: Boot heap model: no bench measurement for this cell (link-time floor only)
+h1-rl-og: Boot heap model: no bench measurement for this cell (link-time floor only)
+h1-rl-os: Boot heap model: no bench measurement for this cell (link-time floor only)
+h1-setup-bridge-c3-member: Guard (DRAM, .bss 25304 B, .data 9431 B): free 244987 B vs floor 27648 B — **PASS**
+h1-setup-bridge-c3-member: Boot heap model: 244987 + 12558 (pre-Wi-Fi offset) − 27452 (Wi-Fi/PHY/ESP-NOW peak) = 230093 B after radio start; reserve 12288 B (the floor above is derived from this model)
+h1-setup-ref-c6-member: Boot heap model: no bench measurement for this cell (link-time floor only)

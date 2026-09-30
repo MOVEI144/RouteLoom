@@ -1,0 +1,67 @@
+{
+  "app": "bridge_node",
+  "app_only": false,
+  "board": "bridge",
+  "boot_log": null,
+  "chip": "esp32c3",
+  "cmd": [
+    "/home/sahur/.local/bin/esptool",
+    "--chip",
+    "esp32c3",
+    "--port",
+    "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00",
+    "--baud",
+    "460800",
+    "--before",
+    "default-reset",
+    "--after",
+    "hard-reset",
+    "write-flash",
+    "--flash-mode",
+    "keep",
+    "--flash-freq",
+    "keep",
+    "--flash-size",
+    "keep",
+    "0x0",
+    "/tmp/routeloom-hil-flash-wmdw2gjr/images/bootloader/bootloader.bin",
+    "0x10000",
+    "/tmp/routeloom-hil-flash-wmdw2gjr/images/ota_data_initial.bin",
+    "0x40000",
+    "/tmp/routeloom-hil-flash-wmdw2gjr/images/application.bin",
+    "0x8000",
+    "/tmp/routeloom-hil-flash-wmdw2gjr/images/partition_table/partition-table.bin"
+  ],
+  "error": null,
+  "esptool_log": "flash-bridge-esptool.log",
+  "exit_code": 0,
+  "fallback_offsets": false,
+  "files": {
+    "0x0": {
+      "path": "/tmp/routeloom-hil-flash-wmdw2gjr/images/bootloader/bootloader.bin",
+      "sha256": "0a77ca189575515bde61de67708a10e5b7611a31a6e1354900af8ededb7fe8ff"
+    },
+    "0x10000": {
+      "path": "/tmp/routeloom-hil-flash-wmdw2gjr/images/ota_data_initial.bin",
+      "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+    },
+    "0x40000": {
+      "path": "/tmp/routeloom-hil-flash-wmdw2gjr/images/application.bin",
+      "sha256": "8ef5bb5235637f77e7bbbf7ece6ba9dfe3a493f091bd20460c15fc5ee490c8c6"
+    },
+    "0x8000": {
+      "path": "/tmp/routeloom-hil-flash-wmdw2gjr/images/partition_table/partition-table.bin",
+      "sha256": "d75f28068a6e44a2a4075a490c5993c220f24cfc1862cb79e27f64357ee9ec6b"
+    }
+  },
+  "finished_utc": "2026-09-29T20:24:08.095Z",
+  "ok": true,
+  "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00",
+  "preflight": {
+    "chip": "esp32c3",
+    "flash_bytes": 4194304,
+    "log": "flash-bridge-preflight.log",
+    "mac": "94:a9:90:7a:26:ac"
+  },
+  "started_utc": "2026-09-29T20:24:05.677Z"
+}

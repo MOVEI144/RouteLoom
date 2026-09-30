@@ -1,0 +1,1083 @@
+[2026-09-29T22:05:13.543+00:00] !! opened
+[2026-09-29T22:05:14.944+00:00] I (707562) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:05:15.545+00:00] W (708189) rl_migrate: migration event PHASE_PREPARING peer=0
+[2026-09-29T22:05:15.545+00:00] W (708190) RouteLoomRef: diagnostic reason=PHASE_PREPARING peer=0 message=none
+[2026-09-29T22:05:19.954+00:00] I (712565) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:05:20.555+00:00] W (713170) rl_migrate: migration event PHASE_COMMITTED peer=0
+[2026-09-29T22:05:20.555+00:00] W (713170) RouteLoomRef: diagnostic reason=PHASE_COMMITTED peer=0 message=none
+[2026-09-29T22:05:22.960+00:00] I (715565) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:05:27.968+00:00] I (720566) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:05:27.968+00:00] I (720737) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:05:27.968+00:00] I (720737) RouteLoom: owner polls=178704 empty=177569 rxq_max=1 max_us rx=126736 bootstrap=492660 node=10439 security=696565
+[2026-09-29T22:05:27.968+00:00] I (720742) RouteLoom: owner expiry_slots=64332720 hop_accept_expired=5
+[2026-09-29T22:05:27.968+00:00] I (720748) RouteLoom: HIL HEAP free=83592 largest=67584 min=82728 B
+[2026-09-29T22:05:28.168+00:00] I (720754) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=4 stale=2 probes=104 send_failures=69 kind_rejects=0
+[2026-09-29T22:05:28.168+00:00] I (720765) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=2
+[2026-09-29T22:05:28.168+00:00] I (720772) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=29 seq=6
+[2026-09-29T22:05:30.972+00:00] I (723568) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:05:35.978+00:00] I (728569) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:05:38.782+00:00] I (731570) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:05:43.788+00:00] I (736573) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:05:44.989+00:00] W (737764) rl_migrate: migration event PHASE_SWITCHING peer=0
+[2026-09-29T22:05:44.989+00:00] W (737764) RouteLoomRef: diagnostic reason=PHASE_SWITCHING peer=0 message=none
+[2026-09-29T22:05:44.989+00:00] I (737772) rl_migrate: radio generation now 1 after verified cutover
+[2026-09-29T22:05:44.989+00:00] W (737773) rl_migrate: migration event PHASE_VERIFYING peer=0
+[2026-09-29T22:05:45.190+00:00] W (737777) RouteLoomRef: diagnostic reason=PHASE_VERIFYING peer=0 message=none
+[2026-09-29T22:05:45.790+00:00] W (738406) rl_migrate: migration event VERIFY_PASSED peer=1
+[2026-09-29T22:05:45.790+00:00] W (738407) RouteLoomRef: diagnostic reason=VERIFY_PASSED peer=1 message=none
+[2026-09-29T22:05:45.791+00:00] W (738408) rl_migrate: migration event PHASE_STABLE peer=0
+[2026-09-29T22:05:45.791+00:00] W (738413) RouteLoomRef: diagnostic reason=PHASE_STABLE peer=0 message=none
+[2026-09-29T22:05:46.792+00:00] I (739576) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:05:51.798+00:00] I (744577) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:05:52.399+00:00] W (745119) RouteLoomRef: diagnostic reason=OP_TX_QUARANTINED peer=3 message=none
+[2026-09-29T22:05:53.801+00:00] W (746424) RouteLoomRef: diagnostic reason=OP_TX_QUARANTINED peer=3 message=none
+[2026-09-29T22:05:54.802+00:00] I (747579) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:05:55.202+00:00] W (747805) RouteLoomRef: diagnostic reason=OP_TX_QUARANTINED peer=3 message=none
+[2026-09-29T22:05:55.603+00:00] W (748383) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T22:05:56.804+00:00] W (749448) RouteLoomRef: diagnostic reason=OP_TX_QUARANTINED peer=3 message=none
+[2026-09-29T22:05:59.809+00:00] I (752582) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:06:02.813+00:00] I (755583) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:06:03.414+00:00] W (756118) RouteLoomRef: diagnostic reason=OP_TX_QUARANTINED peer=3 message=none
+[2026-09-29T22:06:03.614+00:00] W (756401) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-29T22:06:04.215+00:00] I (756940) RouteLoomRef: message origin=1 session=3727643951 sequence=78 bytes=6
+[2026-09-29T22:06:04.815+00:00] W (757524) RouteLoomRef: diagnostic reason=RECEIPT_DEDUP_CONFLICT peer=3 message=present
+[2026-09-29T22:06:04.815+00:00] W (757596) RouteLoomRef: diagnostic reason=session replay peer=3 message=none
+[2026-09-29T22:06:05.016+00:00] W (757608) RouteLoomRef: diagnostic reason=session replay peer=1 message=none
+[2026-09-29T22:06:05.016+00:00] W (757638) RouteLoomRef: diagnostic reason=session replay peer=3 message=none
+[2026-09-29T22:06:05.016+00:00] W (757663) RouteLoomRef: diagnostic reason=session replay peer=1 message=none
+[2026-09-29T22:06:05.016+00:00] W (757673) RouteLoomRef: diagnostic reason=RECEIPT_DEDUP_CONFLICT peer=3 message=present
+[2026-09-29T22:06:05.016+00:00] W (757700) RouteLoomRef: diagnostic reason=session replay peer=1 message=none
+[2026-09-29T22:06:05.016+00:00] W (757716) RouteLoomRef: diagnostic reason=session replay peer=3 message=none
+[2026-09-29T22:06:05.016+00:00] W (757742) RouteLoomRef: diagnostic reason=session replay peer=1 message=none
+[2026-09-29T22:06:05.216+00:00] I (757807) RouteLoomRef: message origin=1 session=3727643951 sequence=79 bytes=6
+[2026-09-29T22:06:05.817+00:00] W (758550) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:06:06.017+00:00] W (758615) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:06:06.017+00:00] W (758762) RouteLoomRef: diagnostic reason=session replay peer=3 message=none
+[2026-09-29T22:06:06.017+00:00] W (758790) RouteLoomRef: diagnostic reason=session replay peer=1 message=none
+[2026-09-29T22:06:06.017+00:00] W (758806) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:06:06.217+00:00] W (758878) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:06:06.217+00:00] W (758973) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:06:06.417+00:00] W (759028) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:06:06.617+00:00] I (759369) RouteLoomRef: message origin=1 session=3727643951 sequence=81 bytes=6
+[2026-09-29T22:06:07.418+00:00] I (760156) RouteLoomRef: message origin=1 session=3727643951 sequence=82 bytes=6
+[2026-09-29T22:06:07.819+00:00] I (760585) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:06:08.219+00:00] I (760965) RouteLoomRef: message origin=1 session=3727643951 sequence=83 bytes=6
+[2026-09-29T22:06:09.020+00:00] I (761764) RouteLoomRef: message origin=1 session=3727643951 sequence=84 bytes=6
+[2026-09-29T22:06:09.821+00:00] I (762568) RouteLoomRef: message origin=1 session=3727643951 sequence=85 bytes=6
+[2026-09-29T22:06:10.622+00:00] I (763392) RouteLoomRef: message origin=1 session=3727643951 sequence=86 bytes=6
+[2026-09-29T22:06:10.822+00:00] I (763586) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:06:11.423+00:00] I (764176) RouteLoomRef: message origin=1 session=3727643951 sequence=87 bytes=6
+[2026-09-29T22:06:12.224+00:00] W (764976) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:06:12.424+00:00] W (765042) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:06:12.424+00:00] W (765156) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:06:12.424+00:00] W (765205) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:06:12.625+00:00] I (765297) RouteLoomRef: message origin=1 session=3727643951 sequence=88 bytes=6
+[2026-09-29T22:06:13.025+00:00] I (765785) RouteLoomRef: message origin=1 session=3727643951 sequence=89 bytes=6
+[2026-09-29T22:06:13.826+00:00] I (766587) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:06:13.826+00:00] W (766590) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:06:14.026+00:00] W (766657) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:06:14.027+00:00] W (766786) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:06:14.227+00:00] W (766849) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:06:14.227+00:00] I (766962) RouteLoomRef: message origin=1 session=3727643951 sequence=90 bytes=6
+[2026-09-29T22:06:14.627+00:00] I (767393) RouteLoomRef: message origin=1 session=3727643951 sequence=91 bytes=6
+[2026-09-29T22:06:15.428+00:00] I (768196) RouteLoomRef: message origin=1 session=3727643951 sequence=92 bytes=6
+[2026-09-29T22:06:16.229+00:00] I (769001) RouteLoomRef: message origin=1 session=3727643951 sequence=93 bytes=6
+[2026-09-29T22:06:16.830+00:00] I (769588) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:06:17.030+00:00] I (769804) RouteLoomRef: message origin=1 session=3727643951 sequence=94 bytes=6
+[2026-09-29T22:06:17.831+00:00] I (770606) RouteLoomRef: message origin=1 session=3727643951 sequence=95 bytes=6
+[2026-09-29T22:06:18.632+00:00] I (771412) RouteLoomRef: message origin=1 session=3727643951 sequence=96 bytes=6
+[2026-09-29T22:06:19.433+00:00] I (772216) RouteLoomRef: message origin=1 session=3727643951 sequence=97 bytes=6
+[2026-09-29T22:06:19.833+00:00] I (772593) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:06:22.837+00:00] I (775591) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:06:25.841+00:00] I (778591) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:06:28.043+00:00] I (780738) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:06:28.043+00:00] I (780738) RouteLoom: owner polls=193108 empty=191679 rxq_max=1 max_us rx=126736 bootstrap=492660 node=15039 security=696565
+[2026-09-29T22:06:28.043+00:00] I (780743) RouteLoom: owner expiry_slots=69518160 hop_accept_expired=7
+[2026-09-29T22:06:28.043+00:00] I (780749) RouteLoom: HIL HEAP free=83584 largest=67584 min=82424 B
+[2026-09-29T22:06:28.043+00:00] I (780755) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=4 stale=2 probes=111 send_failures=533 kind_rejects=0
+[2026-09-29T22:06:28.043+00:00] I (780766) RouteLoom: HIL ROUTE peer=1 phase=5 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:06:28.043+00:00] I (780773) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=29 seq=6
+[2026-09-29T22:06:28.844+00:00] I (781593) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:06:29.846+00:00] I (782484) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-29T22:06:29.846+00:00] W (782485) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:06:31.848+00:00] I (784596) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:06:34.852+00:00] I (787599) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:06:39.858+00:00] I (792600) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:06:42.862+00:00] I (795547) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-29T22:06:42.862+00:00] W (795547) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-29T22:06:42.862+00:00] I (795605) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:06:42.862+00:00] W (795632) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-29T22:06:44.864+00:00] I (797547) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:06:44.864+00:00] W (797548) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:06:44.864+00:00] W (797629) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-29T22:06:47.868+00:00] I (800602) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:06:48.869+00:00] W (801629) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-29T22:06:50.271+00:00] W (802993) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:50.471+00:00] I (803099) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:06:50.471+00:00] W (803100) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:06:50.872+00:00] I (803604) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:06:52.874+00:00] I (805598) RouteLoomRef: message origin=1 session=3727643951 sequence=99 bytes=5
+[2026-09-29T22:06:53.275+00:00] W (806001) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.275+00:00] W (806008) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.275+00:00] W (806015) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.275+00:00] W (806022) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.275+00:00] W (806029) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.275+00:00] W (806036) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.275+00:00] W (806043) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.275+00:00] W (806050) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.275+00:00] W (806057) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.275+00:00] W (806064) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.475+00:00] W (806071) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.475+00:00] W (806078) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.475+00:00] W (806085) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.475+00:00] W (806092) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:54.877+00:00] W (807631) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-29T22:06:55.878+00:00] I (808607) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:06:58.885+00:00] I (811608) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:06:59.886+00:00] I (812612) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:06:59.886+00:00] W (812613) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:07:00.888+00:00] W (813501) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:00.888+00:00] W (813508) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:00.888+00:00] W (813515) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:00.888+00:00] W (813522) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:00.888+00:00] W (813529) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:00.888+00:00] W (813536) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:00.888+00:00] W (813544) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:01.889+00:00] I (814609) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:07:02.890+00:00] W (815554) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:02.890+00:00] W (815632) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-29T22:07:04.893+00:00] I (817610) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:07:06.695+00:00] W (819352) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:09.899+00:00] I (822613) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:07:11.100+00:00] W (823812) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:11.100+00:00] I (823866) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:07:11.100+00:00] W (823867) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:07:12.902+00:00] I (825614) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:07:12.902+00:00] W (825640) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-29T22:07:17.708+00:00] W (830340) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:17.909+00:00] I (830614) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:07:19.110+00:00] I (831756) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:07:19.110+00:00] W (831756) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:07:19.110+00:00] W (831757) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:20.913+00:00] I (833617) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:07:21.313+00:00] W (834072) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:24.918+00:00] W (837632) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-29T22:07:25.519+00:00] W (838110) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:25.919+00:00] I (838617) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:07:28.122+00:00] I (840741) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:07:28.122+00:00] I (840741) RouteLoom: owner polls=207807 empty=206239 rxq_max=1 max_us rx=126736 bootstrap=492660 node=15039 security=696565
+[2026-09-29T22:07:28.122+00:00] I (840746) RouteLoom: owner expiry_slots=74809800 hop_accept_expired=7
+[2026-09-29T22:07:28.122+00:00] I (840752) RouteLoom: HIL HEAP free=83632 largest=67584 min=82424 B
+[2026-09-29T22:07:28.122+00:00] I (840758) RouteLoom: HIL DISCOVERY candidates=2 neighbors=2 capacity=0 auth=4 stale=3 probes=123 send_failures=886 kind_rejects=0
+[2026-09-29T22:07:28.122+00:00] I (840769) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=3
+[2026-09-29T22:07:28.122+00:00] I (840776) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:07:28.923+00:00] I (841618) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:07:30.725+00:00] I (843388) RouteLoomRef: join mode=1 state=1 error=0
+[2026-09-29T22:07:31.326+00:00] I (844084) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T22:07:31.326+00:00] I (844090) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T22:07:31.326+00:00] I (844102) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T22:07:33.730+00:00] I (846501) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T22:07:33.730+00:00] I (846504) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T22:07:33.730+00:00] I (846512) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T22:07:33.931+00:00] I (846617) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:07:34.131+00:00] I (846829) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T22:07:34.131+00:00] I (846833) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T22:07:34.131+00:00] I (846841) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T22:07:34.531+00:00] I (847158) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T22:07:34.531+00:00] I (847162) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T22:07:34.531+00:00] I (847170) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T22:07:34.731+00:00] I (847487) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T22:07:34.731+00:00] I (847491) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T22:07:36.935+00:00] I (849618) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:07:38.938+00:00] I (851684) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T22:07:38.938+00:00] I (851688) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T22:07:38.938+00:00] I (851696) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T22:07:39.338+00:00] I (852013) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T22:07:39.338+00:00] I (852017) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T22:07:39.338+00:00] I (852025) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T22:07:39.739+00:00] I (852342) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T22:07:39.739+00:00] I (852346) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T22:07:39.739+00:00] I (852354) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T22:07:39.939+00:00] I (852618) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:07:39.939+00:00] I (852672) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T22:07:39.939+00:00] I (852675) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T22:07:40.139+00:00] I (852878) RouteLoomRef: join mode=1 state=6 error=0
+[2026-09-29T22:07:40.539+00:00] I (853199) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T22:07:40.539+00:00] I (853203) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T22:07:40.539+00:00] W (853230) RouteLoomRef: diagnostic reason=ROUTE_HELD_DOWN peer=1 message=none
+[2026-09-29T22:07:41.541+00:00] I (854263) RouteLoomRef: join mode=1 state=6 error=0
+[2026-09-29T22:07:41.941+00:00] I (854694) RouteLoomRef: join mode=1 state=7 error=0
+[2026-09-29T22:07:42.141+00:00] I (854806) RouteLoomRef: join mode=1 state=8 error=0
+[2026-09-29T22:07:42.742+00:00] I (855437) RouteLoomRef: join mode=1 state=9 error=0
+[2026-09-29T22:07:42.942+00:00] I (855561) RouteLoomRef: join mode=1 state=10 error=0
+[2026-09-29T22:07:44.350+00:00] I (857045) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T22:07:44.350+00:00] I (857049) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T22:07:44.951+00:00] I (857618) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:07:46.553+00:00] I (859263) RouteLoomRef: join mode=1 state=6 error=0
+[2026-09-29T22:07:46.553+00:00] I (859267) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T22:07:46.553+00:00] I (859270) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T22:07:47.955+00:00] I (860618) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:07:51.359+00:00] I (864099) RouteLoomRef: join mode=1 state=6 error=0
+[2026-09-29T22:07:51.759+00:00] I (864424) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T22:07:51.759+00:00] I (864428) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T22:07:52.960+00:00] I (865619) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:07:55.963+00:00] I (868619) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:08:00.168+00:00] I (872872) RouteLoomRef: join mode=1 state=6 error=0
+[2026-09-29T22:08:00.568+00:00] I (873197) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T22:08:00.568+00:00] I (873201) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T22:08:00.969+00:00] I (873621) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:08:03.972+00:00] I (876622) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:08:08.978+00:00] I (881622) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:08:11.982+00:00] I (884622) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:08:15.586+00:00] I (888201) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T22:08:15.586+00:00] I (888204) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T22:08:15.586+00:00] I (888212) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T22:08:15.786+00:00] I (888529) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T22:08:15.786+00:00] I (888533) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T22:08:15.786+00:00] I (888541) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T22:08:16.187+00:00] I (888858) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-29T22:08:16.187+00:00] I (888862) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T22:08:16.187+00:00] I (888870) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-29T22:08:16.587+00:00] I (889187) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-29T22:08:16.587+00:00] I (889191) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-29T22:08:16.988+00:00] I (889623) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-29T22:08:16.988+00:00] I (889623) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:08:16.988+00:00] I (889632) RouteLoomRef: join mode=1 state=6 error=0
+[2026-09-29T22:08:17.388+00:00] I (890058) RouteLoomRef: join mode=1 state=7 error=0
+[2026-09-29T22:08:17.388+00:00] I (890169) RouteLoomRef: join mode=1 state=8 error=0
+[2026-09-29T22:08:17.989+00:00] I (890702) RouteLoomRef: join mode=1 state=9 error=0
+[2026-09-29T22:08:18.189+00:00] I (890823) RouteLoomRef: join mode=1 state=10 error=0
+[2026-09-29T22:08:18.389+00:00] I (891161) RouteLoomRef: join mode=1 state=11 error=0
+[2026-09-29T22:08:18.590+00:00] I (891298) RouteLoomRef: join mode=1 state=12 error=0
+[2026-09-29T22:08:19.391+00:00] W (891984) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:19.391+00:00] W (891984) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:19.391+00:00] W (891997) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:19.991+00:00] I (892625) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:08:19.991+00:00] W (892629) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:21.193+00:00] W (893978) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:21.393+00:00] I (893999) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:08:21.393+00:00] W (894000) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:08:21.393+00:00] W (894170) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:22.594+00:00] W (895283) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:23.796+00:00] W (896398) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:23.796+00:00] W (896486) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896803) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896811) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896819) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896827) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896835) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896843) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896851) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896859) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896867) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896875) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896883) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896891) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896899) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896907) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896915) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.197+00:00] W (896923) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.797+00:00] W (897456) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:24.998+00:00] I (897629) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5004 negative=0
+[2026-09-29T22:08:25.398+00:00] W (898000) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:25.799+00:00] W (898521) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:26.199+00:00] W (898980) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:27.000+00:00] W (899592) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:28.002+00:00] I (900630) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:08:28.002+00:00] W (900634) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:28.002+00:00] W (900670) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:28.002+00:00] I (900745) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:08:28.002+00:00] I (900745) RouteLoom: owner polls=225430 empty=223760 rxq_max=3 max_us rx=126736 bootstrap=492660 node=15039 security=696565
+[2026-09-29T22:08:28.002+00:00] I (900750) RouteLoom: owner expiry_slots=81154080 hop_accept_expired=7
+[2026-09-29T22:08:28.002+00:00] I (900756) RouteLoom: HIL HEAP free=83640 largest=67584 min=82424 B
+[2026-09-29T22:08:28.002+00:00] I (900762) RouteLoom: HIL DISCOVERY candidates=2 neighbors=2 capacity=0 auth=4 stale=3 probes=126 send_failures=2375 kind_rejects=0
+[2026-09-29T22:08:28.002+00:00] I (900773) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=3
+[2026-09-29T22:08:28.002+00:00] I (900781) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:08:28.202+00:00] I (900881) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:08:28.202+00:00] W (900881) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:08:28.602+00:00] W (901334) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:29.003+00:00] W (901756) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:29.203+00:00] W (901988) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:30.204+00:00] W (902810) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:30.204+00:00] W (902852) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:30.605+00:00] W (903336) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:31.205+00:00] W (903953) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:31.205+00:00] W (903982) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:32.407+00:00] W (905059) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:32.407+00:00] W (905067) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:32.607+00:00] W (905337) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:33.008+00:00] I (905634) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5004 negative=0
+[2026-09-29T22:08:33.408+00:00] W (906178) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:34.610+00:00] W (907234) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:34.610+00:00] W (907343) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:34.810+00:00] W (907438) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:35.611+00:00] W (908295) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:36.012+00:00] I (908638) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:08:36.012+00:00] W (908642) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:36.212+00:00] W (908986) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:36.612+00:00] W (909346) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:36.612+00:00] W (909368) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:37.814+00:00] W (910444) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:38.615+00:00] I (911209) RouteLoomRef: discovery event=STALE peer=1
+[2026-09-29T22:08:38.615+00:00] W (911209) RouteLoomRef: diagnostic reason=STALE peer=1 message=none
+[2026-09-29T22:08:38.615+00:00] W (911328) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:38.615+00:00] W (911353) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:40.017+00:00] W (912608) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:40.017+00:00] I (912706) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-29T22:08:40.017+00:00] W (912706) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T22:08:40.017+00:00] I (912708) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T22:08:40.017+00:00] W (912713) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:08:40.617+00:00] W (913355) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:40.617+00:00] W (913362) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:41.018+00:00] I (913639) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:08:41.218+00:00] W (913984) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:41.619+00:00] W (914289) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:42.019+00:00] W (914794) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:42.620+00:00] W (915359) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:42.820+00:00] W (915539) RouteLoomRef: diagnostic reason=session unknown context peer=3 message=none
+[2026-09-29T22:08:43.621+00:00] W (916371) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.621+00:00] W (916372) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.621+00:00] W (916379) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.621+00:00] W (916386) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.621+00:00] W (916393) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.621+00:00] W (916400) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.621+00:00] W (916407) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916414) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916421) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916428) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916435) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916442) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916449) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916456) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916463) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916470) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916477) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916484) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916491) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916498) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916505) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916512) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.822+00:00] W (916519) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:44.022+00:00] I (916639) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:08:44.623+00:00] W (917362) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:45.424+00:00] I (918107) RouteLoomRef: discovery event=REDISCOVERY peer=1
+[2026-09-29T22:08:45.424+00:00] W (918108) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:08:46.225+00:00] W (918985) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:46.625+00:00] W (919366) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:47.026+00:00] I (919641) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:08:47.426+00:00] I (920062) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:08:47.426+00:00] W (920063) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:08:47.426+00:00] W (920122) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.426+00:00] W (920142) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.426+00:00] W (920149) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.426+00:00] W (920156) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.426+00:00] W (920163) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.426+00:00] W (920170) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.426+00:00] W (920177) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.426+00:00] W (920184) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.426+00:00] W (920191) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.426+00:00] W (920198) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.426+00:00] W (920205) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.426+00:00] W (920212) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920219) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920226) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920233) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920240) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920247) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920254) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920261) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920268) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920275) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920282) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920289) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920296) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920303) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920310) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920317) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920324) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920331) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920338) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920345) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920352) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920359) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920366) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920373) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920380) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920387) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920394) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920401) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920408) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.627+00:00] W (920415) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.827+00:00] W (920422) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.827+00:00] W (920429) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.827+00:00] W (920436) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.827+00:00] W (920443) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.827+00:00] W (920450) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.827+00:00] W (920457) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.827+00:00] W (920464) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.827+00:00] W (920471) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.827+00:00] W (920478) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.827+00:00] W (920485) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.827+00:00] W (920492) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:48.227+00:00] W (920861) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:48.628+00:00] W (921269) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:48.628+00:00] W (921374) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-29T22:08:50.030+00:00] I (922642) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:08:50.631+00:00] W (923232) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.432+00:00] W (924139) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.432+00:00] W (924147) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.432+00:00] W (924155) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.432+00:00] W (924162) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.432+00:00] W (924169) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.432+00:00] W (924176) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.432+00:00] W (924183) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.432+00:00] W (924190) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.432+00:00] W (924197) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.432+00:00] W (924204) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.432+00:00] W (924211) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.432+00:00] W (924218) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.633+00:00] W (924225) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.633+00:00] W (924232) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.633+00:00] W (924240) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.633+00:00] W (924290) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:52.033+00:00] W (924777) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:52.033+00:00] W (924808) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-29T22:08:52.233+00:00] I (925018) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-29T22:08:52.233+00:00] W (925018) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-29T22:08:52.434+00:00] W (925020) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=1 seq=4 att=1 peer=1 message=none
+[2026-09-29T22:08:53.035+00:00] I (925642) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:08:54.236+00:00] W (927019) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=1 seq=4 att=2 peer=1 message=none
+[2026-09-29T22:08:54.436+00:00] W (927096) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T22:08:56.038+00:00] I (928643) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:08:58.842+00:00] W (931583) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:59.043+00:00] I (931643) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:09:04.049+00:00] I (936646) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:09:07.055+00:00] I (939648) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:09:11.861+00:00] I (944651) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:09:13.462+00:00] I (946092) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:09:13.462+00:00] W (946093) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:09:13.462+00:00] W (946173) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:14.865+00:00] I (947651) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:09:15.065+00:00] W (947739) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:16.667+00:00] W (949426) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:16.667+00:00] W (949434) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:16.667+00:00] W (949442) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:16.667+00:00] W (949450) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:16.868+00:00] W (949458) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:16.868+00:00] W (949466) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:16.868+00:00] W (949474) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:16.868+00:00] W (949483) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:19.875+00:00] I (952653) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:09:22.881+00:00] I (955655) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:09:26.486+00:00] I (959107) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:09:26.486+00:00] W (959107) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:09:26.486+00:00] W (959219) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.086+00:00] W (959876) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.286+00:00] W (959883) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959890) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959897) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959904) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959911) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959918) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959925) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959932) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959939) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959946) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959953) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959960) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959967) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959974) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.287+00:00] W (959981) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.887+00:00] I (960655) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:09:28.087+00:00] I (960746) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:09:28.088+00:00] I (960746) RouteLoom: owner polls=239631 empty=237811 rxq_max=3 max_us rx=126736 bootstrap=492660 node=15039 security=696565
+[2026-09-29T22:09:28.088+00:00] I (960751) RouteLoom: owner expiry_slots=86266440 hop_accept_expired=8
+[2026-09-29T22:09:28.088+00:00] I (960757) RouteLoom: HIL HEAP free=83640 largest=67584 min=82424 B
+[2026-09-29T22:09:28.088+00:00] I (960763) RouteLoom: HIL DISCOVERY candidates=2 neighbors=2 capacity=0 auth=5 stale=4 probes=129 send_failures=4611 kind_rejects=0
+[2026-09-29T22:09:28.088+00:00] I (960774) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=4
+[2026-09-29T22:09:28.088+00:00] I (960781) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:09:29.289+00:00] W (962050) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:30.891+00:00] I (963657) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:09:31.292+00:00] W (963940) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:32.093+00:00] I (964755) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:09:32.093+00:00] W (964756) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:09:33.495+00:00] W (966098) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:35.898+00:00] I (968660) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:09:37.700+00:00] W (970389) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:38.901+00:00] I (971661) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:09:43.908+00:00] I (976664) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:09:45.109+00:00] I (977721) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:09:45.109+00:00] W (977722) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:09:45.309+00:00] W (978044) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:46.911+00:00] I (979671) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:09:50.517+00:00] W (983298) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:50.517+00:00] W (983306) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:51.919+00:00] I (984670) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:09:54.924+00:00] I (987673) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:09:56.927+00:00] I (989643) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:09:56.927+00:00] W (989644) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:09:57.928+00:00] I (990676) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:09:59.130+00:00] W (991904) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:00.131+00:00] W (992723) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:00.932+00:00] I (993677) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:10:01.532+00:00] I (994148) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:10:01.532+00:00] W (994148) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:10:01.532+00:00] W (994279) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:01.732+00:00] W (994523) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:01.933+00:00] W (994530) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:01.933+00:00] W (994537) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:01.933+00:00] W (994544) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:01.933+00:00] W (994551) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:03.935+00:00] I (996679) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:10:04.135+00:00] W (996871) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:04.135+00:00] W (996879) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:06.939+00:00] I (999681) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:10:09.343+00:00] W (1002084) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:11.145+00:00] I (1003874) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:10:11.145+00:00] W (1003875) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:10:11.345+00:00] W (1003967) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:11.946+00:00] I (1004684) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:10:12.146+00:00] W (1004814) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:13.948+00:00] W (1006651) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007548) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007555) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007562) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007569) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007576) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007583) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007590) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007597) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007604) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007611) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007618) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007625) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007632) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007639) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007646) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007653) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007660) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007667) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007674) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007681) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007688) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] I (1007691) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:10:14.949+00:00] W (1007696) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007706) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007714) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007722) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007729) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.949+00:00] W (1007737) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:15.150+00:00] W (1007745) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:15.150+00:00] W (1007753) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:15.150+00:00] W (1007761) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:15.150+00:00] W (1007769) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:15.150+00:00] W (1007777) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:15.150+00:00] W (1007785) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:15.150+00:00] W (1007793) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:16.952+00:00] W (1009574) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:16.952+00:00] I (1009643) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-29T22:10:16.952+00:00] W (1009643) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T22:10:17.753+00:00] I (1010509) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:10:17.753+00:00] W (1010510) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:10:17.953+00:00] W (1010602) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:19.758+00:00] W (1012505) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:19.958+00:00] I (1012688) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:10:22.962+00:00] I (1015689) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:10:23.362+00:00] W (1016106) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.362+00:00] W (1016113) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.362+00:00] W (1016120) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.362+00:00] W (1016127) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.362+00:00] W (1016134) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.362+00:00] W (1016141) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.362+00:00] W (1016148) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.562+00:00] W (1016155) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.562+00:00] W (1016162) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.562+00:00] W (1016169) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.562+00:00] W (1016176) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.562+00:00] W (1016183) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.562+00:00] W (1016190) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.562+00:00] W (1016197) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.562+00:00] W (1016204) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.562+00:00] W (1016211) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.562+00:00] W (1016218) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:23.963+00:00] W (1016617) RouteLoomRef: diagnostic reason=ROUTE_HELD_DOWN peer=1 message=none
+[2026-09-29T22:10:24.964+00:00] I (1017739) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:10:24.964+00:00] W (1017740) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:10:27.967+00:00] I (1020690) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:10:27.967+00:00] I (1020749) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:10:27.967+00:00] I (1020749) RouteLoom: owner polls=254262 empty=252274 rxq_max=3 max_us rx=126736 bootstrap=492660 node=15039 security=696565
+[2026-09-29T22:10:28.168+00:00] I (1020754) RouteLoom: owner expiry_slots=91533600 hop_accept_expired=8
+[2026-09-29T22:10:28.168+00:00] I (1020760) RouteLoom: HIL HEAP free=83640 largest=67584 min=82424 B
+[2026-09-29T22:10:28.168+00:00] I (1020766) RouteLoom: HIL DISCOVERY candidates=2 neighbors=2 capacity=0 auth=5 stale=4 probes=131 send_failures=4987 kind_rejects=0
+[2026-09-29T22:10:28.168+00:00] I (1020778) RouteLoom: HIL ROUTE peer=1 phase=5 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:10:28.168+00:00] I (1020785) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:10:30.971+00:00] I (1023692) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:10:33.975+00:00] I (1026693) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:10:36.981+00:00] I (1029695) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=0 detail=NO_ROUTE
+[2026-09-29T22:10:39.984+00:00] I (1032697) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:10:44.992+00:00] I (1037700) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:10:47.997+00:00] I (1040702) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:10:53.003+00:00] I (1045705) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:10:55.206+00:00] I (1047845) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:10:55.206+00:00] W (1047846) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:10:56.007+00:00] I (1048705) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:10:58.210+00:00] W (1050861) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:01.013+00:00] I (1053707) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:11:02.415+00:00] W (1055031) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:03.216+00:00] I (1055824) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:11:03.216+00:00] W (1055825) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:11:03.216+00:00] W (1055910) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:04.017+00:00] I (1056708) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:11:09.024+00:00] I (1061709) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:11:10.025+00:00] W (1062684) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:12.027+00:00] I (1064711) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:11:12.228+00:00] I (1064929) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:11:12.228+00:00] W (1064930) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:11:12.228+00:00] W (1065010) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:13.029+00:00] W (1065747) RouteLoomRef: diagnostic reason=session unknown context peer=3 message=none
+[2026-09-29T22:11:14.230+00:00] W (1066917) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:17.038+00:00] I (1069713) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:11:17.638+00:00] W (1070305) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:19.841+00:00] W (1072568) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:20.041+00:00] I (1072716) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:11:25.048+00:00] I (1077719) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:11:28.051+00:00] I (1080721) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:11:28.051+00:00] I (1080752) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:11:28.051+00:00] I (1080753) RouteLoom: owner polls=269177 empty=267109 rxq_max=3 max_us rx=126736 bootstrap=492660 node=15039 security=696565
+[2026-09-29T22:11:28.051+00:00] I (1080757) RouteLoom: owner expiry_slots=96903000 hop_accept_expired=8
+[2026-09-29T22:11:28.051+00:00] I (1080763) RouteLoom: HIL HEAP free=83640 largest=67584 min=82424 B
+[2026-09-29T22:11:28.051+00:00] I (1080769) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=5 stale=4 probes=135 send_failures=5007 kind_rejects=0
+[2026-09-29T22:11:28.051+00:00] I (1080781) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=4
+[2026-09-29T22:11:28.051+00:00] I (1080788) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:11:33.058+00:00] I (1085724) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:11:33.458+00:00] I (1086116) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:11:33.458+00:00] W (1086116) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:11:33.458+00:00] W (1086117) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:33.859+00:00] W (1086500) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:33.859+00:00] W (1086507) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:33.859+00:00] W (1086514) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:33.859+00:00] W (1086521) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:33.859+00:00] W (1086528) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:33.859+00:00] W (1086535) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:33.859+00:00] W (1086542) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:35.461+00:00] W (1088162) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:35.661+00:00] W (1088431) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:36.061+00:00] I (1088727) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:11:37.263+00:00] W (1089930) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1089937) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1089944) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1089951) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1089958) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1089965) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1089972) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1089979) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1089986) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1089993) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1090000) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1090009) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1090016) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1090023) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1090030) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1090037) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1090044) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.263+00:00] W (1090051) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090058) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090065) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090072) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090079) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090086) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090093) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090100) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090107) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090114) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090121) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090128) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090135) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090142) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090149) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090156) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090164) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090171) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090178) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090185) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.463+00:00] W (1090192) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:41.068+00:00] I (1093727) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:11:44.079+00:00] I (1096727) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:11:47.484+00:00] I (1100130) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:11:47.484+00:00] W (1100131) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:11:47.484+00:00] W (1100163) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:48.485+00:00] W (1101211) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:49.086+00:00] I (1101727) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:11:49.486+00:00] W (1102206) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:51.289+00:00] W (1103984) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:52.090+00:00] I (1104729) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:11:54.493+00:00] W (1107225) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:57.096+00:00] I (1109730) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:11:57.496+00:00] W (1110164) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:59.098+00:00] I (1111859) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:11:59.098+00:00] W (1111860) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:11:59.299+00:00] W (1111904) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:00.101+00:00] I (1112731) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:12:00.501+00:00] W (1113111) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:02.704+00:00] W (1115389) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:03.705+00:00] W (1116450) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:03.906+00:00] I (1116508) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-29T22:12:03.906+00:00] W (1116508) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T22:12:05.107+00:00] I (1117732) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:12:05.507+00:00] I (1118225) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:12:05.507+00:00] W (1118226) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:12:05.507+00:00] W (1118246) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:08.113+00:00] I (1120735) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:12:09.314+00:00] W (1121917) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:13.119+00:00] I (1125738) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:12:16.123+00:00] I (1128739) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:12:16.324+00:00] W (1128950) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:20.329+00:00] I (1133030) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:12:20.329+00:00] W (1133031) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:12:21.130+00:00] I (1133741) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:12:21.130+00:00] W (1133834) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:22.131+00:00] W (1134733) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:23.733+00:00] W (1136508) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:24.134+00:00] I (1136743) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:12:26.937+00:00] W (1139691) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:28.139+00:00] I (1140752) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:12:28.139+00:00] I (1140752) RouteLoom: owner polls=283949 empty=281769 rxq_max=3 max_us rx=126736 bootstrap=492660 node=15039 security=696565
+[2026-09-29T22:12:28.139+00:00] I (1140757) RouteLoom: owner expiry_slots=102220920 hop_accept_expired=8
+[2026-09-29T22:12:28.139+00:00] I (1140763) RouteLoom: HIL HEAP free=83640 largest=67584 min=82424 B
+[2026-09-29T22:12:28.139+00:00] I (1140769) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=5 stale=4 probes=139 send_failures=5213 kind_rejects=0
+[2026-09-29T22:12:28.139+00:00] I (1140781) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=4
+[2026-09-29T22:12:28.139+00:00] I (1140788) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:12:29.140+00:00] I (1141746) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:12:32.144+00:00] I (1144748) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:12:33.345+00:00] W (1146007) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:37.150+00:00] I (1149748) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:12:40.155+00:00] I (1152751) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:12:45.161+00:00] I (1157752) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:12:47.964+00:00] I (1160754) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:12:52.970+00:00] I (1165754) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:12:55.973+00:00] I (1168757) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:13:00.579+00:00] I (1173256) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:13:00.579+00:00] W (1173257) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:13:00.979+00:00] W (1173574) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:00.979+00:00] I (1173757) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:13:02.582+00:00] W (1175255) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:03.983+00:00] I (1176757) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:13:05.585+00:00] W (1178366) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:08.990+00:00] I (1181757) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:13:11.593+00:00] W (1184280) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:11.993+00:00] I (1184757) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:13:17.000+00:00] I (1189757) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:13:20.004+00:00] I (1192758) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:13:21.806+00:00] I (1194527) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:13:21.806+00:00] W (1194528) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:13:25.010+00:00] I (1197761) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:13:25.811+00:00] W (1198563) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:27.413+00:00] W (1200005) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:28.014+00:00] I (1200754) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:13:28.014+00:00] I (1200754) RouteLoom: owner polls=298861 empty=296603 rxq_max=3 max_us rx=126736 bootstrap=492660 node=15039 security=696565
+[2026-09-29T22:13:28.014+00:00] I (1200759) RouteLoom: owner expiry_slots=107589240 hop_accept_expired=8
+[2026-09-29T22:13:28.014+00:00] I (1200765) RouteLoom: HIL HEAP free=83640 largest=67584 min=82424 B
+[2026-09-29T22:13:28.014+00:00] I (1200771) RouteLoom: HIL DISCOVERY candidates=2 neighbors=2 capacity=0 auth=5 stale=4 probes=144 send_failures=5260 kind_rejects=0
+[2026-09-29T22:13:28.014+00:00] I (1200783) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=4
+[2026-09-29T22:13:28.014+00:00] I (1200790) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:13:28.014+00:00] I (1200804) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:13:29.816+00:00] I (1202501) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:13:29.816+00:00] W (1202502) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:13:29.816+00:00] W (1202594) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:33.021+00:00] I (1205805) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:13:35.023+00:00] W (1207625) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:35.824+00:00] W (1208557) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:36.024+00:00] I (1208808) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:13:37.828+00:00] I (1210571) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:13:37.828+00:00] W (1210572) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:13:38.629+00:00] W (1211326) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:41.032+00:00] I (1213811) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:13:43.034+00:00] W (1215756) RouteLoomRef: diagnostic reason=session unknown context peer=3 message=none
+[2026-09-29T22:13:44.036+00:00] I (1216813) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:13:45.237+00:00] W (1217940) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:49.043+00:00] I (1221816) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:13:52.046+00:00] I (1224819) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:13:53.047+00:00] I (1225676) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:13:53.047+00:00] W (1225677) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:13:54.850+00:00] W (1227484) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:57.052+00:00] I (1229821) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:13:57.853+00:00] W (1230497) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:00.057+00:00] I (1232821) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:14:03.461+00:00] W (1236230) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:05.063+00:00] I (1237822) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:14:08.067+00:00] I (1240824) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:14:11.872+00:00] I (1244572) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:14:11.872+00:00] W (1244573) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:14:11.872+00:00] W (1244596) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:13.074+00:00] I (1245825) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:14:15.076+00:00] W (1247719) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:15.677+00:00] I (1248453) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-29T22:14:15.677+00:00] W (1248453) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T22:14:16.077+00:00] I (1248826) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:14:16.478+00:00] I (1249119) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:14:16.478+00:00] W (1249120) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:14:16.678+00:00] W (1249269) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:19.281+00:00] W (1251907) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:21.084+00:00] I (1253828) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:14:24.088+00:00] I (1256831) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:14:24.488+00:00] W (1257219) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:25.890+00:00] W (1258602) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:27.492+00:00] I (1260236) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:14:27.492+00:00] W (1260236) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:14:28.093+00:00] I (1260757) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:14:28.093+00:00] I (1260757) RouteLoom: owner polls=313649 empty=311284 rxq_max=3 max_us rx=126736 bootstrap=492660 node=15039 security=696565
+[2026-09-29T22:14:28.093+00:00] I (1260762) RouteLoom: owner expiry_slots=112912920 hop_accept_expired=8
+[2026-09-29T22:14:28.093+00:00] I (1260768) RouteLoom: HIL HEAP free=83640 largest=67584 min=82424 B
+[2026-09-29T22:14:28.093+00:00] I (1260774) RouteLoom: HIL DISCOVERY candidates=2 neighbors=2 capacity=0 auth=5 stale=4 probes=150 send_failures=5477 kind_rejects=0
+[2026-09-29T22:14:28.093+00:00] I (1260786) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=4
+[2026-09-29T22:14:28.093+00:00] I (1260793) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:14:28.494+00:00] W (1261265) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:29.094+00:00] I (1261831) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:14:30.496+00:00] W (1263178) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:30.897+00:00] W (1263510) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:32.098+00:00] I (1264832) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:14:37.104+00:00] I (1269832) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:14:37.505+00:00] I (1270281) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:14:37.505+00:00] W (1270282) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:14:37.706+00:00] W (1270314) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:39.508+00:00] W (1272239) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:40.108+00:00] I (1272835) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:14:43.513+00:00] W (1276108) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:45.116+00:00] I (1277835) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:14:45.116+00:00] I (1277848) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:14:45.116+00:00] W (1277849) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:14:45.116+00:00] W (1277881) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:45.917+00:00] W (1278640) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:45.917+00:00] W (1278647) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:45.917+00:00] W (1278654) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:45.917+00:00] W (1278661) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:45.917+00:00] W (1278668) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:45.917+00:00] W (1278675) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:45.917+00:00] W (1278682) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:45.917+00:00] W (1278689) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:45.917+00:00] W (1278696) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:45.917+00:00] W (1278703) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.117+00:00] W (1278710) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278717) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278724) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278731) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278738) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278745) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278752) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278759) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278766) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278773) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278780) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278787) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278794) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278801) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278808) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278815) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278822) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278829) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:46.118+00:00] W (1278836) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:48.120+00:00] I (1280838) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:14:49.522+00:00] W (1282305) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:53.126+00:00] I (1285841) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:14:56.130+00:00] I (1288841) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:14:56.731+00:00] W (1289384) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:01.137+00:00] I (1293843) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:15:04.140+00:00] I (1296846) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:15:09.147+00:00] I (1301848) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:15:12.150+00:00] I (1304851) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:15:12.554+00:00] I (1305288) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:15:12.554+00:00] W (1305289) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:15:14.757+00:00] W (1307354) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:16.159+00:00] W (1308824) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:16.159+00:00] W (1308832) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:17.160+00:00] I (1309853) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:15:20.168+00:00] I (1312854) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:15:20.569+00:00] W (1313178) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:25.176+00:00] I (1317857) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:15:27.979+00:00] I (1320757) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:15:27.979+00:00] I (1320757) RouteLoom: owner polls=328475 empty=326023 rxq_max=3 max_us rx=126736 bootstrap=492660 node=15039 security=696565
+[2026-09-29T22:15:27.979+00:00] I (1320762) RouteLoom: owner expiry_slots=118250280 hop_accept_expired=8
+[2026-09-29T22:15:28.180+00:00] I (1320768) RouteLoom: HIL HEAP free=83640 largest=67584 min=82424 B
+[2026-09-29T22:15:28.180+00:00] I (1320774) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=5 stale=4 probes=154 send_failures=5639 kind_rejects=0
+[2026-09-29T22:15:28.180+00:00] I (1320786) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=4
+[2026-09-29T22:15:28.180+00:00] I (1320793) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:15:28.180+00:00] I (1320859) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:15:28.981+00:00] I (1321665) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:15:28.981+00:00] W (1321666) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:15:31.784+00:00] W (1324455) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:33.186+00:00] I (1325861) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:15:33.586+00:00] W (1326303) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:34.788+00:00] W (1327467) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:36.190+00:00] I (1328862) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:15:38.192+00:00] W (1330900) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:41.196+00:00] I (1333864) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:15:43.399+00:00] W (1336142) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:44.202+00:00] I (1336867) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:15:44.403+00:00] I (1337113) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:15:44.403+00:00] W (1337114) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:15:49.209+00:00] I (1341870) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:15:52.213+00:00] I (1344871) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:15:53.014+00:00] W (1345757) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:57.220+00:00] I (1349873) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:16:00.223+00:00] I (1352874) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:16:05.230+00:00] I (1357877) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:16:08.234+00:00] I (1360878) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:16:09.035+00:00] W (1361742) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:16:13.239+00:00] I (1365878) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:16:16.242+00:00] I (1368878) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:16:16.643+00:00] I (1369254) RouteLoomRef: message origin=1 session=3727643951 sequence=113 bytes=5
+[2026-09-29T22:16:21.252+00:00] I (1373878) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:16:24.256+00:00] I (1376879) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:16:25.057+00:00] W (1377717) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:16:28.060+00:00] I (1380758) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:16:28.060+00:00] I (1380758) RouteLoom: owner polls=343398 empty=340858 rxq_max=3 max_us rx=126736 bootstrap=492660 node=15039 security=696565
+[2026-09-29T22:16:28.060+00:00] I (1380763) RouteLoom: owner expiry_slots=123622560 hop_accept_expired=8
+[2026-09-29T22:16:28.060+00:00] I (1380769) RouteLoom: HIL HEAP free=83640 largest=67584 min=82424 B
+[2026-09-29T22:16:28.060+00:00] I (1380775) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=5 stale=4 probes=158 send_failures=5647 kind_rejects=0
+[2026-09-29T22:16:28.060+00:00] I (1380787) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=4
+[2026-09-29T22:16:28.060+00:00] I (1380794) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:16:29.262+00:00] I (1381880) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:16:32.268+00:00] I (1384882) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:16:37.093+00:00] I (1389883) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:16:40.098+00:00] I (1392885) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:16:40.899+00:00] W (1393562) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:16:44.504+00:00] I (1397111) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:16:44.504+00:00] W (1397112) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:16:45.105+00:00] I (1397886) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:16:48.109+00:00] I (1400887) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:16:53.115+00:00] I (1405889) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:16:56.119+00:00] I (1408889) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:16:56.920+00:00] W (1409704) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:16:57.921+00:00] I (1410668) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-29T22:16:57.921+00:00] W (1410668) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T22:17:00.324+00:00] W (1413090) rl_migrate: migration event PHASE_PREPARING peer=0
+[2026-09-29T22:17:00.324+00:00] W (1413090) RouteLoomRef: diagnostic reason=PHASE_PREPARING peer=0 message=none
+[2026-09-29T22:17:01.125+00:00] W (1413890) rl_migrate: migration event CHANNEL_NOTICE peer=1
+[2026-09-29T22:17:01.125+00:00] W (1413890) RouteLoomRef: diagnostic reason=CHANNEL_NOTICE peer=1 message=none
+[2026-09-29T22:17:01.125+00:00] I (1413895) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:17:01.326+00:00] W (1414077) rl_migrate: migration event PHASE_COMMITTED peer=0
+[2026-09-29T22:17:01.326+00:00] W (1414078) RouteLoomRef: diagnostic reason=PHASE_COMMITTED peer=0 message=none
+[2026-09-29T22:17:04.129+00:00] I (1416891) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:17:09.135+00:00] I (1421892) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:17:11.539+00:00] I (1424146) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:17:11.539+00:00] W (1424147) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:17:12.139+00:00] I (1424893) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:17:12.940+00:00] W (1425599) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:17.147+00:00] I (1429896) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:17:20.150+00:00] I (1432898) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:17:25.156+00:00] I (1437901) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:17:26.158+00:00] I (1438930) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:17:26.158+00:00] W (1438931) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:17:28.160+00:00] I (1440760) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:17:28.160+00:00] I (1440760) RouteLoom: owner polls=358276 empty=355644 rxq_max=3 max_us rx=135476 bootstrap=492660 node=15039 security=696565
+[2026-09-29T22:17:28.160+00:00] I (1440765) RouteLoom: owner expiry_slots=128978640 hop_accept_expired=8
+[2026-09-29T22:17:28.160+00:00] I (1440771) RouteLoom: HIL HEAP free=83640 largest=67584 min=82424 B
+[2026-09-29T22:17:28.160+00:00] I (1440777) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=5 stale=4 probes=161 send_failures=5648 kind_rejects=0
+[2026-09-29T22:17:28.160+00:00] I (1440789) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=4
+[2026-09-29T22:17:28.160+00:00] I (1440796) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:17:28.160+00:00] I (1440902) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:17:28.961+00:00] W (1441693) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:29.962+00:00] W (1442702) rl_migrate: migration event PHASE_SWITCHING peer=0
+[2026-09-29T22:17:29.962+00:00] W (1442702) RouteLoomRef: diagnostic reason=PHASE_SWITCHING peer=0 message=none
+[2026-09-29T22:17:29.962+00:00] I (1442712) rl_migrate: radio generation now 14 after verified cutover
+[2026-09-29T22:17:29.962+00:00] W (1442713) rl_migrate: migration event PHASE_VERIFYING peer=0
+[2026-09-29T22:17:29.962+00:00] W (1442716) RouteLoomRef: diagnostic reason=PHASE_VERIFYING peer=0 message=none
+[2026-09-29T22:17:31.564+00:00] W (1444207) rl_migrate: migration event VERIFY_PASSED peer=1
+[2026-09-29T22:17:31.564+00:00] W (1444207) RouteLoomRef: diagnostic reason=VERIFY_PASSED peer=1 message=none
+[2026-09-29T22:17:31.564+00:00] W (1444209) rl_migrate: migration event PHASE_STABLE peer=0
+[2026-09-29T22:17:31.564+00:00] W (1444213) RouteLoomRef: diagnostic reason=PHASE_STABLE peer=0 message=none
+[2026-09-29T22:17:33.166+00:00] I (1445904) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:17:36.170+00:00] I (1448906) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:17:40.776+00:00] I (1453558) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:17:40.776+00:00] W (1453559) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:17:41.176+00:00] I (1453909) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:17:44.180+00:00] I (1456910) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:17:45.181+00:00] W (1457859) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:45.782+00:00] W (1458390) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:49.187+00:00] I (1461910) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:17:52.190+00:00] I (1464912) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:17:55.595+00:00] I (1468288) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:17:55.595+00:00] W (1468289) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:17:57.197+00:00] I (1469915) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:18:00.201+00:00] I (1472915) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:18:05.207+00:00] I (1477916) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:18:08.211+00:00] I (1480917) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:18:11.815+00:00] I (1484481) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:18:11.815+00:00] W (1484482) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:18:13.217+00:00] I (1485923) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5006 negative=0
+[2026-09-29T22:18:16.221+00:00] I (1488923) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:18:21.228+00:00] I (1493926) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:18:24.232+00:00] I (1496927) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:18:28.037+00:00] I (1500761) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:18:28.037+00:00] I (1500761) RouteLoom: owner polls=373188 empty=370463 rxq_max=3 max_us rx=135476 bootstrap=492660 node=15584 security=696565
+[2026-09-29T22:18:28.037+00:00] I (1500766) RouteLoom: owner expiry_slots=134346960 hop_accept_expired=8
+[2026-09-29T22:18:28.037+00:00] I (1500772) RouteLoom: HIL HEAP free=83640 largest=67584 min=82424 B
+[2026-09-29T22:18:28.037+00:00] I (1500778) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=5 stale=4 probes=165 send_failures=5649 kind_rejects=0
+[2026-09-29T22:18:28.037+00:00] I (1500790) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=4
+[2026-09-29T22:18:28.037+00:00] I (1500797) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:18:29.239+00:00] I (1501927) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:18:32.242+00:00] I (1504929) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:18:37.248+00:00] I (1509932) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:18:40.252+00:00] I (1512935) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:18:45.258+00:00] I (1517937) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:18:48.262+00:00] I (1520939) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:18:53.269+00:00] I (1525939) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:18:56.272+00:00] I (1528941) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:19:01.279+00:00] I (1533943) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:19:04.282+00:00] I (1536943) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:19:09.288+00:00] I (1541945) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:19:11.691+00:00] I (1544482) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:19:11.691+00:00] W (1544483) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:19:12.292+00:00] I (1544946) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:19:17.299+00:00] I (1549948) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:19:20.302+00:00] I (1552948) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:19:25.309+00:00] I (1557951) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:19:28.112+00:00] I (1560763) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:19:28.112+00:00] I (1560763) RouteLoom: owner polls=388144 empty=385363 rxq_max=3 max_us rx=135476 bootstrap=492660 node=15584 security=696565
+[2026-09-29T22:19:28.112+00:00] I (1560768) RouteLoom: owner expiry_slots=139731120 hop_accept_expired=8
+[2026-09-29T22:19:28.112+00:00] I (1560774) RouteLoom: HIL HEAP free=83640 largest=67584 min=82424 B
+[2026-09-29T22:19:28.112+00:00] I (1560780) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=5 stale=4 probes=168 send_failures=5651 kind_rejects=0
+[2026-09-29T22:19:28.112+00:00] I (1560792) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=4
+[2026-09-29T22:19:28.112+00:00] I (1560799) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:19:28.313+00:00] I (1560953) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:19:32.518+00:00] I (1565255) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:19:32.518+00:00] W (1565256) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:19:33.319+00:00] I (1565954) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:19:36.323+00:00] I (1568957) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:19:41.330+00:00] I (1573960) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:19:44.333+00:00] I (1576961) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:19:49.340+00:00] I (1581963) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:19:52.344+00:00] I (1584966) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:19:57.351+00:00] I (1589969) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:20:00.355+00:00] I (1592970) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:20:02.958+00:00] I (1595589) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:20:02.958+00:00] W (1595590) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:20:05.361+00:00] I (1597971) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5001 negative=0
+[2026-09-29T22:20:08.365+00:00] I (1600973) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:20:13.371+00:00] I (1605975) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:20:16.376+00:00] I (1608975) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:20:16.776+00:00] I (1609486) RouteLoomRef: message origin=1 session=3727643951 sequence=138 bytes=6
+[2026-09-29T22:20:16.976+00:00] I (1609768) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-29T22:20:17.177+00:00] W (1609768) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T22:20:17.177+00:00] I (1609785) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-29T22:20:17.177+00:00] W (1609786) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-29T22:20:17.577+00:00] I (1610295) RouteLoomRef: message origin=1 session=3727643951 sequence=139 bytes=6
+[2026-09-29T22:20:18.378+00:00] I (1611092) RouteLoomRef: message origin=1 session=3727643951 sequence=140 bytes=6
+[2026-09-29T22:20:19.179+00:00] I (1611897) RouteLoomRef: message origin=1 session=3727643951 sequence=141 bytes=6
+[2026-09-29T22:20:19.980+00:00] I (1612698) RouteLoomRef: message origin=1 session=3727643951 sequence=142 bytes=6
+[2026-09-29T22:20:20.781+00:00] I (1613502) RouteLoomRef: message origin=1 session=3727643951 sequence=143 bytes=6
+[2026-09-29T22:20:21.382+00:00] I (1613975) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5000 negative=0
+[2026-09-29T22:20:21.582+00:00] I (1614301) RouteLoomRef: message origin=1 session=3727643951 sequence=144 bytes=6
+[2026-09-29T22:20:22.383+00:00] I (1615101) RouteLoomRef: message origin=1 session=3727643951 sequence=145 bytes=6
+[2026-09-29T22:20:24.185+00:00] I (1616976) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:20:27.990+00:00] I (1620765) RouteLoom: stack hwm rl_owner 8792 B
+[2026-09-29T22:20:27.990+00:00] I (1620765) RouteLoom: owner polls=403061 empty=400176 rxq_max=3 max_us rx=135476 bootstrap=492660 node=15584 security=696565
+[2026-09-29T22:20:27.990+00:00] I (1620770) RouteLoom: owner expiry_slots=145101240 hop_accept_expired=8
+[2026-09-29T22:20:27.990+00:00] I (1620776) RouteLoom: HIL HEAP free=83640 largest=67584 min=82424 B
+[2026-09-29T22:20:28.190+00:00] I (1620782) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=5 stale=4 probes=171 send_failures=5651 kind_rejects=0
+[2026-09-29T22:20:28.190+00:00] I (1620794) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=50 seq=4
+[2026-09-29T22:20:28.190+00:00] I (1620801) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-29T22:20:29.191+00:00] I (1621979) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5003 negative=0
+[2026-09-29T22:20:32.195+00:00] I (1624981) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok
+[2026-09-29T22:20:37.201+00:00] I (1629983) RouteLoomRef: HIL GW RESOLVE end gw=1 state=4 ms=5002 negative=0
+[2026-09-29T22:20:40.205+00:00] I (1632985) RouteLoomRef: HIL GW RESOLVE start gw=1 ok=1 detail=ok

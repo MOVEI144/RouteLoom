@@ -1,0 +1,85 @@
+/home/sahur/.local/bin/esptool --chip esp32c3 --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00 -b 460800 --after no-reset write-flash --flash-mode keep --flash-freq keep --flash-size keep 0x10000 /home/sahur/orca/workspaces/RouteLoom/v2-h1/artifacts/hil/images/h1-br-plan-ns/images/ota_data_initial.bin 0x40000 /home/sahur/orca/workspaces/RouteLoom/v2-h1/artifacts/hil/images/h1-br-plan-ns/images/application.bin
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00:
+Connecting...
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:7a:26:ac
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+Changing baud rate to 460800...
+Changed.
+
+Configuring flash size...
+
+Writing '/home/sahur/orca/workspaces/RouteLoom/v2-h1/artifacts/hil/images/h1-br-plan-ns/images/ota_data_initial.bin' at 0x00010000...
+Flash will be erased from 0x00010000 to 0x00011fff...
+Compressed 8192 bytes to 31...
+Writing at 0x00012000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 31B/31B [0s] 
+Wrote 8192 bytes (31 compressed) at 0x00010000 in 0.1 seconds (1252.4 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Writing '/home/sahur/orca/workspaces/RouteLoom/v2-h1/artifacts/hil/images/h1-br-plan-ns/images/application.bin' at 0x00040000...
+Flash will be erased from 0x00040000 to 0x00172fff...
+Compressed 1254576 bytes to 803000...
+Writing at 0x0004c054 ╸                                2.0% 16.00kB/784.18kB [0s] 
+Writing at 0x00057e22 ━                                4.1% 32.00kB/784.18kB [0s] 
+Writing at 0x0005ec68 ━╸                               6.1% 48.00kB/784.18kB [1s] 
+Writing at 0x00067e55 ━━                               8.2% 64.00kB/784.18kB [1s] 
+Writing at 0x0006d9ae ━━━                             10.2% 80.00kB/784.18kB [2s] 
+Writing at 0x00073993 ━━━╸                            12.2% 96.00kB/784.18kB [2s] 
+Writing at 0x00079c26 ━━━━                            14.3% 112.00kB/784.18kB [3s] 
+Writing at 0x0007f891 ━━━━╸                           16.3% 128.00kB/784.18kB [4s] 
+Writing at 0x000856c6 ━━━━━╸                          18.4% 144.00kB/784.18kB [4s] 
+Writing at 0x0008b8c2 ━━━━━━                          20.4% 160.00kB/784.18kB [4s] 
+Writing at 0x000914e4 ━━━━━━╸                         22.4% 176.00kB/784.18kB [5s] 
+Writing at 0x000970dd ━━━━━━━                         24.5% 192.00kB/784.18kB [5s] 
+Writing at 0x0009d0a0 ━━━━━━━╸                        26.5% 208.00kB/784.18kB [5s] 
+Writing at 0x000a2a8a ━━━━━━━━╸                       28.6% 224.00kB/784.18kB [5s] 
+Writing at 0x000a87c9 ━━━━━━━━━                       30.6% 240.00kB/784.18kB [5s] 
+Writing at 0x000ae0b6 ━━━━━━━━━╸                      32.6% 256.00kB/784.18kB [5s] 
+Writing at 0x000b391e ━━━━━━━━━━                      34.7% 272.00kB/784.18kB [5s] 
+Writing at 0x000b951e ━━━━━━━━━━━                     36.7% 288.00kB/784.18kB [5s] 
+Writing at 0x000bf0df ━━━━━━━━━━━╸                    38.8% 304.00kB/784.18kB [6s] 
+Writing at 0x000c512f ━━━━━━━━━━━━                    40.8% 320.00kB/784.18kB [6s] 
+Writing at 0x000cad46 ━━━━━━━━━━━━╸                   42.8% 336.00kB/784.18kB [6s] 
+Writing at 0x000d0689 ━━━━━━━━━━━━━                   44.9% 352.00kB/784.18kB [6s] 
+Writing at 0x000d6280 ━━━━━━━━━━━━━━                  46.9% 368.00kB/784.18kB [6s] 
+Writing at 0x000dc368 ━━━━━━━━━━━━━━╸                 49.0% 384.00kB/784.18kB [6s] 
+Writing at 0x000e22b2 ━━━━━━━━━━━━━━━                 51.0% 400.00kB/784.18kB [6s] 
+Writing at 0x000e888c ━━━━━━━━━━━━━━━╸                53.0% 416.00kB/784.18kB [6s] 
+Writing at 0x000eec5d ━━━━━━━━━━━━━━━━╸               55.1% 432.00kB/784.18kB [6s] 
+Writing at 0x000f49d0 ━━━━━━━━━━━━━━━━━               57.1% 448.00kB/784.18kB [6s] 
+Writing at 0x000fa7ae ━━━━━━━━━━━━━━━━━╸              59.2% 464.00kB/784.18kB [6s] 
+Writing at 0x001004f4 ━━━━━━━━━━━━━━━━━━              61.2% 480.00kB/784.18kB [7s] 
+Writing at 0x001065f7 ━━━━━━━━━━━━━━━━━━╸             63.3% 496.00kB/784.18kB [7s] 
+Writing at 0x0010cb9a ━━━━━━━━━━━━━━━━━━━╸            65.3% 512.00kB/784.18kB [7s] 
+Writing at 0x00112702 ━━━━━━━━━━━━━━━━━━━━            67.3% 528.00kB/784.18kB [7s] 
+Writing at 0x00118470 ━━━━━━━━━━━━━━━━━━━━╸           69.4% 544.00kB/784.18kB [7s] 
+Writing at 0x0011e19c ━━━━━━━━━━━━━━━━━━━━━           71.4% 560.00kB/784.18kB [7s] 
+Writing at 0x00123a6b ━━━━━━━━━━━━━━━━━━━━━━          73.5% 576.00kB/784.18kB [7s] 
+Writing at 0x001298a0 ━━━━━━━━━━━━━━━━━━━━━━╸         75.5% 592.00kB/784.18kB [7s] 
+Writing at 0x001303d6 ━━━━━━━━━━━━━━━━━━━━━━━         77.5% 608.00kB/784.18kB [7s] 
+Writing at 0x0013612a ━━━━━━━━━━━━━━━━━━━━━━━╸        79.6% 624.00kB/784.18kB [7s] 
+Writing at 0x0013bc1c ━━━━━━━━━━━━━━━━━━━━━━━━        81.6% 640.00kB/784.18kB [7s] 
+Writing at 0x001424b3 ━━━━━━━━━━━━━━━━━━━━━━━━━       83.7% 656.00kB/784.18kB [8s] 
+Writing at 0x00148549 ━━━━━━━━━━━━━━━━━━━━━━━━━╸      85.7% 672.00kB/784.18kB [8s] 
+Writing at 0x0014e4bc ━━━━━━━━━━━━━━━━━━━━━━━━━━      87.7% 688.00kB/784.18kB [8s] 
+Writing at 0x00154387 ━━━━━━━━━━━━━━━━━━━━━━━━━━╸     89.8% 704.00kB/784.18kB [8s] 
+Writing at 0x00159bb6 ━━━━━━━━━━━━━━━━━━━━━━━━━━━╸    91.8% 720.00kB/784.18kB [8s] 
+Writing at 0x0015f2d2 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━    93.9% 736.00kB/784.18kB [8s] 
+Writing at 0x001647fc ━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸   95.9% 752.00kB/784.18kB [8s] 
+Writing at 0x0016a45b ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   97.9% 768.00kB/784.18kB [8s] 
+Writing at 0x00170a39 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸ 100.0% 784.00kB/784.18kB [8s] 
+Writing at 0x001724b0 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 784.18kB/784.18kB [8s] 
+Wrote 1254576 bytes (803000 compressed) at 0x00040000 in 8.9 seconds (1122.4 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Staying in bootloader.

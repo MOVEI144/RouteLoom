@@ -1,0 +1,137 @@
+[2026-09-29T20:29:39.698+00:00] !! opened
+[2026-09-29T20:29:41.701+00:00] I (867) RouteLoomRef: sdkv1 identity: node=3 kid=72b2282f385b2d8I (4586) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-29T20:29:41.701+00:00] W (4586) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T20:29:42.903+00:00] I (5934) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-29T20:29:42.903+00:00] W (5935) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T20:29:44.926+00:00] I (7937) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-29T20:29:44.926+00:00] W (7938) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T20:29:46.129+00:00] I (9014) RouteLoomRef: discovery event=BOUND peer=2
+[2026-09-29T20:29:46.129+00:00] W (9014) RouteLoomRef: diagnostic reason=BOUND peer=2 message=none
+[2026-09-29T20:29:46.129+00:00] I (9091) RouteLoomRef: discovery event=REACHABLE peer=2
+[2026-09-29T20:29:46.129+00:00] W (9092) RouteLoomRef: diagnostic reason=REACHABLE peer=2 message=none
+[2026-09-29T20:29:46.530+00:00] W (9468) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-29T20:29:47.131+00:00] W (10128) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=2 message=present
+[2026-09-29T20:29:47.131+00:00] W (10162) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=2 message=present
+[2026-09-29T20:29:47.532+00:00] W (10502) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=2 message=present
+[2026-09-29T20:29:47.733+00:00] W (10746) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=2 message=present
+[2026-09-29T20:30:01.969+00:00] I (24988) RouteLoomRef: message origin=1 session=1976256843 sequence=14 bytes=9
+[2026-09-29T20:30:04.026+00:00] I (26983) RouteLoomRef: message origin=1 session=1976256843 sequence=15 bytes=9
+[2026-09-29T20:30:06.030+00:00] I (28990) RouteLoomRef: message origin=1 session=1976256843 sequence=16 bytes=9
+[2026-09-29T20:30:08.048+00:00] I (30983) RouteLoomRef: message origin=1 session=1976256843 sequence=17 bytes=9
+[2026-09-29T20:30:10.052+00:00] I (32980) RouteLoomRef: message origin=1 session=1976256843 sequence=18 bytes=9
+[2026-09-29T20:30:12.078+00:00] I (34981) RouteLoomRef: message origin=1 session=1976256843 sequence=19 bytes=9
+[2026-09-29T20:30:14.084+00:00] I (36986) RouteLoomRef: message origin=1 session=1976256843 sequence=20 bytes=9
+[2026-09-29T20:30:16.088+00:00] I (38986) RouteLoomRef: message origin=1 session=1976256843 sequence=21 bytes=9
+[2026-09-29T20:30:18.093+00:00] I (40997) RouteLoomRef: message origin=1 session=1976256843 sequence=22 bytes=9
+[2026-09-29T20:30:20.095+00:00] I (42989) RouteLoomRef: message origin=1 session=1976256843 sequence=23 bytes=9
+[2026-09-29T20:30:22.107+00:00] I (44991) RouteLoomRef: message origin=1 session=1976256843 sequence=24 bytes=9
+[2026-09-29T20:30:23.948+00:00] I (46989) RouteLoomRef: message origin=1 session=1976256843 sequence=25 bytes=9
+[2026-09-29T20:30:25.958+00:00] I (48983) RouteLoomRef: message origin=1 session=1976256843 sequence=26 bytes=9
+[2026-09-29T20:30:27.961+00:00] I (50988) RouteLoomRef: message origin=1 session=1976256843 sequence=27 bytes=9
+[2026-09-29T20:30:29.964+00:00] I (52980) RouteLoomRef: message origin=1 session=1976256843 sequence=28 bytes=9
+[2026-09-29T20:30:31.967+00:00] I (54981) RouteLoomRef: message origin=1 session=1976256843 sequence=29 bytes=9
+[2026-09-29T20:30:33.970+00:00] I (56983) RouteLoomRef: message origin=1 session=1976256843 sequence=30 bytes=9
+[2026-09-29T20:30:35.984+00:00] I (58987) RouteLoomRef: message origin=1 session=1976256843 sequence=31 bytes=9
+[2026-09-29T20:30:37.586+00:00] I (60455) RouteLoom: stack hwm rl_owner 10376 B
+[2026-09-29T20:30:37.586+00:00] I (60455) RouteLoom: owner polls=18944 empty=18769 rxq_max=1 max_us rx=4013 bootstrap=4851 node=3107 security=959489
+[2026-09-29T20:30:37.586+00:00] I (60459) RouteLoom: owner expiry_slots=2576112 hop_accept_expired=4
+[2026-09-29T20:30:37.586+00:00] I (60465) RouteLoom: HIL HEAP free=175136 largest=159744 min=174272 B
+[2026-09-29T20:30:37.586+00:00] I (60471) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=3 send_failures=11 kind_rejects=0
+[2026-09-29T20:30:37.586+00:00] I (60482) RouteLoom: HIL ROUTE peer=1 phase=-1 via=2 metric=2 generation=12 seq=1
+[2026-09-29T20:30:37.586+00:00] I (60489) RouteLoom: HIL ROUTE peer=2 phase=5 via=2 metric=1 generation=12 seq=1
+[2026-09-29T20:30:37.987+00:00] I (60986) RouteLoomRef: message origin=1 session=1976256843 sequence=32 bytes=9
+[2026-09-29T20:30:39.990+00:00] I (62982) RouteLoomRef: message origin=1 session=1976256843 sequence=33 bytes=9
+[2026-09-29T20:30:41.993+00:00] I (64985) RouteLoomRef: message origin=1 session=1976256843 sequence=34 bytes=9
+[2026-09-29T20:30:43.996+00:00] I (66979) RouteLoomRef: message origin=1 session=1976256843 sequence=35 bytes=9
+[2026-09-29T20:30:46.001+00:00] I (68980) RouteLoomRef: message origin=1 session=1976256843 sequence=36 bytes=9
+[2026-09-29T20:30:48.004+00:00] I (70994) RouteLoomRef: message origin=1 session=1976256843 sequence=37 bytes=9
+[2026-09-29T20:30:50.007+00:00] I (72982) RouteLoomRef: message origin=1 session=1976256843 sequence=38 bytes=9
+[2026-09-29T20:30:52.010+00:00] I (74988) RouteLoomRef: message origin=1 session=1976256843 sequence=39 bytes=9
+[2026-09-29T20:30:54.014+00:00] I (76985) RouteLoomRef: message origin=1 session=1976256843 sequence=40 bytes=9
+[2026-09-29T20:30:56.017+00:00] I (78983) RouteLoomRef: message origin=1 session=1976256843 sequence=41 bytes=9
+[2026-09-29T20:30:58.021+00:00] I (80983) RouteLoomRef: message origin=1 session=1976256843 sequence=42 bytes=9
+[2026-09-29T20:31:00.024+00:00] I (82989) RouteLoomRef: message origin=1 session=1976256843 sequence=43 bytes=9
+[2026-09-29T20:31:02.027+00:00] I (84982) RouteLoomRef: message origin=1 session=1976256843 sequence=44 bytes=9
+[2026-09-29T20:31:04.031+00:00] I (86983) RouteLoomRef: message origin=1 session=1976256843 sequence=45 bytes=9
+[2026-09-29T20:31:06.034+00:00] I (88987) RouteLoomRef: message origin=1 session=1976256843 sequence=46 bytes=9
+[2026-09-29T20:31:08.038+00:00] I (90986) RouteLoomRef: message origin=1 session=1976256843 sequence=47 bytes=9
+[2026-09-29T20:31:10.043+00:00] I (92988) RouteLoomRef: message origin=1 session=1976256843 sequence=48 bytes=9
+[2026-09-29T20:31:12.046+00:00] I (94982) RouteLoomRef: message origin=1 session=1976256843 sequence=49 bytes=9
+[2026-09-29T20:31:14.049+00:00] I (96983) RouteLoomRef: message origin=1 session=1976256843 sequence=50 bytes=9
+[2026-09-29T20:31:16.052+00:00] I (98983) RouteLoomRef: message origin=1 session=1976256843 sequence=51 bytes=9
+[2026-09-29T20:31:18.056+00:00] I (100983) RouteLoomRef: message origin=1 session=1976256843 sequence=52 bytes=9
+[2026-09-29T20:31:20.059+00:00] I (102989) RouteLoomRef: message origin=1 session=1976256843 sequence=53 bytes=9
+[2026-09-29T20:31:22.062+00:00] I (104980) RouteLoomRef: message origin=1 session=1976256843 sequence=54 bytes=9
+[2026-09-29T20:31:24.065+00:00] I (106989) RouteLoomRef: message origin=1 session=1976256843 sequence=55 bytes=9
+[2026-09-29T20:31:26.068+00:00] I (108983) RouteLoomRef: message origin=1 session=1976256843 sequence=56 bytes=9
+[2026-09-29T20:31:28.071+00:00] I (110980) RouteLoomRef: message origin=1 session=1976256843 sequence=57 bytes=9
+[2026-09-29T20:31:30.074+00:00] I (112983) RouteLoomRef: message origin=1 session=1976256843 sequence=58 bytes=9
+[2026-09-29T20:31:32.077+00:00] I (114982) RouteLoomRef: message origin=1 session=1976256843 sequence=59 bytes=9
+[2026-09-29T20:31:34.080+00:00] I (116986) RouteLoomRef: message origin=1 session=1976256843 sequence=60 bytes=9
+[2026-09-29T20:31:36.082+00:00] I (118983) RouteLoomRef: message origin=1 session=1976256843 sequence=61 bytes=9
+[2026-09-29T20:31:37.484+00:00] I (120455) RouteLoom: stack hwm rl_owner 10376 B
+[2026-09-29T20:31:37.484+00:00] I (120455) RouteLoom: owner polls=38686 empty=38358 rxq_max=1 max_us rx=4013 bootstrap=4851 node=3107 security=959489
+[2026-09-29T20:31:37.484+00:00] I (120459) RouteLoom: owner expiry_slots=5261024 hop_accept_expired=4
+[2026-09-29T20:31:37.484+00:00] I (120465) RouteLoom: HIL HEAP free=175136 largest=159744 min=174272 B
+[2026-09-29T20:31:37.484+00:00] I (120471) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=6 send_failures=12 kind_rejects=0
+[2026-09-29T20:31:37.484+00:00] I (120483) RouteLoom: HIL ROUTE peer=1 phase=-1 via=2 metric=2 generation=12 seq=1
+[2026-09-29T20:31:37.484+00:00] I (120490) RouteLoom: HIL ROUTE peer=2 phase=5 via=2 metric=1 generation=12 seq=1
+[2026-09-29T20:31:38.086+00:00] I (120986) RouteLoomRef: message origin=1 session=1976256843 sequence=62 bytes=9
+[2026-09-29T20:31:40.089+00:00] I (122989) RouteLoomRef: message origin=1 session=1976256843 sequence=63 bytes=9
+[2026-09-29T20:31:42.092+00:00] I (124982) RouteLoomRef: message origin=1 session=1976256843 sequence=64 bytes=9
+[2026-09-29T20:31:44.095+00:00] I (126983) RouteLoomRef: message origin=1 session=1976256843 sequence=65 bytes=9
+[2026-09-29T20:31:46.097+00:00] I (128980) RouteLoomRef: message origin=1 session=1976256843 sequence=66 bytes=9
+[2026-09-29T20:31:48.103+00:00] I (130983) RouteLoomRef: message origin=1 session=1976256843 sequence=67 bytes=9
+[2026-09-29T20:31:50.105+00:00] I (132980) RouteLoomRef: message origin=1 session=1976256843 sequence=68 bytes=9
+[2026-09-29T20:31:52.108+00:00] I (134982) RouteLoomRef: message origin=1 session=1976256843 sequence=69 bytes=9
+[2026-09-29T20:31:54.111+00:00] I (136986) RouteLoomRef: message origin=1 session=1976256843 sequence=70 bytes=9
+[2026-09-29T20:31:56.114+00:00] I (138992) RouteLoomRef: message origin=1 session=1976256843 sequence=71 bytes=9
+[2026-09-29T20:31:58.118+00:00] I (140980) RouteLoomRef: message origin=1 session=1976256843 sequence=72 bytes=9
+[2026-09-29T20:32:00.120+00:00] I (142986) RouteLoomRef: message origin=1 session=1976256843 sequence=73 bytes=9
+[2026-09-29T20:32:01.922+00:00] I (144982) RouteLoomRef: message origin=1 session=1976256843 sequence=74 bytes=9
+[2026-09-29T20:32:04.125+00:00] I (146986) RouteLoomRef: message origin=1 session=1976256843 sequence=75 bytes=9
+[2026-09-29T20:32:05.927+00:00] I (148983) RouteLoomRef: message origin=1 session=1976256843 sequence=76 bytes=9
+[2026-09-29T20:32:07.930+00:00] I (150982) RouteLoomRef: message origin=1 session=1976256843 sequence=77 bytes=9
+[2026-09-29T20:32:09.933+00:00] I (152989) RouteLoomRef: message origin=1 session=1976256843 sequence=78 bytes=9
+[2026-09-29T20:32:11.935+00:00] I (154988) RouteLoomRef: message origin=1 session=1976256843 sequence=79 bytes=9
+[2026-09-29T20:32:13.938+00:00] I (156983) RouteLoomRef: message origin=1 session=1976256843 sequence=80 bytes=9
+[2026-09-29T20:32:15.943+00:00] I (158980) RouteLoomRef: message origin=1 session=1976256843 sequence=81 bytes=9
+[2026-09-29T20:32:17.946+00:00] I (160982) RouteLoomRef: message origin=1 session=1976256843 sequence=82 bytes=9
+[2026-09-29T20:32:19.948+00:00] I (162983) RouteLoomRef: message origin=1 session=1976256843 sequence=83 bytes=9
+[2026-09-29T20:32:21.950+00:00] I (164985) RouteLoomRef: message origin=1 session=1976256843 sequence=84 bytes=9
+[2026-09-29T20:32:23.953+00:00] I (166980) RouteLoomRef: message origin=1 session=1976256843 sequence=85 bytes=9
+[2026-09-29T20:32:25.955+00:00] I (168980) RouteLoomRef: message origin=1 session=1976256843 sequence=86 bytes=9
+[2026-09-29T20:32:27.958+00:00] I (170983) RouteLoomRef: message origin=1 session=1976256843 sequence=87 bytes=9
+[2026-09-29T20:32:29.960+00:00] I (172980) RouteLoomRef: message origin=1 session=1976256843 sequence=88 bytes=9
+[2026-09-29T20:32:31.962+00:00] I (174982) RouteLoomRef: message origin=1 session=1976256843 sequence=89 bytes=9
+[2026-09-29T20:32:33.965+00:00] I (176980) RouteLoomRef: message origin=1 session=1976256843 sequence=90 bytes=9
+[2026-09-29T20:32:35.967+00:00] I (178983) RouteLoomRef: message origin=1 session=1976256843 sequence=91 bytes=9
+[2026-09-29T20:32:37.569+00:00] I (180456) RouteLoom: stack hwm rl_owner 10376 B
+[2026-09-29T20:32:37.569+00:00] I (180456) RouteLoom: owner polls=58474 empty=58008 rxq_max=1 max_us rx=4013 bootstrap=4851 node=3107 security=959489
+[2026-09-29T20:32:37.569+00:00] I (180460) RouteLoom: owner expiry_slots=7952192 hop_accept_expired=4
+[2026-09-29T20:32:37.569+00:00] I (180466) RouteLoom: HIL HEAP free=175136 largest=159744 min=174272 B
+[2026-09-29T20:32:37.569+00:00] I (180472) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=9 send_failures=12 kind_rejects=0
+[2026-09-29T20:32:37.569+00:00] I (180484) RouteLoom: HIL ROUTE peer=1 phase=-1 via=2 metric=2 generation=12 seq=1
+[2026-09-29T20:32:37.569+00:00] I (180491) RouteLoom: HIL ROUTE peer=2 phase=5 via=2 metric=1 generation=12 seq=1
+[2026-09-29T20:32:37.970+00:00] I (180984) RouteLoomRef: message origin=1 session=1976256843 sequence=92 bytes=9
+[2026-09-29T20:32:39.972+00:00] I (182986) RouteLoomRef: message origin=1 session=1976256843 sequence=93 bytes=9
+[2026-09-29T20:32:41.975+00:00] I (184988) RouteLoomRef: message origin=1 session=1976256843 sequence=94 bytes=9
+[2026-09-29T20:32:43.977+00:00] I (186986) RouteLoomRef: message origin=1 session=1976256843 sequence=95 bytes=9
+[2026-09-29T20:32:45.979+00:00] I (188986) RouteLoomRef: message origin=1 session=1976256843 sequence=96 bytes=9
+[2026-09-29T20:32:47.982+00:00] I (190989) RouteLoomRef: message origin=1 session=1976256843 sequence=97 bytes=9
+[2026-09-29T20:32:49.984+00:00] I (192983) RouteLoomRef: message origin=1 session=1976256843 sequence=98 bytes=9
+[2026-09-29T20:32:51.987+00:00] I (194985) RouteLoomRef: message origin=1 session=1976256843 sequence=99 bytes=9
+[2026-09-29T20:32:53.989+00:00] I (196980) RouteLoomRef: message origin=1 session=1976256843 sequence=100 bytes=9
+[2026-09-29T20:32:55.992+00:00] I (198980) RouteLoomRef: message origin=1 session=1976256843 sequence=101 bytes=9
+[2026-09-29T20:32:57.995+00:00] I (200980) RouteLoomRef: message origin=1 session=1976256843 sequence=102 bytes=9
+[2026-09-29T20:32:59.997+00:00] I (202989) RouteLoomRef: message origin=1 session=1976256843 sequence=103 bytes=9
+[2026-09-29T20:33:02.000+00:00] I (204982) RouteLoomRef: message origin=1 session=1976256843 sequence=104 bytes=9
+[2026-09-29T20:33:04.002+00:00] I (206986) RouteLoomRef: message origin=1 session=1976256843 sequence=105 bytes=9
+[2026-09-29T20:33:06.005+00:00] I (208983) RouteLoomRef: message origin=1 session=1976256843 sequence=106 bytes=9
+[2026-09-29T20:33:08.008+00:00] I (210983) RouteLoomRef: message origin=1 session=1976256843 sequence=107 bytes=9
+[2026-09-29T20:33:10.010+00:00] I (212983) RouteLoomRef: message origin=1 session=1976256843 sequence=108 bytes=9
+[2026-09-29T20:33:12.013+00:00] I (214985) RouteLoomRef: message origin=1 session=1976256843 sequence=109 bytes=9
+[2026-09-29T20:33:14.015+00:00] I (216986) RouteLoomRef: message origin=1 session=1976256843 sequence=110 bytes=9
+[2026-09-29T20:33:16.018+00:00] I (218986) RouteLoomRef: message origin=1 session=1976256843 sequence=111 bytes=9
+[2026-09-29T20:33:18.020+00:00] I (220982) RouteLoomRef: message origin=1 session=1976256843 sequence=112 bytes=9
+[2026-09-29T20:33:20.023+00:00] I (222983) RouteLoomRef: message origin=1 session=1976256843 sequence=113 bytes=9

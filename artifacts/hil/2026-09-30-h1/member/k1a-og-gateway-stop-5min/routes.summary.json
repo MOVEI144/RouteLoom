@@ -1,0 +1,14 @@
+{
+  "expected": [
+    "0000000000000002",
+    "0000000000000003"
+  ],
+  "authenticated_at_s": 4.138,
+  "routes_at_s": {
+    "0000000000000002": 4.138,
+    "0000000000000003": 4.138
+  },
+  "all_routes_at_s": 4.138,
+  "elapsed_s": 4.142,
+  "source": "/home/sahur/orca/workspaces/RouteLoom/v2-h1/artifacts/hil/2026-09-30-h1/member/k1a-og-gateway-stop-5min/routes.jsonl"
+}

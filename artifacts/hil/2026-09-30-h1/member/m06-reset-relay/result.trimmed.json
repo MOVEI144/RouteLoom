@@ -1,0 +1,2203 @@
+{
+ "board": "relay",
+ "identity": {
+  "chip": "esp32c6",
+  "mac": "10:bd:a3:ff:fe:b1:48:a8",
+  "log": "flash-relay-preflight.log"
+ },
+ "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00",
+ "destination": 3,
+ "cycles": 10,
+ "sends": 10,
+ "hold_s": 0.5,
+ "send_gap_s": 2.0,
+ "started_unix": 1790715424.8451357,
+ "baseline": [
+  {
+   "label": "B0",
+   "admission_attempts": 1,
+   "response": {
+    "accepted": true,
+    "request": 1
+   },
+   "admitted_unix": 1790715425.8510213,
+   "delivery": {
+    "request": 1,
+    "destination": 3,
+    "state": "expired",
+    "reason": "DEADLINE_EXPIRED",
+    "msg_session": 117418528,
+    "msg_seq": 9,
+    "updated_ms": 1790715430867
+   },
+   "latency_ms": 5039.12
+  },
+  {
+   "label": "B1",
+   "admission_attempts": 1,
+   "response": {
+    "accepted": true,
+    "request": 2
+   },
+   "admitted_unix": 1790715432.8944194,
+   "delivery": {
+    "request": 2,
+    "destination": 3,
+    "state": "expired",
+    "reason": "DEADLINE_EXPIRED",
+    "msg_session": 117418528,
+    "msg_seq": 14,
+    "updated_ms": 1790715437901
+   },
+   "latency_ms": 5017.81
+  },
+  {
+   "label": "B2",
+   "admission_attempts": 1,
+   "response": {
+    "accepted": true,
+    "request": 3
+   },
+   "admitted_unix": 1790715439.9434633,
+   "delivery": {
+    "request": 3,
+    "destination": 3,
+    "state": "expired",
+    "reason": "DEADLINE_EXPIRED",
+    "msg_session": 117418528,
+    "msg_seq": 15,
+    "updated_ms": 1790715444926
+   },
+   "latency_ms": 5046.38
+  }
+ ],
+ "cycle_results": [
+  {
+   "cycle": 0,
+   "released_unix": 1790715447.472583,
+   "actual_hold_s": 0.502,
+   "sends": [
+    {
+     "label": "C0-0",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 4
+     },
+     "admitted_unix": 1790715447.498016,
+     "delivery": {
+      "request": 4,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 16,
+      "updated_ms": 1790715452487
+     },
+     "latency_ms": 5048.57,
+     "offset_s": 5.061
+    },
+    {
+     "label": "C0-1",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 5
+     },
+     "admitted_unix": 1790715454.5392814,
+     "delivery": {
+      "request": 5,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 17,
+      "updated_ms": 1790715459545
+     },
+     "latency_ms": 5024.29,
+     "offset_s": 12.093
+    },
+    {
+     "label": "C0-2",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 6
+     },
+     "admitted_unix": 1790715461.5729277,
+     "delivery": {
+      "request": 6,
+      "destination": 0,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 18,
+      "updated_ms": 1790715466579
+     },
+     "latency_ms": 5028.27,
+     "offset_s": 19.13
+    },
+    {
+     "label": "C0-3",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 7
+     },
+     "admitted_unix": 1790715468.6085472,
+     "delivery": {
+      "request": 7,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 19,
+      "updated_ms": 1790715473617
+     },
+     "latency_ms": 5017.9,
+     "offset_s": 26.156
+    },
+    {
+     "label": "C0-4",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 8
+     },
+     "admitted_unix": 1790715475.6353958,
+     "delivery": {
+      "request": 8,
+      "destination": 0,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 23,
+      "updated_ms": 1790715480639
+     },
+     "latency_ms": 5025.61,
+     "offset_s": 33.19
+    },
+    {
+     "label": "C0-5",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 9
+     },
+     "admitted_unix": 1790715482.6688073,
+     "delivery": {
+      "request": 9,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 24,
+      "updated_ms": 1790715484733
+     },
+     "latency_ms": 2077.86,
+     "offset_s": 37.275
+    },
+    {
+     "label": "C0-6",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 10
+     },
+     "admitted_unix": 1790715486.7518048,
+     "delivery": {
+      "request": 10,
+      "destination": 0,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 25,
+      "updated_ms": 1790715486858
+     },
+     "latency_ms": 115.11,
+     "offset_s": 39.396
+    },
+    {
+     "label": "C0-7",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 11
+     },
+     "admitted_unix": 1790715488.8705115,
+     "delivery": {
+      "request": 11,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 26,
+      "updated_ms": 1790715488969
+     },
+     "latency_ms": 113.94,
+     "offset_s": 41.514
+    },
+    {
+     "label": "C0-8",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 12
+     },
+     "admitted_unix": 1790715490.9898276,
+     "delivery": {
+      "request": 12,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 27,
+      "updated_ms": 1790715491091
+     },
+     "latency_ms": 111.31,
+     "offset_s": 43.63
+    },
+    {
+     "label": "C0-9",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 13
+     },
+     "admitted_unix": 1790715493.117061,
+     "delivery": {
+      "request": 13,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 28,
+      "updated_ms": 1790715493208
+     },
+     "latency_ms": 119.37,
+     "offset_s": 45.766
+    }
+   ],
+   "recovery_s": 35.197,
+   "delivered": 5,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 1,
+   "released_unix": 1790715497.7433314,
+   "actual_hold_s": 0.501,
+   "sends": [
+    {
+     "label": "C1-0",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 14
+     },
+     "admitted_unix": 1790715497.7472303,
+     "delivery": {
+      "request": 14,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 29,
+      "updated_ms": 1790715502755
+     },
+     "latency_ms": 5013.75,
+     "offset_s": 5.018
+    },
+    {
+     "label": "C1-1",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 15
+     },
+     "admitted_unix": 1790715504.7686057,
+     "delivery": {
+      "request": 15,
+      "destination": 0,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 30,
+      "updated_ms": 1790715509775
+     },
+     "latency_ms": 5019.38,
+     "offset_s": 12.045
+    },
+    {
+     "label": "C1-2",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 16
+     },
+     "admitted_unix": 1790715511.7976909,
+     "delivery": {
+      "request": 16,
+      "destination": 0,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 31,
+      "updated_ms": 1790715516802
+     },
+     "latency_ms": 5047.93,
+     "offset_s": 19.102
+    },
+    {
+     "label": "C1-3",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 17
+     },
+     "admitted_unix": 1790715518.8507752,
+     "delivery": {
+      "request": 17,
+      "destination": 0,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 32,
+      "updated_ms": 1790715523856
+     },
+     "latency_ms": 5063.69,
+     "offset_s": 26.171
+    },
+    {
+     "label": "C1-4",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 18
+     },
+     "admitted_unix": 1790715525.918578,
+     "delivery": {
+      "request": 18,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 33,
+      "updated_ms": 1790715530935
+     },
+     "latency_ms": 5065.35,
+     "offset_s": 33.241
+    },
+    {
+     "label": "C1-5",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 19
+     },
+     "admitted_unix": 1790715532.9888086,
+     "delivery": {
+      "request": 19,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 34,
+      "updated_ms": 1790715533945
+     },
+     "latency_ms": 1003.37,
+     "offset_s": 36.249
+    },
+    {
+     "label": "C1-6",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 20
+     },
+     "admitted_unix": 1790715535.996068,
+     "delivery": {
+      "request": 20,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 41,
+      "updated_ms": 1790715536105
+     },
+     "latency_ms": 116.8,
+     "offset_s": 38.37
+    },
+    {
+     "label": "C1-7",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 21
+     },
+     "admitted_unix": 1790715538.1169558,
+     "delivery": {
+      "request": 21,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 42,
+      "updated_ms": 1790715538213
+     },
+     "latency_ms": 116.05,
+     "offset_s": 40.49
+    },
+    {
+     "label": "C1-8",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 22
+     },
+     "admitted_unix": 1790715540.2379608,
+     "delivery": {
+      "request": 22,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 43,
+      "updated_ms": 1790715540340
+     },
+     "latency_ms": 116.53,
+     "offset_s": 42.611
+    },
+    {
+     "label": "C1-9",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 23
+     },
+     "admitted_unix": 1790715542.36327,
+     "delivery": {
+      "request": 23,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 44,
+      "updated_ms": 1790715542462
+     },
+     "latency_ms": 120.54,
+     "offset_s": 44.741
+    }
+   ],
+   "recovery_s": 35.246,
+   "delivered": 5,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 2,
+   "released_unix": 1790715546.989793,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C2-0",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 24
+     },
+     "admitted_unix": 1790715546.9954965,
+     "delivery": {
+      "request": 24,
+      "destination": 0,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 45,
+      "updated_ms": 1790715551999
+     },
+     "latency_ms": 5017.08,
+     "offset_s": 5.023
+    },
+    {
+     "label": "C2-1",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 25
+     },
+     "admitted_unix": 1790715554.0164945,
+     "delivery": {
+      "request": 25,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 64,
+      "updated_ms": 1790715559024
+     },
+     "latency_ms": 5044.94,
+     "offset_s": 12.072
+    },
+    {
+     "label": "C2-2",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 26
+     },
+     "admitted_unix": 1790715561.0662098,
+     "delivery": {
+      "request": 26,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 65,
+      "updated_ms": 1790715566076
+     },
+     "latency_ms": 5012.34,
+     "offset_s": 19.089
+    },
+    {
+     "label": "C2-3",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 27
+     },
+     "admitted_unix": 1790715568.0831356,
+     "delivery": {
+      "request": 27,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 66,
+      "updated_ms": 1790715573087
+     },
+     "latency_ms": 5022.84,
+     "offset_s": 26.116
+    },
+    {
+     "label": "C2-4",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 28
+     },
+     "admitted_unix": 1790715575.1119087,
+     "delivery": {
+      "request": 28,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 67,
+      "updated_ms": 1790715575274
+     },
+     "latency_ms": 169.7,
+     "offset_s": 28.292
+    },
+    {
+     "label": "C2-5",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 29
+     },
+     "admitted_unix": 1790715577.2865477,
+     "delivery": {
+      "request": 29,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 68,
+      "updated_ms": 1790715577387
+     },
+     "latency_ms": 113.31,
+     "offset_s": 30.41
+    },
+    {
+     "label": "C2-6",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 30
+     },
+     "admitted_unix": 1790715579.404667,
+     "delivery": {
+      "request": 30,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 69,
+      "updated_ms": 1790715579521
+     },
+     "latency_ms": 118.92,
+     "offset_s": 32.534
+    },
+    {
+     "label": "C2-7",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 31
+     },
+     "admitted_unix": 1790715581.5296712,
+     "delivery": {
+      "request": 31,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 70,
+      "updated_ms": 1790715581630
+     },
+     "latency_ms": 115.18,
+     "offset_s": 34.655
+    },
+    {
+     "label": "C2-8",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 32
+     },
+     "admitted_unix": 1790715583.6510437,
+     "delivery": {
+      "request": 32,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 71,
+      "updated_ms": 1790715583749
+     },
+     "latency_ms": 114.42,
+     "offset_s": 36.776
+    },
+    {
+     "label": "C2-9",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 33
+     },
+     "admitted_unix": 1790715585.7717948,
+     "delivery": {
+      "request": 33,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 72,
+      "updated_ms": 1790715585870
+     },
+     "latency_ms": 116.63,
+     "offset_s": 38.899
+    }
+   ],
+   "recovery_s": 28.122,
+   "delivered": 6,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 3,
+   "released_unix": 1790715590.395085,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C3-0",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 34
+     },
+     "admitted_unix": 1790715590.4011295,
+     "delivery": {
+      "request": 34,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 73,
+      "updated_ms": 1790715595409
+     },
+     "latency_ms": 5021.46,
+     "offset_s": 5.028
+    },
+    {
+     "label": "C3-1",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 35
+     },
+     "admitted_unix": 1790715597.4279916,
+     "delivery": {
+      "request": 35,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 74,
+      "updated_ms": 1790715602437
+     },
+     "latency_ms": 5013.11,
+     "offset_s": 12.046
+    },
+    {
+     "label": "C3-2",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 36
+     },
+     "admitted_unix": 1790715604.4459674,
+     "delivery": {
+      "request": 36,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 75,
+      "updated_ms": 1790715609455
+     },
+     "latency_ms": 5041.49,
+     "offset_s": 19.092
+    },
+    {
+     "label": "C3-3",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 37
+     },
+     "admitted_unix": 1790715611.4918523,
+     "delivery": {
+      "request": 37,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 76,
+      "updated_ms": 1790715616499
+     },
+     "latency_ms": 5009.74,
+     "offset_s": 26.107
+    },
+    {
+     "label": "C3-4",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 38
+     },
+     "admitted_unix": 1790715618.504772,
+     "delivery": {
+      "request": 38,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 81,
+      "updated_ms": 1790715623511
+     },
+     "latency_ms": 5033.32,
+     "offset_s": 33.143
+    },
+    {
+     "label": "C3-5",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 39
+     },
+     "admitted_unix": 1790715625.5401912,
+     "delivery": {
+      "request": 39,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 82,
+      "updated_ms": 1790715626652
+     },
+     "latency_ms": 1154.09,
+     "offset_s": 36.299
+    },
+    {
+     "label": "C3-6",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 40
+     },
+     "admitted_unix": 1790715628.6993318,
+     "delivery": {
+      "request": 40,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 91,
+      "updated_ms": 1790715628795
+     },
+     "latency_ms": 113.61,
+     "offset_s": 38.418
+    },
+    {
+     "label": "C3-7",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 41
+     },
+     "admitted_unix": 1790715630.8173795,
+     "delivery": {
+      "request": 41,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 92,
+      "updated_ms": 1790715630938
+     },
+     "latency_ms": 168.11,
+     "offset_s": 40.59
+    },
+    {
+     "label": "C3-8",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 42
+     },
+     "admitted_unix": 1790715632.9895191,
+     "delivery": {
+      "request": 42,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 93,
+      "updated_ms": 1790715633090
+     },
+     "latency_ms": 113.07,
+     "offset_s": 42.708
+    },
+    {
+     "label": "C3-9",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 43
+     },
+     "admitted_unix": 1790715635.1094432,
+     "delivery": {
+      "request": 43,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 94,
+      "updated_ms": 1790715635211
+     },
+     "latency_ms": 114.09,
+     "offset_s": 44.829
+    }
+   ],
+   "recovery_s": 35.145,
+   "delivered": 5,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 4,
+   "released_unix": 1790715639.7283795,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C4-0",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 44
+     },
+     "admitted_unix": 1790715639.7299192,
+     "delivery": {
+      "request": 44,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 95,
+      "updated_ms": 1790715644741
+     },
+     "latency_ms": 5050.57,
+     "offset_s": 5.052
+    },
+    {
+     "label": "C4-1",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 45
+     },
+     "admitted_unix": 1790715646.7872992,
+     "delivery": {
+      "request": 45,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 96,
+      "updated_ms": 1790715651793
+     },
+     "latency_ms": 5050.13,
+     "offset_s": 12.109
+    },
+    {
+     "label": "C4-2",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 46
+     },
+     "admitted_unix": 1790715653.8424878,
+     "delivery": {
+      "request": 46,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 97,
+      "updated_ms": 1790715658852
+     },
+     "latency_ms": 5044.4,
+     "offset_s": 19.159
+    },
+    {
+     "label": "C4-3",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 47
+     },
+     "admitted_unix": 1790715660.891717,
+     "delivery": {
+      "request": 47,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 98,
+      "updated_ms": 1790715665897
+     },
+     "latency_ms": 5041.85,
+     "offset_s": 26.205
+    },
+    {
+     "label": "C4-4",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 48
+     },
+     "admitted_unix": 1790715667.9377224,
+     "delivery": {
+      "request": 48,
+      "destination": 3,
+      "state": "failed",
+      "reason": "END_RECEIPT_TIMEOUT",
+      "msg_session": 117418528,
+      "msg_seq": 102,
+      "updated_ms": 1790715671627
+     },
+     "latency_ms": 3715.98,
+     "offset_s": 31.925
+    },
+    {
+     "label": "C4-5",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 49
+     },
+     "admitted_unix": 1790715673.6587903,
+     "delivery": {
+      "request": 49,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 103,
+      "updated_ms": 1790715676219
+     },
+     "latency_ms": 2583.89,
+     "offset_s": 36.514
+    },
+    {
+     "label": "C4-6",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 50
+     },
+     "admitted_unix": 1790715678.2465234,
+     "delivery": {
+      "request": 50,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 104,
+      "updated_ms": 1790715678349
+     },
+     "latency_ms": 113.39,
+     "offset_s": 38.632
+    },
+    {
+     "label": "C4-7",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 51
+     },
+     "admitted_unix": 1790715680.3655467,
+     "delivery": {
+      "request": 51,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 105,
+      "updated_ms": 1790715680478
+     },
+     "latency_ms": 169.03,
+     "offset_s": 40.806
+    },
+    {
+     "label": "C4-8",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 52
+     },
+     "admitted_unix": 1790715682.5392473,
+     "delivery": {
+      "request": 52,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 106,
+      "updated_ms": 1790715682633
+     },
+     "latency_ms": 113.56,
+     "offset_s": 42.924
+    },
+    {
+     "label": "C4-9",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 53
+     },
+     "admitted_unix": 1790715684.6563985,
+     "delivery": {
+      "request": 53,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 107,
+      "updated_ms": 1790715684753
+     },
+     "latency_ms": 113.23,
+     "offset_s": 45.041
+    }
+   ],
+   "recovery_s": 33.93,
+   "delivered": 5,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 5,
+   "released_unix": 1790715689.2756178,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C5-0",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 54
+     },
+     "admitted_unix": 1790715689.280263,
+     "delivery": {
+      "request": 54,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 108,
+      "updated_ms": 1790715694288
+     },
+     "latency_ms": 5034.27,
+     "offset_s": 5.039
+    },
+    {
+     "label": "C5-1",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 55
+     },
+     "admitted_unix": 1790715696.3199475,
+     "delivery": {
+      "request": 55,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 109,
+      "updated_ms": 1790715701330
+     },
+     "latency_ms": 5034.61,
+     "offset_s": 12.079
+    },
+    {
+     "label": "C5-2",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 56
+     },
+     "admitted_unix": 1790715703.3588428,
+     "delivery": {
+      "request": 56,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 110,
+      "updated_ms": 1790715708367
+     },
+     "latency_ms": 5031.13,
+     "offset_s": 19.114
+    },
+    {
+     "label": "C5-3",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 57
+     },
+     "admitted_unix": 1790715710.395657,
+     "delivery": {
+      "request": 57,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 111,
+      "updated_ms": 1790715715405
+     },
+     "latency_ms": 5039.6,
+     "offset_s": 26.16
+    },
+    {
+     "label": "C5-4",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 58
+     },
+     "admitted_unix": 1790715717.4404473,
+     "delivery": {
+      "request": 58,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 116,
+      "updated_ms": 1790715722450
+     },
+     "latency_ms": 5066.21,
+     "offset_s": 33.231
+    },
+    {
+     "label": "C5-5",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 59
+     },
+     "admitted_unix": 1790715724.5121186,
+     "delivery": {
+      "request": 59,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 117,
+      "updated_ms": 1790715726527
+     },
+     "latency_ms": 2023.49,
+     "offset_s": 37.26
+    },
+    {
+     "label": "C5-6",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 60
+     },
+     "admitted_unix": 1790715728.539442,
+     "delivery": {
+      "request": 60,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 127,
+      "updated_ms": 1790715728643
+     },
+     "latency_ms": 112.21,
+     "offset_s": 39.376
+    },
+    {
+     "label": "C5-7",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 61
+     },
+     "admitted_unix": 1790715730.655426,
+     "delivery": {
+      "request": 61,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 128,
+      "updated_ms": 1790715730756
+     },
+     "latency_ms": 113.23,
+     "offset_s": 41.493
+    },
+    {
+     "label": "C5-8",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 62
+     },
+     "admitted_unix": 1790715732.7733135,
+     "delivery": {
+      "request": 62,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 129,
+      "updated_ms": 1790715732872
+     },
+     "latency_ms": 115.3,
+     "offset_s": 43.613
+    },
+    {
+     "label": "C5-9",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 63
+     },
+     "admitted_unix": 1790715734.8921118,
+     "delivery": {
+      "request": 63,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 130,
+      "updated_ms": 1790715734990
+     },
+     "latency_ms": 114.62,
+     "offset_s": 45.731
+    }
+   ],
+   "recovery_s": 35.237,
+   "delivered": 5,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 6,
+   "released_unix": 1790715739.5132277,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C6-0",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 64
+     },
+     "admitted_unix": 1790715739.516362,
+     "delivery": {
+      "request": 64,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 131,
+      "updated_ms": 1790715744532
+     },
+     "latency_ms": 5061.98,
+     "offset_s": 5.065
+    },
+    {
+     "label": "C6-1",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 65
+     },
+     "admitted_unix": 1790715746.5822985,
+     "delivery": {
+      "request": 65,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 137,
+      "updated_ms": 1790715751592
+     },
+     "latency_ms": 5027.21,
+     "offset_s": 12.096
+    },
+    {
+     "label": "C6-2",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 66
+     },
+     "admitted_unix": 1790715753.6149638,
+     "delivery": {
+      "request": 66,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 138,
+      "updated_ms": 1790715758620
+     },
+     "latency_ms": 5038.01,
+     "offset_s": 19.14
+    },
+    {
+     "label": "C6-3",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 67
+     },
+     "admitted_unix": 1790715760.6587005,
+     "delivery": {
+      "request": 67,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 139,
+      "updated_ms": 1790715765671
+     },
+     "latency_ms": 5027.95,
+     "offset_s": 26.174
+    },
+    {
+     "label": "C6-4",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 68
+     },
+     "admitted_unix": 1790715767.690392,
+     "delivery": {
+      "request": 68,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 140,
+      "updated_ms": 1790715767787
+     },
+     "latency_ms": 115.4,
+     "offset_s": 28.293
+    },
+    {
+     "label": "C6-5",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 69
+     },
+     "admitted_unix": 1790715769.8152149,
+     "delivery": {
+      "request": 69,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 141,
+      "updated_ms": 1790715769919
+     },
+     "latency_ms": 113.63,
+     "offset_s": 30.416
+    },
+    {
+     "label": "C6-6",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 70
+     },
+     "admitted_unix": 1790715771.9346879,
+     "delivery": {
+      "request": 70,
+      "destination": 0,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 142,
+      "updated_ms": 1790715772029
+     },
+     "latency_ms": 112.68,
+     "offset_s": 32.534
+    },
+    {
+     "label": "C6-7",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 71
+     },
+     "admitted_unix": 1790715774.0652258,
+     "delivery": {
+      "request": 71,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 143,
+      "updated_ms": 1790715774177
+     },
+     "latency_ms": 120.15,
+     "offset_s": 34.672
+    },
+    {
+     "label": "C6-8",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 72
+     },
+     "admitted_unix": 1790715776.3026595,
+     "delivery": {
+      "request": 72,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 144,
+      "updated_ms": 1790715776422
+     },
+     "latency_ms": 173.2,
+     "offset_s": 36.963
+    },
+    {
+     "label": "C6-9",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 73
+     },
+     "admitted_unix": 1790715778.4840097,
+     "delivery": {
+      "request": 73,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 145,
+      "updated_ms": 1790715778583
+     },
+     "latency_ms": 125.6,
+     "offset_s": 39.096
+    }
+   ],
+   "recovery_s": 28.177,
+   "delivered": 6,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 7,
+   "released_unix": 1790715783.116788,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C7-0",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 74
+     },
+     "admitted_unix": 1790715783.1227663,
+     "delivery": {
+      "request": 74,
+      "destination": 0,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 146,
+      "updated_ms": 1790715788133
+     },
+     "latency_ms": 5040.54,
+     "offset_s": 5.047
+    },
+    {
+     "label": "C7-1",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 75
+     },
+     "admitted_unix": 1790715790.1694589,
+     "delivery": {
+      "request": 75,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 153,
+      "updated_ms": 1790715795178
+     },
+     "latency_ms": 5063.51,
+     "offset_s": 12.116
+    },
+    {
+     "label": "C7-2",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 76
+     },
+     "admitted_unix": 1790715797.2406807,
+     "delivery": {
+      "request": 76,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 154,
+      "updated_ms": 1790715802253
+     },
+     "latency_ms": 5071.49,
+     "offset_s": 19.195
+    },
+    {
+     "label": "C7-3",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 77
+     },
+     "admitted_unix": 1790715804.3237553,
+     "delivery": {
+      "request": 77,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 155,
+      "updated_ms": 1790715809325
+     },
+     "latency_ms": 5061.12,
+     "offset_s": 26.26
+    },
+    {
+     "label": "C7-4",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 78
+     },
+     "admitted_unix": 1790715811.383353,
+     "delivery": {
+      "request": 78,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 156,
+      "updated_ms": 1790715811635
+     },
+     "latency_ms": 294.33,
+     "offset_s": 28.561
+    },
+    {
+     "label": "C7-5",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 79
+     },
+     "admitted_unix": 1790715813.6880867,
+     "delivery": {
+      "request": 79,
+      "destination": 0,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 157,
+      "updated_ms": 1790715813789
+     },
+     "latency_ms": 128.17,
+     "offset_s": 30.7
+    },
+    {
+     "label": "C7-6",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 80
+     },
+     "admitted_unix": 1790715815.8219926,
+     "delivery": {
+      "request": 80,
+      "destination": 0,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 158,
+      "updated_ms": 1790715815922
+     },
+     "latency_ms": 120.1,
+     "offset_s": 32.825
+    },
+    {
+     "label": "C7-7",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 81
+     },
+     "admitted_unix": 1790715817.9540079,
+     "delivery": {
+      "request": 81,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 159,
+      "updated_ms": 1790715818057
+     },
+     "latency_ms": 119.85,
+     "offset_s": 34.957
+    },
+    {
+     "label": "C7-8",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 82
+     },
+     "admitted_unix": 1790715820.0889764,
+     "delivery": {
+      "request": 82,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 160,
+      "updated_ms": 1790715820188
+     },
+     "latency_ms": 118.14,
+     "offset_s": 37.09
+    },
+    {
+     "label": "C7-9",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 83
+     },
+     "admitted_unix": 1790715822.211765,
+     "delivery": {
+      "request": 83,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 161,
+      "updated_ms": 1790715822316
+     },
+     "latency_ms": 116.24,
+     "offset_s": 39.211
+    }
+   ],
+   "recovery_s": 28.267,
+   "delivered": 6,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 8,
+   "released_unix": 1790715826.838182,
+   "actual_hold_s": 0.501,
+   "sends": [
+    {
+     "label": "C8-0",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 84
+     },
+     "admitted_unix": 1790715826.8435745,
+     "delivery": {
+      "request": 84,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 162,
+      "updated_ms": 1790715831851
+     },
+     "latency_ms": 5064.68,
+     "offset_s": 5.07
+    },
+    {
+     "label": "C8-1",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 85
+     },
+     "admitted_unix": 1790715833.912453,
+     "delivery": {
+      "request": 85,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 168,
+      "updated_ms": 1790715838918
+     },
+     "latency_ms": 5052.56,
+     "offset_s": 12.127
+    },
+    {
+     "label": "C8-2",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 86
+     },
+     "admitted_unix": 1790715840.9697125,
+     "delivery": {
+      "request": 86,
+      "destination": 0,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 169,
+      "updated_ms": 1790715845978
+     },
+     "latency_ms": 5030.79,
+     "offset_s": 19.162
+    },
+    {
+     "label": "C8-3",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 87
+     },
+     "admitted_unix": 1790715848.009593,
+     "delivery": {
+      "request": 87,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 170,
+      "updated_ms": 1790715853021
+     },
+     "latency_ms": 5027.22,
+     "offset_s": 26.199
+    },
+    {
+     "label": "C8-4",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 88
+     },
+     "admitted_unix": 1790715855.0473757,
+     "delivery": {
+      "request": 88,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 171,
+      "updated_ms": 1790715855149
+     },
+     "latency_ms": 122.92,
+     "offset_s": 28.332
+    },
+    {
+     "label": "C8-5",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 89
+     },
+     "admitted_unix": 1790715857.1752465,
+     "delivery": {
+      "request": 89,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 172,
+      "updated_ms": 1790715857275
+     },
+     "latency_ms": 115.49,
+     "offset_s": 30.453
+    },
+    {
+     "label": "C8-6",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 90
+     },
+     "admitted_unix": 1790715859.306539,
+     "delivery": {
+      "request": 90,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 173,
+      "updated_ms": 1790715859406
+     },
+     "latency_ms": 116.09,
+     "offset_s": 32.585
+    },
+    {
+     "label": "C8-7",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 91
+     },
+     "admitted_unix": 1790715861.4867666,
+     "delivery": {
+      "request": 91,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 174,
+      "updated_ms": 1790715861528
+     },
+     "latency_ms": 118.64,
+     "offset_s": 34.709
+    },
+    {
+     "label": "C8-8",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 92
+     },
+     "admitted_unix": 1790715863.5522516,
+     "delivery": {
+      "request": 92,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 175,
+      "updated_ms": 1790715863665
+     },
+     "latency_ms": 116.5,
+     "offset_s": 36.831
+    },
+    {
+     "label": "C8-9",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 93
+     },
+     "admitted_unix": 1790715865.6773195,
+     "delivery": {
+      "request": 93,
+      "destination": 0,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 176,
+      "updated_ms": 1790715865799
+     },
+     "latency_ms": 178.87,
+     "offset_s": 39.018
+    }
+   ],
+   "recovery_s": 28.209,
+   "delivered": 6,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 9,
+   "released_unix": 1790715870.3763006,
+   "actual_hold_s": 0.515,
+   "sends": [
+    {
+     "label": "C9-0",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 94
+     },
+     "admitted_unix": 1790715870.3806267,
+     "delivery": {
+      "request": 94,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 177,
+      "updated_ms": 1790715875387
+     },
+     "latency_ms": 5038.74,
+     "offset_s": 5.043
+    },
+    {
+     "label": "C9-1",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 95
+     },
+     "admitted_unix": 1790715877.4579294,
+     "delivery": {
+      "request": 95,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 178,
+      "updated_ms": 1790715882465
+     },
+     "latency_ms": 5059.96,
+     "offset_s": 12.142
+    },
+    {
+     "label": "C9-2",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 96
+     },
+     "admitted_unix": 1790715884.5218072,
+     "delivery": {
+      "request": 96,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 179,
+      "updated_ms": 1790715889547
+     },
+     "latency_ms": 5047.17,
+     "offset_s": 19.193
+    },
+    {
+     "label": "C9-3",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 97
+     },
+     "admitted_unix": 1790715891.594076,
+     "delivery": {
+      "request": 97,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 180,
+      "updated_ms": 1790715896604
+     },
+     "latency_ms": 5041.0,
+     "offset_s": 26.259
+    },
+    {
+     "label": "C9-4",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 98
+     },
+     "admitted_unix": 1790715898.6407003,
+     "delivery": {
+      "request": 98,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 117418528,
+      "msg_seq": 185,
+      "updated_ms": 1790715903651
+     },
+     "latency_ms": 5040.49,
+     "offset_s": 33.305
+    },
+    {
+     "label": "C9-5",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 99
+     },
+     "admitted_unix": 1790715905.6865342,
+     "delivery": {
+      "request": 99,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 190,
+      "updated_ms": 1790715905812
+     },
+     "latency_ms": 175.82,
+     "offset_s": 35.486
+    },
+    {
+     "label": "C9-6",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 100
+     },
+     "admitted_unix": 1790715907.8768392,
+     "delivery": {
+      "request": 100,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 193,
+      "updated_ms": 1790715907979
+     },
+     "latency_ms": 126.57,
+     "offset_s": 37.623
+    },
+    {
+     "label": "C9-7",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 101
+     },
+     "admitted_unix": 1790715910.003526,
+     "delivery": {
+      "request": 101,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 194,
+      "updated_ms": 1790715910111
+     },
+     "latency_ms": 115.42,
+     "offset_s": 39.745
+    },
+    {
+     "label": "C9-8",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 102
+     },
+     "admitted_unix": 1790715912.134565,
+     "delivery": {
+      "request": 102,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 195,
+      "updated_ms": 1790715912228
+     },
+     "latency_ms": 123.47,
+     "offset_s": 41.874
+    },
+    {
+     "label": "C9-9",
+     "admission_attempts": 1,
+     "response": {
+      "accepted": true,
+      "request": 103
+     },
+     "admitted_unix": 1790715914.2551503,
+     "delivery": {
+      "request": 103,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 117418528,
+      "msg_seq": 196,
+      "updated_ms": 1790715914360
+     },
+     "latency_ms": 120.01,
+     "offset_s": 43.999
+    }
+   ],
+   "recovery_s": 35.31,
+   "delivered": 5,
+   "idempotency_full": 0
+  }
+ ],
+ "finished_unix": 1790715918.3872933,
+ "boot_failure_lines": [],
+ "summary": {
+  "baseline_delivered": 0,
+  "baseline_sends": 3,
+  "cycles": 10,
+  "sends_per_cycle": 10,
+  "delivered_total": 54,
+  "delivered_per_cycle": [
+   5,
+   5,
+   6,
+   5,
+   5,
+   5,
+   6,
+   6,
+   6,
+   5
+  ],
+  "cycles_recovered": 10,
+  "recovery_s_min": 28.122,
+  "recovery_s_max": 35.31,
+  "recovery_s_median": 35.145,
+  "idempotency_full_total": 0,
+  "boot_failures": 0
+ }
+}

@@ -1,0 +1,10 @@
+accepted=10 delivered=10
+accepted=20 delivered=20
+accepted=30 delivered=30
+accepted=40 delivered=40
+accepted=50 delivered=50
+accepted=60 delivered=60
+accepted=70 delivered=70
+accepted=80 delivered=80
+accepted=90 delivered=90
+{"requested":100,"host_accepted":93,"delivered":92,"stopped_reason":"device idempotency table full","success_rate":0.989247311827957,"rate_limit_retries":0,"pace_s":9.0,"elapsed_s":828.11,"latency_ms_median":116.02,"latency_ms_p95":153.18,"latency_ms_max":292.05,"by_destination":{"3":{"accepted":93,"delivered":92}},"evidence":"/home/sahur/orca/workspaces/RouteLoom/v2-h1/artifacts/hil/2026-09-30-h1/member/k1a-gateway-stop/follow.jsonl"}
