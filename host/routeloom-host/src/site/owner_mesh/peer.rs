@@ -915,9 +915,26 @@ impl MeshPeer {
     pub(super) fn send(&mut self, payload: &[u8]) {
         assert!(!payload.is_empty() && payload.len() <= RPC_MAX, "rpc bound");
         let head = (payload.len() as u16).to_le_bytes();
-        self.stdin.write_all(&head).expect("peer input open");
-        self.stdin.write_all(payload).expect("peer input open");
-        self.stdin.flush().expect("peer input open");
+        let sent = self
+            .stdin
+            .write_all(&head)
+            .and_then(|()| self.stdin.write_all(payload))
+            .and_then(|()| self.stdin.flush());
+        if let Err(error) = sent {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "peer input: {error}"
+            );
+            // A planned reboot can close stdin before the next command.
+            // recv observes EOF and the existing caller respawns from NVS.
+            let status = self.child.wait().expect("peer reaped");
+            assert!(
+                matches!(status.code(), Some(42 | 43)),
+                "mesh peer {:x} crashed (not a lifecycle reboot): {status:?}",
+                self.node
+            );
+        }
     }
 
     /// Reads one frame; `None` is a clean peer exit (EOF): the
