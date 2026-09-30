@@ -163,4 +163,57 @@ Status BlobResumeSlotStorage2::write(const std::size_t index, const ByteView dat
   return blobs_.blob_write(key, data);
 }
 
+Status ProxyPolicyStore::load(const std::uint64_t site_id, ProxyPolicyRecord& out,
+                              bool& found) noexcept {
+  found = false;
+  out = ProxyPolicyRecord{};
+  std::size_t size = 0;
+  bool present = false;
+  Status status = blobs_.blob_size(kProxyPolicyKey, size, present);
+  if (!status) return status;
+  if (!present) return Status::success();
+  if (size != kProxyPolicyRecordLen) {
+    return Status::error(StatusCode::IntegrityError, "rlpp1 size");
+  }
+  std::array<std::uint8_t, kProxyPolicyRecordLen> bytes{};
+  std::size_t read_len = 0;
+  status = blobs_.blob_read(kProxyPolicyKey, MutableByteView{bytes.data(), bytes.size()}, read_len);
+  if (!status) return status;
+  if (read_len != bytes.size()) {
+    return Status::error(StatusCode::IntegrityError, "rlpp1 read length");
+  }
+  status = proxy_policy_record_decode(ByteView{bytes.data(), bytes.size()}, out);
+  if (!status) return status;
+  found = out.site_id == site_id;
+  if (!found) out = ProxyPolicyRecord{};
+  return Status::success();
+}
+
+Status ProxyPolicyStore::commit(const ProxyPolicyRecord& record) noexcept {
+  std::array<std::uint8_t, kProxyPolicyRecordLen> bytes{};
+  Status status = proxy_policy_record_encode(record, bytes);
+  if (!status) return status;
+  status = blobs_.blob_write(kProxyPolicyKey, ByteView{bytes.data(), bytes.size()});
+  if (!status) return status;
+  // Success only once the readback matches what was written.
+  ProxyPolicyRecord stored{};
+  bool found = false;
+  if (!load(record.site_id, stored, found) || !found || stored.generation != record.generation ||
+      stored.zero_touch_open != record.zero_touch_open || stored.content != record.content) {
+    return Status::error(StatusCode::StorageFailure, "rlpp1 readback");
+  }
+  return Status::success();
+}
+
+Status ProxyPolicyStore::erase() noexcept {
+  const Status status = blobs_.blob_erase(kProxyPolicyKey);
+  if (!status) return status;
+  std::size_t size = 0;
+  bool found = false;
+  const Status readback = blobs_.blob_size(kProxyPolicyKey, size, found);
+  if (!readback) return readback;
+  if (found) return Status::error(StatusCode::StorageFailure, "rlpp1 erase readback");
+  return Status::success();
+}
+
 }  // namespace routeloom::sdkv1

@@ -22,6 +22,7 @@ fn manifest_matches_host_constants() {
     assert_eq!(u64::from(routeloom_provision::sdkv1::RECORD_FORMAT), u64::from(m::STORE_SDKV1_FORMAT));
     assert_eq!(u64::from(routeloom_provision::sdkv1::RECORD_SCHEMA), u64::from(m::STORE_SDKV1_SCHEMA));
     assert_eq!(u64::from(routeloom_provision::sdkv1::revocation::REVOCATION_VERSION), u64::from(m::RRS1_OBJECT_VERSION));
+    assert_eq!(u64::from(routeloom_provision::sdkv1::local_revocation::LOCAL_REVOCATION_SCHEMA), u64::from(m::STORE_RLV1_SCHEMA));
     assert_eq!(u64::from(routeloom_provision::sdkv1::resume::RESUME_FORMAT), u64::from(m::STORE_RLP1_FORMAT));
     assert_eq!(u64::from(routeloom_provision::sdkv1::resume2::RESUME2_FORMAT), u64::from(m::STORE_RLP2_FORMAT));
     assert_eq!(u64::from(crate::canonical::SCHEMA_VERSION), u64::from(m::STORE_CANONICAL_NODE));

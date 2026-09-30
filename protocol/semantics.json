@@ -31,7 +31,17 @@
     "DIAGNOSTIC": 48,
     "CONTROL_OBJECT": 49,
     "OBJECT_CHUNK": 50,
-    "OBJECT_ACK": 51
+    "OBJECT_ACK": 51,
+    "APP_OBJECT_START": 64,
+    "APP_OBJECT_CHUNK": 65,
+    "APP_OBJECT_ACK": 66
+  },
+  "wire_forward_compat": {
+    "minor": "a receiver accepts any minor of major 2; the end AAD carries the frame's minor and relays forward it unchanged; a minor only adds meaning an older receiver may safely ignore",
+    "extension_frame_types": {"first": 64, "last": 95, "protection": "end-to-end (END_PROTECTED); relays forward the body unread on the routed lane (dedup on message id, delivery class from byte 6)", "terminal_unimplemented": "TransitFailure reason 12 UNSUPPORTED, no acceptance"},
+    "traffic_byte": {"offset": 9, "priority_mask": 3, "priorities": {"NORMAL": 0, "BULK": 1, "URGENT": 2}, "reserved_bits": "2-7, ignored by receivers, forwarded unchanged", "end_aad": false, "relay_class": "forwarded frames other than END_RECEIPT/APP_RESULT schedule by the hint; 3 schedules as NORMAL; MANAGEMENT is never granted from the wire"},
+    "flags": "strict: unknown bits are refused (end AAD)",
+    "unknown_types": "outside 64..95 still refused at decode"
   },
   "crypto_suite": null,
   "membership_allowlist": {
@@ -84,7 +94,10 @@
       "OBJECT_CHUNK",
       "OBJECT_ACK",
       "CHANNEL_NOTICE",
-      "DIAGNOSTIC"
+      "DIAGNOSTIC",
+      "APP_OBJECT_START",
+      "APP_OBJECT_CHUNK",
+      "APP_OBJECT_ACK"
     ],
     "REVOKED": []
   },
@@ -116,7 +129,10 @@
     "OBJECT_CHUNK",
     "OBJECT_ACK",
     "CHANNEL_NOTICE",
-    "DIAGNOSTIC"
+    "DIAGNOSTIC",
+    "APP_OBJECT_START",
+    "APP_OBJECT_CHUNK",
+    "APP_OBJECT_ACK"
   ],
   "member_traffic_requires_roles_and_crypto": true,
   "end_immutable": [
@@ -283,7 +299,7 @@
   "control_object_kinds": {"CHANNEL_PLAN": 1, "RECOVERY_SNAPSHOT": 2, "CONFIG_PERMIT": 3, "CONFIG_RECOVERY": 4, "TRUST_MANIFEST": 5, "REVOCATION_SET": 6, "AUTHORITY_ENVELOPE": 7},
   "authority_channel": {
     "status": "EXPERIMENTAL codecs + endpoint/responder state machines (sdk-v1 G-SEC P5 PR1-PR3) wired to the mesh/USB/firmware/daemon (P5 PR4); P6 delivery sink unconnected",
-    "envelope": {"version": 1, "types": {"JOIN_CONFIRM": 1, "GROUP_KEY_UPDATE": 2, "GROUP_KEY_ACTIVATE": 3, "GROUP_KEY_PULL": 4}, "header_bytes": 12, "min_bytes": 28, "max_bytes": 2048, "aead": "AES-GCM-128", "gk_id_label": "RouteLoom/v1/gk-id"},
+    "envelope": {"version": 1, "types": {"JOIN_CONFIRM": 1, "GROUP_KEY_UPDATE": 2, "GROUP_KEY_ACTIVATE": 3, "GROUP_KEY_PULL": 4, "PROXY_POLICY": 9}, "header_bytes": 12, "min_bytes": 28, "max_bytes": 2048, "aead": "AES-GCM-128", "gk_id_label": "RouteLoom/v1/gk-id"},
     "carrier_kinds": {"R1": 1, "R2": 2, "R3": 3, "ENVELOPE": 4, "WAKE": 5},
     "mesh": {"control_subtype": 9, "carrier_head_bytes": 8, "carrier_body_max": 120, "object_kind": 7, "object_max_bytes": 2048, "gateway_slots": 2, "note": "design numbers 5/5 were taken (trust-status-query/TrustManifest); the wire takes the next free subtype 9 and kind 7"},
     "fragment": {"header_bytes": 20, "data_max": 960, "grid": 960, "hops_max": 16},

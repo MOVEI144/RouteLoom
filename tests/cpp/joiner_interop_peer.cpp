@@ -75,7 +75,7 @@
 //   --fw <u32> --cap <u32> --role <u8> --t0 <ms> --seed <u64>
 //   --site <id,network,gateway,proxymac,proxynode,channel,rssi,hops>
 //   --flash <file>   (optional 4096 B preload: identity slots, site slots)
-//   --flash-ext <file> (optional 4498 B preload: RRS slots, journal slots)
+//   --flash-ext <file> (optional 4562 B preload: RRS slots, journal slots)
 //   --verify         boot the Joiner in VerifyExistingMembership mode (a
 //                    retained RLS1 re-proves over ZT instead of adopting
 //                    silently — the removal-recovery / cutover-reissue leg)
@@ -116,7 +116,7 @@ constexpr std::uint64_t kTickStepMs = 5;
 constexpr std::size_t kAuthorityUpsMax = 8;  // bounded pipe queue per tick
 constexpr std::size_t kAuthorityQueueMax = 8;
 constexpr std::size_t kPassthroughMax = 4;
-constexpr std::size_t kRrsSlotBytes = 640;
+constexpr std::size_t kRrsSlotBytes = routeloom::sdkv1::kRevocationSlotBytes;
 constexpr std::size_t kJournalSlotBytes = 88 + 1521;
 constexpr std::size_t kFlashExtBytes = 2 * kRrsSlotBytes + 2 * kJournalSlotBytes;
 constexpr NodeId kGossipPeer = 0x00A1000000000301ULL;  // fixed fake mesh peer
@@ -758,7 +758,7 @@ class OwnerLeg {
   }
 
   void inject_gossip(Bytes object) {
-    if (object.empty() || object.size() > 640 || gossip_.size() >= 4) {
+    if (object.empty() || object.size() > routeloom::sdkv1::kRevocationObjectMax || gossip_.size() >= 4) {
       fatal("bad gossip object");
     }
     gossip_.push_back(std::move(object));

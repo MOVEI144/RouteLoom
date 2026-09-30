@@ -512,6 +512,12 @@ Status JoinProxy::set_policy(const bool zero_touch_open) noexcept {
   return Status::success();
 }
 
+Status JoinProxy::set_zero_touch_open(const bool open) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "in port callback");
+  zero_touch_open_ = open;
+  return Status::success();
+}
+
 Status JoinProxy::set_authority(const bool reachable, const std::uint8_t hops,
                                 const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "in port callback");
@@ -615,9 +621,12 @@ void JoinProxy::handle_discover(const MacAddress& source, const MacAddress& dest
   }
   ++stats_.discovers_rx;
   // 02 §7.3 IDLE row: zero_touch_open, authority reachable, same
-  // organization, the site not avoided, and no relay in progress.
-  if (!open_ || !reachable_ || relay_.active || body.org_hint != config_.org_hint ||
-      zt_discover_avoids(body, config_.site_hint)) {
+  // organization, the site not avoided, and no relay in progress. A
+  // closed site still answers devices that prefer it (#176).
+  const bool retained =
+      body.preferred_site_hint != 0 && body.preferred_site_hint == config_.site_hint;
+  if (!open_ || (!zero_touch_open_ && !retained) || !reachable_ || relay_.active ||
+      body.org_hint != config_.org_hint || zt_discover_avoids(body, config_.site_hint)) {
     ++stats_.offers_suppressed;
     return;
   }
@@ -635,6 +644,7 @@ void JoinProxy::handle_discover(const MacAddress& source, const MacAddress& dest
   }
   offer->mac = source;
   offer->nonce = env.transaction_nonce;
+  offer->retained = retained;
   std::uint32_t random = 0;
   std::array<std::uint8_t, 4> bytes{};
   if (entropy_.fill(MutableByteView{bytes.data(), bytes.size()})) {
@@ -653,7 +663,8 @@ void JoinProxy::handle_discover(const MacAddress& source, const MacAddress& dest
 }
 
 void JoinProxy::send_offer(const PendingOffer& pending, const MonotonicMs now_ms) noexcept {
-  if (!open_ || !reachable_ || relay_.active || membership_ != MembershipState::Member) {
+  if (!open_ || (!zero_touch_open_ && !pending.retained) || !reachable_ || relay_.active ||
+      membership_ != MembershipState::Member) {
     ++stats_.offers_suppressed;
     return;
   }

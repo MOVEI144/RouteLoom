@@ -1,0 +1,9 @@
+{
+  "codec": "authority_envelope",
+  "encoded_hex": "010a6666666600000000000500000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "envelope_type_ten",
+  "note": "type 10 is unassigned (9 is the ProxyPolicySet)",
+  "reason": "bad_type"
+}

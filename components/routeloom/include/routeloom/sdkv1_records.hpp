@@ -184,28 +184,36 @@ Status site_matches_identity(const SiteRecord& site, const IdentityRecord& ident
 //   0 u8 ver = 1 | 1 u8 flags = 0 | 2 u16 count (<= 32)
 //   4 u64 site_id | 12 u64 network
 //  20 u32 rs_epoch (>= 1) | 24 u32 site_epoch_floor (<= network>>32)
-//  28 entries x 16: node_id u64 | min_generation u32 (>= 1) |
-//                   reason u8 (1..4) | reserved 3
+//  28 entries x 17: node_id u64 | min_generation u32 (>= 1) |
+//                   reason u8 (1..4) | readmit_gk_epoch u32
 // Entries strictly ascending by node_id.
-// Storage record ("rlrevo", 640 B slot):
+// Version 2 (v2.0, #146) carries the full 32-bit readmission epoch:
+// readmit_gk_epoch 0 keeps every group frame of that NodeId refused; E > 0
+// accepts its group frames sealed under GK epoch >= E again (the site
+// re-admitted the NodeId at a higher assignment generation and rotated the
+// GK to E, which no earlier holder of the NodeId ever received). Version 1
+// used 16-byte entries with three reserved zero bytes and reads as 0.
+// Storage record ("rlrevo", 672 B slot):
 //   0 sealed head (magic "RRS1") | 16 u32 commit_seq | 20 COSE object | len-4 crc
 // An object-less record (24 B) is the cleared tombstone.
-constexpr std::uint8_t kRevocationVersion = 1;
+constexpr std::uint8_t kRevocationVersion = 2;
+constexpr std::uint8_t kRevocationVersionV1 = 1;
 constexpr std::size_t kRevocationEntryMax = 32;
 constexpr std::size_t kRevocationHeadSize = 28;
-constexpr std::size_t kRevocationEntrySize = 16;
+constexpr std::size_t kRevocationEntrySize = 17;
+constexpr std::size_t kRevocationEntrySizeV1 = 16;
 constexpr std::size_t kRevocationPayloadMax =
-    kRevocationHeadSize + kRevocationEntryMax * kRevocationEntrySize;  // 540
+    kRevocationHeadSize + kRevocationEntryMax * kRevocationEntrySize;  // 572
 // d2 84 43 a1 01 26 a0 | 59 hi lo | payload | 58 40 | sig
-constexpr std::size_t kRevocationObjectMax = 7 + 3 + kRevocationPayloadMax + 2 + 64;  // 616
+constexpr std::size_t kRevocationObjectMax = 7 + 3 + kRevocationPayloadMax + 2 + 64;  // 648
 inline constexpr char kRevocationDomain[] = "RouteLoom/revocation-set/v1";
 constexpr std::size_t kRevocationAadSize = sizeof(kRevocationDomain) + 8;  // 36
 constexpr std::uint32_t kRevocationMagic = 0x52525331U;  // "RRS1"
 constexpr std::uint32_t kRevocationSealCommitted = 0x2E5E7C0DU;
-constexpr std::size_t kRevocationSlotBytes = 640;
+constexpr std::size_t kRevocationSlotBytes = 672;
 constexpr std::size_t kRevocationRecordMin = kSequencedHeadSize + 4;
 constexpr std::size_t kRevocationRecordMax = kSequencedHeadSize + kRevocationObjectMax + 4;
-static_assert(kRevocationRecordMax == kRevocationSlotBytes, "04 §2: rlrevo slot <= 640 B");
+static_assert(kRevocationRecordMax == kRevocationSlotBytes, "04 §2: rlrevo slot <= 672 B");
 
 enum class RevocationReason : std::uint8_t { Removed = 1, Lost = 2, Replaced = 3, Blocked = 4 };
 
@@ -213,6 +221,7 @@ struct RevocationEntry {
   NodeId node_id{kInvalidNodeId};
   std::uint32_t min_generation{0};
   RevocationReason reason{RevocationReason::Removed};
+  std::uint32_t readmit_gk_epoch{0};
 };
 
 struct RevocationSet {
@@ -246,6 +255,10 @@ Status revocation_object_verify(ByteView object, const P256PublicKey& sak_pubkey
 // below the floor).
 bool revocation_rejects(const RevocationSet& set, NodeId node,
                         std::uint32_t generation, std::uint32_t site_epoch) noexcept;
+// Group-sender test (#146): `node` has an entry and the frame's GK epoch is
+// below its readmit_gk_epoch (or the entry has none).
+bool revocation_blocks_group_sender(const RevocationSet& set, NodeId node,
+                                    std::uint32_t gk_epoch) noexcept;
 // Same-network replacement rule (04 §2, P6): every entry of `old_set` is
 // still present in `next` with a min_generation that did not decrease. Past
 // revocations can only be compressed by a verified cutover (PR C), never by
@@ -357,7 +370,7 @@ Status resume2_slot_decode(ByteView bytes, ResumeSlot2& out) noexcept;
 // within holdoff, torn, or unreadable) the node must not return to Member —
 // not even across reboot. Fixed two keys (sequenced A/B like RLS1/RRS1);
 // the RLS1 frozen layout is untouched.
-//  0 u32 magic "RLV1" | 4 u16 format=1 | 6 u16 used_len=108 | 8 u32 schema=1
+//  0 u32 magic "RLV1" | 4 u16 format=1 | 6 u16 used_len=108 | 8 u32 schema=2
 // 12 u32 seal | 16 u32 commit_seq
 // 20 u64 local_node | 28 u64 site_id | 36 u64 network
 // 44 u32 removed_generation | 48 u32 rs_epoch_floor | 52 u32 site_epoch_floor
@@ -365,11 +378,16 @@ Status resume2_slot_decode(ByteView bytes, ResumeSlot2& out) noexcept;
 // 60 32B evidence_digest (SHA-256 of the verified removal object)
 // 92 u32 rls_commit_seq (diagnostic) | 96 u32 boot_witness
 // 100 u32 holdoff_ms | 104 u32 crc32
+// Schema 2 (v2.0) range-checks holdoff_ms (60 s..1 h, JoinPolicy #193)
+// instead of pinning 10 min; a schema-1 record (always 600000) still reads.
 constexpr std::uint32_t kLocalRevocationMagic = 0x524C5631U;  // "RLV1"
 constexpr std::uint32_t kLocalRevocationSealCommitted = 0x72564B31U;
 constexpr std::size_t kLocalRevocationSlotBytes = 108;
 constexpr std::size_t kLocalRevocationRecordLen = 108;
-constexpr std::uint32_t kLocalRevocationHoldoffMs = 600000;  // 10 minutes
+constexpr std::uint32_t kLocalRevocationSchema = 2;
+constexpr std::uint32_t kLocalRevocationHoldoffMs = 600000;  // 10 minutes (default)
+constexpr std::uint32_t kLocalRevocationHoldoffMinMs = 60000;
+constexpr std::uint32_t kLocalRevocationHoldoffMaxMs = 3600000;
 
 enum class LocalRevocationState : std::uint8_t { Blocked = 1, Cleaned = 2 };
 enum class LocalRevocationCause : std::uint8_t {
@@ -401,5 +419,70 @@ Status local_revocation_record_decode(ByteView record, LocalRevocationRecord& ou
                                       std::uint32_t* commit_seq = nullptr) noexcept;
 // Structure-only gate for the dual-slot classifier (see above).
 Status local_revocation_record_structure(ByteView record) noexcept;
+
+// --- ProxyPolicySet: authority envelope type 9 (#176) --------------------------
+// The site's radio intake policy for member proxies, behind the authority
+// body head (host op 1, device op 2):
+//   Set (host->device): ver=1 u8 | sub=1 u8 | flags u8 (bit0 zero_touch_open,
+//     others zero) | reserved u8 = 0 | generation u32 (>= 1) | tlv_len u16 |
+//     tlv[tlv_len <= 64]. The TLV area is reserved for the power-on join
+//     schedule (V2-18): carried and digested, never interpreted here.
+//   Ack (device->host): ver=1 | sub=2 | status u8 | reserved u8 = 0 |
+//     generation u32 — the generation durable and applied after this Set.
+// A proxy keeps generations monotonic: an older Set is Stale, the same
+// generation with other content is a Conflict, a newer one is stored
+// (RLPP1) and read back before it is applied or acknowledged.
+constexpr std::uint8_t kAuthorityTypeProxyPolicy = 9;
+constexpr std::uint8_t kProxyPolicyVersion = 1;
+constexpr std::uint8_t kProxyPolicySubSet = 1;
+constexpr std::uint8_t kProxyPolicySubAck = 2;
+constexpr std::uint8_t kProxyPolicyFlagZeroTouchOpen = 0x01;
+constexpr std::size_t kProxyPolicySetFixedSize = 10;
+constexpr std::size_t kProxyPolicyTlvMax = 64;
+constexpr std::size_t kProxyPolicyAckSize = 8;
+
+enum class ProxyPolicyStatus : std::uint8_t {
+  Applied = 0,
+  Stale = 1,
+  Conflict = 2,
+  StorageFailed = 3,
+};
+
+struct ProxyPolicySet {
+  std::uint32_t generation{0};
+  bool zero_touch_open{true};
+  Digest256 content{};  // SHA-256 of the whole Set body
+};
+
+Status proxy_policy_set_decode(ByteView body, ProxyPolicySet& out) noexcept;
+Status proxy_policy_ack_encode(ProxyPolicyStatus status, std::uint32_t generation,
+                               std::array<std::uint8_t, kProxyPolicyAckSize>& out) noexcept;
+
+// RLPP1: the applied ProxyPolicySet (namespace rlsite, key "p0"), bound to
+// its site so another site's record reads as absent. One blob write (NVS
+// replaces a blob atomically); a record failing its CRC reads as absent.
+//  0 u32 magic "RLPP" | 4 u16 format=1 | 6 u16 used_len=60 | 8 u64 site_id |
+// 16 u32 generation | 20 u8 flags (bit0 zero_touch_open) | 21 3 reserved |
+// 24 32B content_sha256 | 56 u32 crc32
+constexpr std::uint32_t kProxyPolicyMagic = 0x524C5050U;  // "RLPP"
+constexpr std::size_t kProxyPolicyRecordLen = 60;
+
+struct ProxyPolicyRecord {
+  std::uint64_t site_id{0};
+  std::uint32_t generation{0};
+  bool zero_touch_open{true};
+  Digest256 content{};
+};
+
+Status proxy_policy_record_encode(const ProxyPolicyRecord& record,
+                                  std::array<std::uint8_t, kProxyPolicyRecordLen>& out) noexcept;
+Status proxy_policy_record_decode(ByteView bytes, ProxyPolicyRecord& out) noexcept;
+
+// What a proxy does with a verified Set given its stored record (`stored`
+// null when none for this site): Applied = store and apply, or Stale /
+// Conflict = keep the stored one. An identical Set is Applied with no
+// write (`write` false).
+ProxyPolicyStatus proxy_policy_decide(const ProxyPolicyRecord* stored, const ProxyPolicySet& set,
+                                      bool& write) noexcept;
 
 }  // namespace routeloom::sdkv1

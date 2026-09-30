@@ -51,7 +51,7 @@ GENERATED_GOLDENS = (
 PEER = "build/tests/cpp/routeloom_joiner_interop_peer"
 MESH_PEER = "build/tests/cpp/routeloom_owner_mesh_peer"
 PEER_VERSION = "1"
-MESH_PEER_VERSION = "4"
+MESH_PEER_VERSION = "5"
 # A live interop suite that finds no C++ peer prints this and passes as a
 # skip; the interop stage treats it as a failure. Not anchored: with
 # --nocapture the harness output of parallel tests can share the line.

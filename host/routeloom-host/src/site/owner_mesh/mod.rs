@@ -27,7 +27,8 @@
 //! authority (`t0` = wall `now_ms` at start).
 //!
 //! `world`, `peer`, `switch`, `usb_host` and `report` are the harness;
-//! `mesh`, `join`, `cutover`, `fault`, `boot` and `product` hold the scenario tests, each
+//! `mesh`, `join`, `membership`, `cutover`, `fault`, `boot`, `recovery`,
+//! `compat` and `product` hold the scenario tests, each
 //! registered by its row in `tests/e2e/scenarios.json`.
 
 use std::io::{Read, Write};
@@ -64,9 +65,11 @@ use crate::acl::Acl;
 use crate::{now_ms, serve_client, DeviceSession, SessionPhase, State};
 
 mod boot;
+mod compat;
 mod cutover;
 mod fault;
 mod join;
+mod membership;
 mod mesh;
 mod peer;
 mod product;

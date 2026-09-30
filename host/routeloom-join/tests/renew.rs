@@ -1,5 +1,5 @@
 use routeloom_join::renew::{Commit, CutoverCommit, Head, Phase, Prepare, Receipt, RouteState};
-use routeloom_provision::sdkv1::revocation::revocation_object_verify;
+use routeloom_provision::sdkv1::revocation::{revocation_object_verify, REVOCATION_OBJECT_MAX};
 use routeloom_provision::sha256::sha256;
 use routeloom_provision::signer::{test_keypair, FileRootSigner};
 
@@ -64,6 +64,26 @@ fn signed_commit_binds_old_network_and_rrs_digest() {
         Receipt::decode(&receipt.encode().unwrap()).unwrap(),
         receipt
     );
+}
+
+#[test]
+fn full_revocation_set_fits_cutover_commit() {
+    let head = Head {
+        phase: Phase::Commit,
+        cutover_id: 4,
+        revision: 1,
+        old_network: 0x0001_0000_002a,
+    };
+    let proof = [0u8; 155];
+    let rrs = vec![0u8; REVOCATION_OBJECT_MAX];
+    let wire = Commit {
+        head,
+        proof: &proof,
+        rrs: &rrs,
+    }
+    .encode()
+    .unwrap();
+    assert_eq!(wire.len(), 28 + proof.len() + REVOCATION_OBJECT_MAX);
 }
 
 #[test]

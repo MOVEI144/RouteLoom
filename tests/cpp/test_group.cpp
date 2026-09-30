@@ -2116,6 +2116,67 @@ void test_promote_hold_first_frame() {
   CHECK(obs.group_messages.size() == 1);
 }
 
+// #146 readmit: an RRS1 entry with readmit_gk_epoch E refuses the NodeId's
+// group frames sealed under an epoch below E and accepts them from E on;
+// the check follows the frame's epoch, not the receiver's.
+void test_readmitted_group_sender_epoch_boundary() {
+  sdkv1_test::FaultyRecordStorage site_storage(sdkv1::kSiteSlotBytes);
+  sdkv1::SiteStore site_store(site_storage);
+  CHECK_OK(site_store.initialize());
+  const sdkv1::SiteRecord site = sdkv1_test::site_record(3, 5);
+  CHECK_OK(site_store.commit(site));
+  sdkv1::GroupKeyState keys(site_store);
+  sdkv1::GroupKeyState::Input start{};
+  start.op = sdkv1::GroupKeyState::Op::Start;
+  start.boot = site.boot_witness;
+  start.generation = site.assignment_generation;
+  CHECK_OK(keys.advance(start, 1000));
+  sdkv1_test::FaultyRecordStorage rrs_storage(sdkv1::kRevocationSlotBytes);
+  sdkv1::RevocationStore revocations(rrs_storage);
+  CHECK_OK(revocations.initialize());
+  routeloom_test::TestSecurity pairwise;
+  const AeadGcm* aead = builtin_aead_gcm();
+  CHECK(aead != nullptr);
+  if (aead == nullptr) return;
+  const NodeId sender = site.gateways[0];
+  const std::uint32_t gk = site.gk_epoch_current;
+  sdkv1::GroupSecurityProvider transmitter(keys, pairwise, *aead, sender);
+  sdkv1::GroupSecurityProvider receiver(keys, pairwise, *aead, 2, &revocations);
+  SecurityContext end{SecurityScope::Group, static_cast<std::uint32_t>(site.network),
+                      sender, kBroadcastNodeId, gk, 0, site.boot_witness + 7U,
+                      group_address(kGroupAll)};
+  const auto round_trip = [&]() {
+    const std::uint8_t payload[] = {'r', 'e'};
+    std::array<std::uint8_t, sizeof(payload)> ciphertext{}, opened{};
+    std::array<std::uint8_t, kAeadTagSize> tag{};
+    std::uint64_t counter = 0;
+    CHECK_OK(transmitter.next_counter(end, counter));
+    CHECK_OK(transmitter.seal(end, counter, ByteView{}, ByteView{payload, sizeof(payload)},
+                              MutableByteView{ciphertext.data(), ciphertext.size()}, tag));
+    return receiver.open(end, counter, ByteView{}, ByteView{ciphertext.data(), ciphertext.size()},
+                         tag, MutableByteView{opened.data(), opened.size()});
+  };
+  const auto apply = [&](std::uint32_t rs_epoch, std::uint32_t readmit) {
+    sdkv1::RevocationSet set = sdkv1_test::revocation_set(rs_epoch, 1, sdkv1_test::kSiteEpoch);
+    set.entries[0].node_id = sender;
+    set.entries[0].min_generation = site.assignment_generation;
+    set.entries[0].readmit_gk_epoch = readmit;
+    const auto object = sdkv1_test::revocation_object(set);
+    CHECK_OK(revocations.accept(object.view(), sdkv1_test::sak().pub, site.site_id,
+                                site.network));
+  };
+  apply(15, gk + 1);  // readmitted from the next GK only
+  CHECK(round_trip().code == StatusCode::AuthorizationFailed);
+  CHECK(receiver.revoked_group_sender(sender, kCurrentGroupEpoch));
+  CHECK(!receiver.revoked_group_sender(sender, gk + 1));
+  apply(16, gk);  // readmitted from the current GK
+  CHECK_OK(round_trip());
+  CHECK(!receiver.revoked_group_sender(sender, kCurrentGroupEpoch));
+  CHECK(receiver.revoked_group_sender(sender, gk - 1));
+  apply(17, 0);  // revoked again: every epoch refused
+  CHECK(round_trip().code == StatusCode::AuthorizationFailed);
+}
+
 void test_revoked_group_sender_with_old_key() {
   sdkv1_test::FaultyRecordStorage site_storage(sdkv1::kSiteSlotBytes);
   sdkv1::SiteStore site_store(site_storage);
@@ -2402,6 +2463,7 @@ int main(int argc, char** argv) {
     test_unicast_ordering();
     test_promote_hold_first_frame();
     test_revoked_group_sender_with_old_key();
+    test_readmitted_group_sender_epoch_boundary();
   }
   if (mode.empty() || mode == "scale") {
     test_hundred_node_alarm();

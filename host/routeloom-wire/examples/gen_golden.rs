@@ -89,7 +89,7 @@ fn write_valid(dir: &Path, case: &Case) {
         "{{\n  \"format\": \"routeloom-wire-v1-golden\",\n  \"name\": \"{}\",\n  \"comment\": \"{}\",\n  \"type\": {},\n  \"flags\": {},\n  \"delivery\": {},\n  \"delivery_round\": {},\n  \"hop_remaining\": {},\n  \"network\": {},\n  \"origin\": {},\n  \"destination\": {},\n  \"previous_hop\": {},\n  \"next_hop\": {},\n  \"session\": {},\n  \"sequence\": {},\n  \"remaining_deadline_ms\": {},\n  \"original_lifetime_ms\": {},\n  \"link_epoch\": {},\n  \"end_epoch\": {},\n  \"payload_hex\": \"{}\",\n  \"encoded_hex\": \"{}\"",
         case.name,
         case.comment,
-        header.frame_type as u8,
+        header.frame_type.id(),
         header.flags,
         header.delivery as u8,
         header.delivery_round,
@@ -108,6 +108,14 @@ fn write_valid(dir: &Path, case: &Case) {
         hex(&frame.payload[..frame.payload_size]),
         hex(&encoded),
     );
+    // Bytes 3 and 9 are listed only when nonzero, so the v2.0 vectors
+    // stay byte-identical files.
+    if header.minor != 0 {
+        json += &format!(",\n  \"minor\": {}", header.minor);
+    }
+    if header.traffic != 0 {
+        json += &format!(",\n  \"traffic\": {}", header.traffic);
+    }
     if let Some((local, next, budget)) = case.forward {
         // The relay opens the link layer and re-wraps it for the next hop with
         // a fresh provider; the end-protected plaintext is carried unchanged.
@@ -166,7 +174,7 @@ fn ack_payload(
     round: u8,
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(22);
-    payload.push(accepted_type as u8);
+    payload.push(accepted_type.id());
     payload.extend_from_slice(&origin.to_be_bytes());
     payload.extend_from_slice(&session.to_be_bytes());
     payload.extend_from_slice(&sequence.to_be_bytes());
@@ -478,6 +486,58 @@ fn main() {
         write_valid(&valid_dir, case);
     }
 
+    // Forward compatibility inside major 2 (wire-protocol.md §7): a newer
+    // minor with reserved traffic bits, and an extension type, both opened
+    // and relayed unchanged by this decoder.
+    let mut newer = plain(
+        FrameType::Data,
+        FLAG_END_PROTECTED,
+        DeliveryClass::Reliable,
+        0,
+        4,
+        1,
+        3,
+        1,
+        2,
+        7,
+        12,
+        5000,
+        b"minor-one",
+    );
+    newer.header.minor = 1;
+    newer.header.traffic = 0xFD;
+    let extension = plain(
+        FrameType::Extension(90),
+        FLAG_END_PROTECTED,
+        DeliveryClass::Reliable,
+        0,
+        4,
+        1,
+        3,
+        1,
+        2,
+        7,
+        13,
+        5000,
+        b"extension-90",
+    );
+    for case in [
+        Case {
+            name: "data_minor_1_traffic",
+            comment: "minor 1 and traffic 0xFD (bulk hint, reserved bits set), relayed at node 2 with both bytes kept",
+            frame: newer,
+            forward: Some((2, 3, 4900)),
+        },
+        Case {
+            name: "extension_type_90",
+            comment: "end-to-end extension type 90, relayed at node 2 without reading the body",
+            frame: extension,
+            forward: Some((2, 3, 4900)),
+        },
+    ] {
+        write_valid(&valid_dir, &case);
+    }
+
     // Invalid vectors derived from the data_10b_end_protected encoding.
     let base = encode(&cases[0].frame);
 
@@ -505,16 +565,28 @@ fn main() {
         &unknown_type,
     );
 
-    let mut reserved_byte = base.clone();
-    reserved_byte[9] = 0x01;
+    let mut unknown_type_96 = base.clone();
+    unknown_type_96[4] = 96;
     write_invalid(
         &invalid_dir,
-        "reserved_byte",
-        "reserved header byte set to 0x01",
+        "unknown_type_96",
+        "frame type 96 is past the extension range 64..95",
         "link",
         2,
         None,
-        &reserved_byte,
+        &unknown_type_96,
+    );
+
+    let mut traffic_tampered = base.clone();
+    traffic_tampered[9] = 0x01;
+    write_invalid(
+        &invalid_dir,
+        "traffic_tampered",
+        "traffic byte changed after sealing: the link tag covers byte 9",
+        "link",
+        2,
+        None,
+        &traffic_tampered,
     );
 
     let mut unknown_flag = base.clone();

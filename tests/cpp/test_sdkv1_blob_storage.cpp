@@ -452,7 +452,7 @@ void test_resume_cache_over_nvs() {
   // The revocation sweep scrubs the RMS from the stored blob (peer 102
   // is not revoked and survives the same two sweep steps).
   RevocationSet rrs{};
-  rrs.entries[0] = RevocationEntry{101, 2, RevocationReason::Removed};
+  rrs.entries[0] = RevocationEntry{101, 2, RevocationReason::Removed, 0};
   rrs.count = 1;
   const ResumeContext guarded{kNetwork, 203, &rrs};
   std::size_t cursor = 0;
@@ -502,6 +502,73 @@ void test_ram_footprint() {
 
 }  // namespace
 
+// RLPP1 (#176): a newer ProxyPolicySet is stored and read back before it
+// counts; a power cut keeps the old or the new record, never a mix; an
+// older or conflicting Set keeps the stored one; another site's record is
+// ignored, while a corrupt blob is an error that must keep intake closed.
+void test_proxy_policy_store() {
+  FakeNvs nvs;
+  ProxyPolicyStore store(nvs);
+  ProxyPolicyRecord stored{};
+  bool found = true;
+  CHECK(store.load(0x5173, stored, found).ok() && !found);
+  const auto set_of = [](std::uint32_t generation, bool open, std::uint8_t tlv) {
+    std::array<std::uint8_t, kProxyPolicySetFixedSize + 1> body{
+        kProxyPolicyVersion, kProxyPolicySubSet,
+        static_cast<std::uint8_t>(open ? kProxyPolicyFlagZeroTouchOpen : 0), 0,
+        static_cast<std::uint8_t>(generation >> 24), static_cast<std::uint8_t>(generation >> 16),
+        static_cast<std::uint8_t>(generation >> 8), static_cast<std::uint8_t>(generation), 0, 1,
+        tlv};
+    ProxyPolicySet set{};
+    CHECK(proxy_policy_set_decode(ByteView{body.data(), body.size()}, set).ok());
+    return set;
+  };
+  const auto record_of = [](const ProxyPolicySet& set) {
+    ProxyPolicyRecord record{};
+    record.site_id = 0x5173;
+    record.generation = set.generation;
+    record.zero_touch_open = set.zero_touch_open;
+    record.content = set.content;
+    return record;
+  };
+  bool write = false;
+  const ProxyPolicySet closed2 = set_of(2, false, 0);
+  CHECK(proxy_policy_decide(nullptr, closed2, write) == ProxyPolicyStatus::Applied && write);
+  CHECK(store.commit(record_of(closed2)).ok());
+  CHECK(store.load(0x5173, stored, found).ok() && found && stored.generation == 2 &&
+        !stored.zero_touch_open);
+  CHECK(store.load(0x9999, stored, found).ok() && !found);  // another site
+  CHECK(store.load(0x5173, stored, found).ok() && found);
+  CHECK(proxy_policy_decide(&stored, closed2, write) == ProxyPolicyStatus::Applied && !write);
+  CHECK(proxy_policy_decide(&stored, set_of(2, false, 7), write) ==
+            ProxyPolicyStatus::Conflict && !write);
+  CHECK(proxy_policy_decide(&stored, set_of(1, true, 0), write) == ProxyPolicyStatus::Stale &&
+        !write);
+  // A power cut before the new blob lands keeps generation 2 and fails.
+  const ProxyPolicySet open3 = set_of(3, true, 0);
+  nvs.cut_call = nvs.write_calls;
+  nvs.cut_lands = false;
+  CHECK(!store.commit(record_of(open3)).ok());
+  CHECK(store.load(0x5173, stored, found).ok() && found && stored.generation == 2);
+  // A power cut after it landed reads back the new record after reboot.
+  nvs.cut_call = nvs.write_calls;
+  nvs.cut_lands = true;
+  CHECK(!store.commit(record_of(open3)).ok());
+  ProxyPolicyStore reboot(nvs);
+  CHECK(reboot.load(0x5173, stored, found).ok() && found && stored.generation == 3 &&
+        stored.zero_touch_open);
+  nvs.disarm();
+  nvs.blobs[kProxyPolicyKey][30] ^= 0x01;  // bitrot: CRC fails
+  CHECK(!reboot.load(0x5173, stored, found).ok() && !found);
+  nvs.disarm();
+  nvs.read_error = true;
+  CHECK(!reboot.load(0x5173, stored, found).ok() && !found);
+  nvs.disarm();
+  CHECK(reboot.erase().ok());
+  CHECK(nvs.blobs.count(kProxyPolicyKey) == 0);
+  CHECK(reboot.load(0x5173, stored, found).ok() && !found);
+}
+
 int main() {
   test_read_contract();
   test_record_storage_mapping();
@@ -512,6 +579,7 @@ int main() {
   test_site_and_revocation_over_nvs();
   test_resume_cache_over_nvs();
   test_ram_footprint();
+  test_proxy_policy_store();
   if (failures != 0) {
     std::fprintf(stderr, "%d sdkv1 blob storage check(s) failed\n", failures);
     return 1;

@@ -565,7 +565,7 @@ void test_boot_self_revoked_and_blocked() {
   CHECK_OK(node.site.commit(site_for(kNode, 3)));
   CHECK(node.revocations.initialize());
   RevocationSet set = revocation_set(16, 0, 2);
-  set.entries[0] = RevocationEntry{kNode, 4, RevocationReason::Removed};
+  set.entries[0] = RevocationEntry{kNode, 4, RevocationReason::Removed, 0};
   set.count = 1;
   CHECK_OK(node.revocations.accept(revocation_object(set).view(), sak().pub, kSiteId, kNetwork));
   CHECK_OK(node.dispatch(LifecycleInput::Boot(true), 0));
@@ -740,7 +740,7 @@ void test_recovery_control_rejects_revoked_credentials() {
   CHECK(node.provision(3, 14));
   CHECK(!node.lifecycle.permits_recovery_control(stamp_for(0x00A1000000000100ULL, 1)));
   RevocationSet next = revocation_set(15);
-  next.entries[2] = RevocationEntry{kNode, 4, RevocationReason::Removed};
+  next.entries[2] = RevocationEntry{kNode, 4, RevocationReason::Removed, 0};
   next.count = 3;
   const auto object = revocation_object(next);
   PeerCredentialStamp authority{};
@@ -776,9 +776,9 @@ void test_apply_order_and_sweep() {
   const std::size_t rrs_writes = node.rrs_storage.write_calls;
   const std::size_t rls_writes = node.site_storage.write_calls;
   RevocationSet next = revocation_set(15, 0, 2);
-  next.entries[0] = RevocationEntry{0x00A1000000000100ULL, 2, RevocationReason::Removed};
-  next.entries[1] = RevocationEntry{0x00A1000000000107ULL, 3, RevocationReason::Removed};
-  next.entries[2] = RevocationEntry{kPeer, 2, RevocationReason::Removed};
+  next.entries[0] = RevocationEntry{0x00A1000000000100ULL, 2, RevocationReason::Removed, 0};
+  next.entries[1] = RevocationEntry{0x00A1000000000107ULL, 3, RevocationReason::Removed, 0};
+  next.entries[2] = RevocationEntry{kPeer, 2, RevocationReason::Removed, 0};
   next.count = 3;
   const auto object = revocation_object(next);
   PeerCredentialStamp authority{};
@@ -851,9 +851,9 @@ void test_apply_sweeps_rlp2_revoked_slots() {
   CHECK_OK(node.resume.put(old, context));
   CHECK_OK(node.resume.put(live, context));
   RevocationSet next = revocation_set(15, 0, 2);
-  next.entries[0] = RevocationEntry{0x00A1000000000100ULL, 2, RevocationReason::Removed};
-  next.entries[1] = RevocationEntry{0x00A1000000000107ULL, 3, RevocationReason::Removed};
-  next.entries[2] = RevocationEntry{kPeer, 2, RevocationReason::Removed};
+  next.entries[0] = RevocationEntry{0x00A1000000000100ULL, 2, RevocationReason::Removed, 0};
+  next.entries[1] = RevocationEntry{0x00A1000000000107ULL, 3, RevocationReason::Removed, 0};
+  next.entries[2] = RevocationEntry{kPeer, 2, RevocationReason::Removed, 0};
   next.count = 3;
   const auto object = revocation_object(next);
   PeerCredentialStamp authority{};
@@ -1034,7 +1034,7 @@ void test_rrs_exchange_roundtrip() {
   FakePeerPort port_a, port_b;
   FakeObjectSink sink_a, sink_b;
   RrsExchange a(port_a, sink_a), b(port_b, sink_b);
-  const auto object = revocation_object(revocation_set(16, 32));  // max-size 616 B
+  const auto object = revocation_object(revocation_set(16, 32));  // max-size 648 B
   CHECK(object.size == kRevocationObjectMax);
   CHECK_OK(a.publish(kNodeB, 7, object.view(), 0));
   CHECK(a.publish(kNodeB, 7, object.view(), 0).code == StatusCode::NoCapacity);  // TX x1
@@ -1608,9 +1608,9 @@ void test_partition_continues_and_merge_converges() {
   sim.link_up(kNode, kNodeB);  // C is partitioned away
   // The authority revokes into partition 1 only.
   RevocationSet next = revocation_set(15, 0, 2);
-  next.entries[0] = RevocationEntry{0x00A1000000000100ULL, 2, RevocationReason::Removed};
-  next.entries[1] = RevocationEntry{0x00A1000000000107ULL, 3, RevocationReason::Removed};
-  next.entries[2] = RevocationEntry{kPeer, 2, RevocationReason::Removed};
+  next.entries[0] = RevocationEntry{0x00A1000000000100ULL, 2, RevocationReason::Removed, 0};
+  next.entries[1] = RevocationEntry{0x00A1000000000107ULL, 3, RevocationReason::Removed, 0};
+  next.entries[2] = RevocationEntry{kPeer, 2, RevocationReason::Removed, 0};
   next.count = 3;
   const auto object = revocation_object(next);
   PeerCredentialStamp authority{};
@@ -1678,9 +1678,9 @@ void test_apply_storage_faults() {
   ResumeContext context{kNetwork, 203, nullptr};
   CHECK_OK(sweep.resume.put(old, context));
   RevocationSet next = revocation_set(15, 0, 2);
-  next.entries[0] = RevocationEntry{0x00A1000000000100ULL, 2, RevocationReason::Removed};
-  next.entries[1] = RevocationEntry{0x00A1000000000107ULL, 3, RevocationReason::Removed};
-  next.entries[2] = RevocationEntry{kPeer, 2, RevocationReason::Removed};
+  next.entries[0] = RevocationEntry{0x00A1000000000100ULL, 2, RevocationReason::Removed, 0};
+  next.entries[1] = RevocationEntry{0x00A1000000000107ULL, 3, RevocationReason::Removed, 0};
+  next.entries[2] = RevocationEntry{kPeer, 2, RevocationReason::Removed, 0};
   next.count = 3;
   const auto object2 = revocation_object(next);
   CHECK_OK(sweep.dispatch(
@@ -1754,7 +1754,7 @@ void test_sweep_cursor_units() {
   FaultyResumeStorage2 storage(8);
   ResumeCache2 cache(storage, 4, 4);
   RevocationSet rrs = revocation_set(15, 0, 2);
-  rrs.entries[0] = RevocationEntry{kPeer, 2, RevocationReason::Removed};
+  rrs.entries[0] = RevocationEntry{kPeer, 2, RevocationReason::Removed, 0};
   rrs.count = 1;
   ResumeContext plain{kNetwork, 203, nullptr};
   ResumeSlot2 revoked = resume2_slot(kPeer, 0, 10);
@@ -1808,7 +1808,7 @@ void test_sweep_scrubs_torn_slot() {
   storage.slot(index)[kResume2SlotBytes - 1] ^= 0x01;
   const std::size_t writes = storage.write_calls;
   RevocationSet set = revocation_set(15, 0, 2);
-  set.entries[0] = RevocationEntry{kPeer, 2, RevocationReason::Removed};
+  set.entries[0] = RevocationEntry{kPeer, 2, RevocationReason::Removed, 0};
   set.count = 1;
   context.revocations = &set;
   std::size_t cursor = index;

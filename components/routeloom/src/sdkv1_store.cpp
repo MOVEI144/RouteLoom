@@ -76,7 +76,8 @@ const SealedRecordFormat kRevocationFormat{
 const SealedRecordFormat kLocalRevocationFormat{
     kLocalRevocationMagic,     kLocalRevocationSealCommitted, kLocalRevocationSlotBytes,
     kLocalRevocationRecordLen, kLocalRevocationRecordLen,     true,
-    &local_revocation_record_structure, &local_revocation_semantic};
+    &local_revocation_record_structure, &local_revocation_semantic,
+    kLocalRevocationSchema};
 
 }  // namespace
 
@@ -137,7 +138,7 @@ Status SealedSlotPair::classify(const std::uint8_t slot, SlotContent& content,
     content = SlotContent::Corrupt;  // committed fields still bound the floor
     return Status::success();
   }
-  if (schema != kRecordSchema) {
+  if (schema < kRecordSchema || schema > format_.schema_max) {
     content = SlotContent::Unsupported;
     return Status::success();
   }

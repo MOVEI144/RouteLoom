@@ -230,11 +230,42 @@ void test_golden_bodies() {
           msg, MutableByteView{encoded.data(), encoded.size()}, written));
       CHECK(written == pt.size() &&
             std::memcmp(encoded.data(), pt.data(), pt.size()) == 0);
+    } else if (type == sdkv1::kAuthorityTypeProxyPolicy) {
+      // #176: the device decodes the Set tail and encodes the ACK tail.
+      sdkv1::AuthorityBodyHead head{};
+      CHECK(pt.size() > sdkv1::kAuthorityBodyHeadSize);
+      CHECK(sdkv1::authority_head_decode(ByteView{pt.data(), sdkv1::kAuthorityBodyHeadSize}, head));
+      CHECK(head.op == op && head.generation == u64(f, "generation"));
+      const ByteView tail{pt.data() + sdkv1::kAuthorityBodyHeadSize,
+                          pt.size() - sdkv1::kAuthorityBodyHeadSize};
+      if (op == 1) {
+        sdkv1::ProxyPolicySet set{};
+        CHECK(sdkv1::proxy_policy_set_decode(tail, set).ok());
+        CHECK(set.generation == u64(f, "policy_generation"));
+        CHECK(set.zero_touch_open == (u64(f, "zero_touch_open") != 0));
+      } else {
+        std::array<std::uint8_t, sdkv1::kProxyPolicyAckSize> ack{};
+        CHECK(sdkv1::proxy_policy_ack_encode(
+                  static_cast<sdkv1::ProxyPolicyStatus>(u64(f, "status")),
+                  static_cast<std::uint32_t>(u64(f, "policy_generation")), ack)
+                  .ok());
+        CHECK(tail.size == ack.size() && std::memcmp(tail.data, ack.data(), ack.size()) == 0);
+      }
     } else {
       CHECK(false);  // unknown valid body in the goldens
     }
     (void)name;
   }
+  int policy_invalid = 0;
+  for (const auto& path : list("invalid")) {
+    const Fields f = parse_flat_json(read_text(path));
+    if (f.find("codec") == f.end() || f.at("codec") != "proxy_policy_set") continue;
+    const Bytes raw = hex(f, "encoded_hex");
+    sdkv1::ProxyPolicySet set{};
+    CHECK(!sdkv1::proxy_policy_set_decode(ByteView{raw.data(), raw.size()}, set).ok());
+    ++policy_invalid;
+  }
+  CHECK(policy_invalid == 7);
   // Every invalid body must be refused with the golden reason word.
   int invalid_seen = 0;
   for (const auto& path : list("invalid")) {
@@ -315,7 +346,7 @@ void test_golden_envelopes() {
           std::memcmp(sealed.data(), envelope.data(), envelope.size()) == 0);
     ++valid_seen;
   }
-  CHECK(valid_seen == 11);
+  CHECK(valid_seen == 14);  // 11 P5 envelopes + 3 ProxyPolicy (type 9)
   // Tampered envelopes must fail authentication without emitting plaintext.
   int invalid_seen = 0;
   for (const auto& path : list("invalid")) {

@@ -20,10 +20,13 @@
 //! | `gk_rotation` | (single row) | the live rotation, if any (G-SEC P5 §6.1) |
 //! | `gk_targets` | (rotation, node) | one row per member of the live rotation |
 //! | `docs` | (kind, key) | bookkeeping JSON: discovered devices, join requests, decisions, operations |
+//! | `policy_acks` | node | the ProxyPolicySet generation each proxy acknowledged durable (#176) |
 //!
-//! Schema 2 adds the rotation tables and the GK `meta` keys; a version-1
-//! database migrates inside one transaction at open (refusing corrupt key
-//! tables outright), unknown versions refuse to start.
+//! Schema 2 adds the rotation tables and the GK `meta` keys; schema 3 adds
+//! `policy_acks` (the readmit marks of #146 live in the RRS1 objects).
+//! Older databases migrate forward at open, each step inside one
+//! transaction (refusing corrupt key tables outright), after a copy of the
+//! file is kept beside it; unknown versions refuse to start.
 //!
 //! Secrets at rest: DAMS and GK sit in the database file, protected by its
 //! 0600 mode only — the 07 §3 "host-key sealing" is not implemented (no TPM
@@ -40,9 +43,11 @@ use super::group_keys::{
     META_HIGH_WATER,
 };
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 /// The pre-P5 layout (no rotation tables, no GK meta): migrated at open.
 const SCHEMA_VERSION_1: u32 = 1;
+/// The pre-v2.0 layout (no `policy_acks`): migrated at open.
+const SCHEMA_VERSION_2: u32 = 2;
 
 #[derive(Debug)]
 pub struct StoreError(pub String);
@@ -211,6 +216,10 @@ pub struct Batch {
     pub gk_targets: Vec<TargetRow>,
     /// `(kind, key, Some(json))` upserts, `None` deletes.
     pub docs: Vec<(DocKind, String, Option<String>)>,
+    /// `(node, generation)` ProxyPolicySet acknowledgements (upserts).
+    pub policy_acks: Vec<(u64, u32)>,
+    /// Clears an earlier assignment's acknowledgement before a new grant.
+    pub policy_acks_delete: Vec<u64>,
 }
 
 impl Batch {
@@ -228,6 +237,8 @@ impl Batch {
             && !self.gk_targets_clear
             && self.gk_targets.is_empty()
             && self.docs.is_empty()
+            && self.policy_acks.is_empty()
+            && self.policy_acks_delete.is_empty()
     }
 }
 
@@ -242,10 +253,17 @@ pub struct Snapshot {
     pub gk_rotation: Option<RotationRow>,
     pub gk_targets: Vec<TargetRow>,
     pub docs: BTreeMap<(DocKind, String), String>,
+    pub policy_acks: BTreeMap<u64, u32>,
 }
 
 impl Snapshot {
     fn apply(&mut self, batch: &Batch) {
+        for node in &batch.policy_acks_delete {
+            self.policy_acks.remove(node);
+        }
+        for (node, generation) in &batch.policy_acks {
+            self.policy_acks.insert(*node, *generation);
+        }
         for (name, value) in &batch.meta {
             self.meta.insert((*name).to_string(), value.clone());
         }
@@ -315,13 +333,16 @@ pub trait SiteStore: Send {
             .filter(|row| row.node == node)
             .collect())
     }
-    /// Existence check for the v1 NodeId reuse rule. Stores may answer it
+    /// The highest assignment generation ever revoked for `node` (the
+    /// #146 readmit rule issues only above it). Stores may answer it
     /// without materializing the node's full, unbounded ledger history.
-    fn has_revocation(&mut self, node: u64) -> Result<bool, StoreError> {
+    fn revoked_generation(&mut self, node: u64) -> Result<Option<u32>, StoreError> {
         Ok(self
             .ledger_for(node)?
             .iter()
-            .any(|row| row.kind == "revoke"))
+            .filter(|row| row.kind == "revoke")
+            .map(|row| row.generation)
+            .max())
     }
 }
 
@@ -411,6 +432,8 @@ const SITE_SCHEMA: &str =
              CREATE TABLE IF NOT EXISTS docs (
                 kind TEXT NOT NULL, key TEXT NOT NULL, body TEXT NOT NULL,
                 PRIMARY KEY (kind, key));
+             CREATE TABLE IF NOT EXISTS policy_acks (
+                node INTEGER PRIMARY KEY, generation INTEGER NOT NULL);
              CREATE INDEX IF NOT EXISTS ledger_node_idx ON ledger (node);";
 
 /// Tables that may hold site rows: an existing database without a schema
@@ -427,6 +450,7 @@ const SITE_TABLES: &[&str] = &[
     "gk_rotation",
     "gk_targets",
     "docs",
+    "policy_acks",
 ];
 
 #[cfg(windows)]
@@ -544,7 +568,13 @@ impl SqliteSiteStore {
             }
             Some(v) if v == SCHEMA_VERSION.to_be_bytes() => {}
             Some(v) if v == SCHEMA_VERSION_1.to_be_bytes() => {
+                Self::keep_backup(path, SCHEMA_VERSION_1)?;
                 Self::migrate_1_to_2(&mut conn, path)?;
+                Self::migrate_2_to_3(&mut conn)?;
+            }
+            Some(v) if v == SCHEMA_VERSION_2.to_be_bytes() => {
+                Self::keep_backup(path, SCHEMA_VERSION_2)?;
+                Self::migrate_2_to_3(&mut conn)?;
             }
             Some(_) => {
                 return Err(StoreError(format!(
@@ -690,9 +720,48 @@ impl SqliteSiteStore {
         }
         tx.execute(
             "UPDATE meta SET value = ?1 WHERE name = 'schema_version'",
+            params![SCHEMA_VERSION_2.to_be_bytes().to_vec()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Version 2 → 3 inside one transaction: the ProxyPolicySet
+    /// acknowledgement table starts empty (every proxy counts as not yet
+    /// acknowledged and is sent the current policy again).
+    fn migrate_2_to_3(conn: &mut Connection) -> Result<(), StoreError> {
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE policy_acks (node INTEGER PRIMARY KEY, generation INTEGER NOT NULL);",
+        )?;
+        tx.execute(
+            "UPDATE meta SET value = ?1 WHERE name = 'schema_version'",
             params![SCHEMA_VERSION.to_be_bytes().to_vec()],
         )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Keeps a copy of a database about to migrate from `version`
+    /// (`<path>.schema<version>.bak`, same private mode) so a failed or
+    /// unwanted upgrade can be rolled back by hand. An existing copy from
+    /// an earlier attempt is the older state and is kept as it is.
+    fn keep_backup(path: &Path, version: u32) -> Result<(), StoreError> {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".schema{version}.bak"));
+        let backup = std::path::PathBuf::from(name);
+        if backup.exists() {
+            return Ok(());
+        }
+        std::fs::copy(path, &backup).map_err(|e| {
+            StoreError(format!(
+                "cannot back up site store {} before migrating: {e}",
+                path.display()
+            ))
+        })?;
+        #[cfg(windows)]
+        routeloom_peercred::protect_private_sidecar(&backup)
+            .map_err(|e| StoreError(format!("cannot protect {}: {e}", backup.display())))?;
         Ok(())
     }
 }
@@ -918,6 +987,16 @@ impl SiteStore for SqliteSiteStore {
                 .ok_or_else(|| StoreError(format!("site store: unknown doc kind {kind}")))?;
             snapshot.docs.insert((kind, key), body);
         }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT node, generation FROM policy_acks")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (node, generation) = row?;
+            snapshot
+                .policy_acks
+                .insert(u(node), checked_u32(generation, "policy_acks generation")?);
+        }
         Ok(snapshot)
     }
 
@@ -954,13 +1033,15 @@ impl SiteStore for SqliteSiteStore {
         Ok(out)
     }
 
-    fn has_revocation(&mut self, node: u64) -> Result<bool, StoreError> {
-        let found: i64 = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ledger WHERE node = ?1 AND kind = 'revoke')",
+    fn revoked_generation(&mut self, node: u64) -> Result<Option<u32>, StoreError> {
+        let found: Option<i64> = self.conn.query_row(
+            "SELECT MAX(generation) FROM ledger WHERE node = ?1 AND kind = 'revoke'",
             params![i(node)],
             |row| row.get(0),
         )?;
-        Ok(found != 0)
+        found
+            .map(|g| checked_u32(g, "ledger generation"))
+            .transpose()
     }
 
     fn commit(&mut self, batch: &Batch) -> Result<(), StoreError> {
@@ -1113,6 +1194,16 @@ impl SiteStore for SqliteSiteStore {
                 }
             }
         }
+        for node in &batch.policy_acks_delete {
+            tx.execute("DELETE FROM policy_acks WHERE node = ?1", params![i(*node)])?;
+        }
+        for (node, generation) in &batch.policy_acks {
+            tx.execute(
+                "INSERT INTO policy_acks (node, generation) VALUES (?1, ?2)
+                 ON CONFLICT(node) DO UPDATE SET generation = excluded.generation",
+                params![i(*node), i64::from(*generation)],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1195,6 +1286,8 @@ mod tests {
                 gk_targets_clear: false,
                 gk_targets: Vec::new(),
                 docs: vec![(DocKind::Discovered, "k".into(), Some("{}".into()))],
+                policy_acks: vec![(device.node, 4)],
+                policy_acks_delete: Vec::new(),
             };
             store.commit(&batch).unwrap();
         }
@@ -1212,6 +1305,7 @@ mod tests {
         assert_eq!(snapshot.group_keys.len(), 1);
         assert_eq!(snapshot.meta["rs_epoch"], 5_u32.to_be_bytes());
         assert_eq!(snapshot.docs[&(DocKind::Discovered, "k".to_string())], "{}");
+        assert_eq!(snapshot.policy_acks.get(&0x00A1_0000_0000_1234), Some(&4));
         store
             .commit(&Batch {
                 docs: vec![(DocKind::Discovered, "k".into(), None)],
@@ -1344,6 +1438,57 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION.to_be_bytes());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    /// v2.0 (#176): a schema-2 database moves forward to 3 in one step,
+    /// keeping its rows and a pre-migration copy beside it.
+    #[test]
+    fn migration_advances_a_v2_database_and_keeps_a_copy() {
+        let db = temp_path("migrate-v2");
+        {
+            let mut store = SqliteSiteStore::open(&db).unwrap();
+            store
+                .commit(&Batch {
+                    rrs: vec![(3, vec![0xD2])],
+                    ..Batch::default()
+                })
+                .unwrap();
+        }
+        {
+            // Rewind the fresh schema-3 file to the previous layout.
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("DROP TABLE policy_acks;").unwrap();
+            conn.execute(
+                "UPDATE meta SET value = ?1 WHERE name = 'schema_version'",
+                rusqlite::params![SCHEMA_VERSION_2.to_be_bytes().to_vec()],
+            )
+            .unwrap();
+        }
+        let mut store = SqliteSiteStore::open(&db).unwrap();
+        let snapshot = store.load().unwrap();
+        assert_eq!(snapshot.rrs, vec![(3, vec![0xD2])]);
+        assert!(snapshot.policy_acks.is_empty());
+        store
+            .commit(&Batch {
+                policy_acks: vec![(7, 2)],
+                ..Batch::default()
+            })
+            .unwrap();
+        drop(store);
+        let mut backup = db.as_os_str().to_os_string();
+        backup.push(".schema2.bak");
+        let old: Vec<u8> = rusqlite::Connection::open(std::path::PathBuf::from(backup))
+            .unwrap()
+            .query_row(
+                "SELECT value FROM meta WHERE name = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old, SCHEMA_VERSION_2.to_be_bytes());
+        let snapshot = SqliteSiteStore::open(&db).unwrap().load().unwrap();
+        assert_eq!(snapshot.policy_acks.get(&7), Some(&2));
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 

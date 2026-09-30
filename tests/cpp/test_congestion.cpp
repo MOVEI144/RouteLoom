@@ -325,6 +325,102 @@ void test_drr_fairness() {
   CHECK(early_bulk <= 1);  // bulk gets a share, not the head of the line
 }
 
+// Wire byte 9 (traffic): a relay schedules forwarded work by the origin's
+// priority hint, so Bulk stays Bulk across hops and Urgent overtakes it.
+// Management (and the unassigned value 3) is never granted from the wire.
+void test_relay_traffic_hint() {
+  Harness h;
+  (void)h.add(1);
+  (void)h.add(2);
+  (void)h.add(3);
+  h.link(1, 2);
+  h.link(2, 3);
+  const auto transit = [&](std::uint64_t seq, std::uint8_t traffic) {
+    auto header = mk_header(FrameType::Data, 1, 3, 1, 2, MessageId{42, seq},
+                            wire::kFlagEndProtected);
+    header.traffic = traffic;
+    return craft_frame(h.cipher, header, payload_view());
+  };
+  // Hostile arrival order: bulk first, then the reserved value, then urgent.
+  inject(h, 2, 1, transit(1, wire::kTrafficBulk));
+  inject(h, 2, 1, transit(2, wire::kTrafficBulk | 0xFC));
+  inject(h, 2, 1, transit(3, 3));
+  inject(h, 2, 1, transit(4, wire::kTrafficUrgent));
+  std::vector<std::uint64_t> order;
+  // Node 3 answers HOP_ACCEPT, so the relay's peer window reopens and each
+  // dispatch is a fresh DRR choice among what is still queued.
+  for (int i = 0; i < 40 && order.size() < 4; ++i) {
+    const std::size_t before = h.net.sights.size();
+    h.step(2);
+    h.step(3);
+    for (std::size_t s = before; s < h.net.sights.size(); ++s) {
+      if (h.net.sights[s].type == FrameType::Data && h.net.sights[s].from == 2 &&
+          std::find(order.begin(), order.end(), h.net.sights[s].sequence) == order.end()) {
+        order.push_back(h.net.sights[s].sequence);
+      }
+    }
+    ++h.now;
+  }
+  CHECK(order.size() == 4);
+  if (order.size() == 4) {
+    CHECK(order[0] == 4);  // Urgent (weight 8) first
+    CHECK(order[1] == 3);  // value 3 schedules as Normal, ahead of Bulk
+    CHECK(order[2] == 1 && order[3] == 2);  // reserved bits do not lift Bulk
+  }
+}
+
+// Extension types 64..95 (wire-protocol.md §7): a relay forwards them like
+// any routed frame without reading the body; a terminal that implements
+// none refuses with TransitFailure UNSUPPORTED instead of accepting.
+void test_extension_type_transit() {
+  Harness h;
+  (void)h.add(1);
+  (void)h.add(2);
+  (void)h.add(3);
+  h.link(1, 2);
+  h.link(2, 3);
+  const auto ext = [&](NodeId dst, std::uint64_t seq) {
+    auto header = mk_header(static_cast<FrameType>(90), 1, dst, 1, 2, MessageId{42, seq},
+                            wire::kFlagEndProtected);
+    header.minor = 1;
+    return craft_frame(h.cipher, header, payload_view());
+  };
+  inject(h, 2, 1, ext(3, 1));
+  for (int i = 0; i < 8; ++i) {
+    h.step(2);
+    ++h.now;
+  }
+  bool forwarded = false;
+  for (const auto& sight : h.net.sights) {
+    forwarded |= sight.from == 2 && sight.to == 3 && sight.sequence == 1 &&
+                 static_cast<std::uint8_t>(sight.type) == 90;
+  }
+  CHECK(forwarded);
+  CHECK(!h.observer(2)->has_diag("EXTENSION_UNSUPPORTED"));
+
+  const std::size_t before = h.net.sights.size();
+  inject(h, 2, 1, ext(2, 2));
+  for (int i = 0; i < 8; ++i) {
+    h.step(2);
+    ++h.now;
+  }
+  CHECK(h.observer(2)->has_diag("EXTENSION_UNSUPPORTED"));
+  bool refused = false, accepted = false;
+  for (std::size_t i = before; i < h.net.sights.size(); ++i) {
+    const auto& sight = h.net.sights[i];
+    if (sight.from != 2 || sight.to != 1) continue;
+    refused |= sight.type == FrameType::Diagnostic;
+    accepted |= sight.type == FrameType::HopAccept;
+  }
+  CHECK(refused && !accepted);
+  // Unknown types outside the range stay refused at decode.
+  auto header = mk_header(FrameType::Data, 1, 3, 1, 2, MessageId{42, 3}, wire::kFlagEndProtected);
+  auto bytes = craft_frame(h.cipher, header, payload_view());
+  bytes.bytes[4] = 96;
+  wire::Header peek{};
+  CHECK(!wire::peek_header(bytes.view(), peek).ok());
+}
+
 // D4-04: reserved control lane — locally generated required responses
 // (HOP_ACCEPT) preempt queued data-class work; ordinary queued traffic never
 // enters the lane.
@@ -1688,6 +1784,8 @@ void test_awaiting_full_defers_without_attempts() {
 int main() {
   test_feedback_requires_submitted_rx_context();
   test_drr_fairness();
+  test_relay_traffic_hint();
+  test_extension_type_transit();
   test_control_lane();
   test_full_control_lane_never_commits_a_forward();
   test_failed_route_advertisement_rearmed();

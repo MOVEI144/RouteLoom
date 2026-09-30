@@ -1003,7 +1003,7 @@ void test_transit_failure_codec() {
   CHECK(transit_failure_decode(ByteView{bad.data(), bad.size()}, decoded)
             .code == StatusCode::ProtocolError);
   bad = body;
-  bad[35] = 12;  // reason out of range
+  bad[35] = 13;  // reason out of range (12 UNSUPPORTED is the last)
   CHECK(transit_failure_decode(ByteView{bad.data(), bad.size()}, decoded)
             .code == StatusCode::ProtocolError);
   bad = body;

@@ -51,11 +51,12 @@ Status read_zeros(ByteReader& reader, const std::size_t count, const char* what)
 }
 
 Status write_head(ByteWriter& writer, const std::uint32_t magic, const std::size_t used_len,
-                  const std::uint32_t seal) noexcept {
+                  const std::uint32_t seal,
+                  const std::uint32_t schema = kRecordSchema) noexcept {
   Status status = writer.write_u32(magic);
   if (status) status = writer.write_u16(kRecordFormat);
   if (status) status = writer.write_u16(static_cast<std::uint16_t>(used_len));
-  if (status) status = writer.write_u32(kRecordSchema);
+  if (status) status = writer.write_u32(schema);
   if (status) status = writer.write_u32(seal);
   return status;
 }
@@ -64,7 +65,8 @@ Status write_head(ByteWriter& writer, const std::uint32_t magic, const std::size
 // points (the stores classify slots themselves).
 Status read_head(ByteReader& reader, const ByteView record, const std::uint32_t magic,
                  const std::uint32_t seal_committed, const std::size_t min_len,
-                 const std::size_t max_len, std::uint16_t& used_len) noexcept {
+                 const std::size_t max_len, std::uint16_t& used_len,
+                 const std::uint32_t schema_max = kRecordSchema) noexcept {
   std::uint32_t got_magic = 0, schema = 0, seal = 0;
   std::uint16_t format = 0;
   Status status = reader.read_u32(got_magic);
@@ -86,7 +88,7 @@ Status read_head(ByteReader& reader, const ByteView record, const std::uint32_t 
        static_cast<std::uint32_t>(record.data[record.size - 1]))) {
     return Status::error(StatusCode::IntegrityError, "record crc");
   }
-  if (schema != kRecordSchema) {
+  if (schema < kRecordSchema || schema > schema_max) {
     return Status::error(StatusCode::Unsupported, "record schema");
   }
   return Status::success();
@@ -241,8 +243,11 @@ Status site_body_read(ByteReader& reader, SiteRecord& record) noexcept {
 
 // --- RRS1 helpers ------------------------------------------------------------
 
-std::size_t revocation_payload_size(const std::uint8_t count) noexcept {
-  return kRevocationHeadSize + static_cast<std::size_t>(count) * kRevocationEntrySize;
+std::size_t revocation_payload_size(const std::uint8_t count,
+                                    const std::uint8_t version) noexcept {
+  return kRevocationHeadSize + static_cast<std::size_t>(count) *
+                                   (version == kRevocationVersionV1 ? kRevocationEntrySizeV1
+                                                                     : kRevocationEntrySize);
 }
 
 }  // namespace
@@ -575,7 +580,7 @@ Status revocation_payload_encode(const RevocationSet& set,
     status = writer.write_u64(entry.node_id);
     if (status) status = writer.write_u32(entry.min_generation);
     if (status) status = writer.write_u8(static_cast<std::uint8_t>(entry.reason));
-    if (status) status = write_zeros(writer, 3);
+    if (status) status = writer.write_u32(entry.readmit_gk_epoch);
   }
   if (!status) return status;
   out.size = writer.size();
@@ -599,11 +604,11 @@ Status revocation_payload_decode(const ByteView payload, RevocationSet& out) noe
   if (status) status = reader.read_u32(out.rs_epoch);
   if (status) status = reader.read_u32(out.site_epoch_floor);
   if (!status) return status;
-  if (version != kRevocationVersion) {
+  if (version != kRevocationVersion && version != kRevocationVersionV1) {
     return Status::error(StatusCode::Unsupported, "rrs1 version");
   }
   if (flags != 0 || count > kRevocationEntryMax ||
-      payload.size != revocation_payload_size(static_cast<std::uint8_t>(count))) {
+      payload.size != revocation_payload_size(static_cast<std::uint8_t>(count), version)) {
     return Status::error(StatusCode::ProtocolError, "rrs1 payload shape");
   }
   out.count = static_cast<std::uint8_t>(count);
@@ -613,7 +618,11 @@ Status revocation_payload_decode(const ByteView payload, RevocationSet& out) noe
     status = reader.read_u64(entry.node_id);
     if (status) status = reader.read_u32(entry.min_generation);
     if (status) status = reader.read_u8(reason);
-    if (status) status = read_zeros(reader, 3, "rrs1 entry reserved");
+    if (version == kRevocationVersionV1) {
+      if (status) status = read_zeros(reader, 3, "rrs1 entry reserved");
+    } else {
+      if (status) status = reader.read_u32(entry.readmit_gk_epoch);
+    }
     entry.reason = static_cast<RevocationReason>(reason);
   }
   if (!status) return status;
@@ -678,6 +687,16 @@ bool revocation_rejects(const RevocationSet& set, const NodeId node,
   if (site_epoch < set.site_epoch_floor) return true;
   for (std::uint8_t i = 0; i < set.count && i < kRevocationEntryMax; ++i) {
     if (set.entries[i].node_id == node) return generation < set.entries[i].min_generation;
+  }
+  return false;
+}
+
+bool revocation_blocks_group_sender(const RevocationSet& set, const NodeId node,
+                                    const std::uint32_t gk_epoch) noexcept {
+  for (std::uint8_t i = 0; i < set.count && i < kRevocationEntryMax; ++i) {
+    if (set.entries[i].node_id != node) continue;
+    const std::uint32_t readmit = set.entries[i].readmit_gk_epoch;
+    return readmit == 0 || gk_epoch < readmit;
   }
   return false;
 }
@@ -1004,7 +1023,8 @@ Status local_revocation_validate(const LocalRevocationRecord& record) noexcept {
       cause > static_cast<std::uint8_t>(LocalRevocationCause::LocalMaintenance) ||
       !id_valid(record.local_node) || record.site_id == 0 || record.network == 0 ||
       record.removed_generation == 0 || all_zero(record.evidence_digest) ||
-      record.holdoff_ms != kLocalRevocationHoldoffMs) {
+      record.holdoff_ms < kLocalRevocationHoldoffMinMs ||
+      record.holdoff_ms > kLocalRevocationHoldoffMaxMs) {
     return Status::error(StatusCode::InvalidArgument, "rlv1 fields");
   }
   return Status::success();
@@ -1021,7 +1041,8 @@ Status local_revocation_record_encode(const LocalRevocationRecord& record, const
   }
   const MutableByteView target{out.bytes.data(), out.bytes.size()};
   ByteWriter writer(target);
-  Status status = write_head(writer, kLocalRevocationMagic, kLocalRevocationRecordLen, seal);
+  Status status = write_head(writer, kLocalRevocationMagic, kLocalRevocationRecordLen, seal,
+                             kLocalRevocationSchema);
   if (status) status = writer.write_u32(commit_seq);
   if (status) status = writer.write_u64(record.local_node);
   if (status) status = writer.write_u64(record.site_id);
@@ -1052,7 +1073,7 @@ Status local_revocation_record_decode(const ByteView record, LocalRevocationReco
   std::uint16_t used_len = 0;
   Status status = read_head(reader, record, kLocalRevocationMagic,
                             kLocalRevocationSealCommitted, kLocalRevocationRecordLen,
-                            kLocalRevocationRecordLen, used_len);
+                            kLocalRevocationRecordLen, used_len, kLocalRevocationSchema);
   std::uint32_t seq = 0, crc = 0;
   std::uint8_t state = 0, cause = 0;
   std::uint16_t reserved = 0;
@@ -1075,6 +1096,9 @@ Status local_revocation_record_decode(const ByteView record, LocalRevocationReco
   if (crc32_iso_hdlc(ByteView{record.data, kLocalRevocationRecordLen - 4}) != crc) {
     return Status::error(StatusCode::IntegrityError, "rlv1 crc");
   }
+  if (record.data[11] == kRecordSchema && out.holdoff_ms != kLocalRevocationHoldoffMs) {
+    return Status::error(StatusCode::ProtocolError, "rlv1 schema 1 holdoff");
+  }
   if (reserved != 0) {
     return Status::error(StatusCode::ProtocolError, "rlv1 reserved");
   }
@@ -1094,6 +1118,105 @@ Status local_revocation_record_structure(const ByteView record) noexcept {
     return Status::error(StatusCode::ProtocolError, "rlv1 reserved");
   }
   return Status::success();
+}
+
+// === ProxyPolicySet / RLPP1 =================================================
+
+Status proxy_policy_set_decode(const ByteView body, ProxyPolicySet& out) noexcept {
+  out = ProxyPolicySet{};
+  if (body.data == nullptr || body.size < kProxyPolicySetFixedSize ||
+      body.size > kProxyPolicySetFixedSize + kProxyPolicyTlvMax) {
+    return Status::error(StatusCode::ProtocolError, "policy set bounds");
+  }
+  ByteReader reader(body);
+  std::uint8_t version = 0, sub = 0, flags = 0, reserved = 0;
+  std::uint16_t tlv_len = 0;
+  Status status = reader.read_u8(version);
+  if (status) status = reader.read_u8(sub);
+  if (status) status = reader.read_u8(flags);
+  if (status) status = reader.read_u8(reserved);
+  if (status) status = reader.read_u32(out.generation);
+  if (status) status = reader.read_u16(tlv_len);
+  if (!status) return status;
+  if (version != kProxyPolicyVersion || sub != kProxyPolicySubSet ||
+      (flags & ~kProxyPolicyFlagZeroTouchOpen) != 0 || reserved != 0 || out.generation == 0 ||
+      body.size != kProxyPolicySetFixedSize + tlv_len) {
+    return Status::error(StatusCode::ProtocolError, "policy set fields");
+  }
+  out.zero_touch_open = (flags & kProxyPolicyFlagZeroTouchOpen) != 0;
+  sha256(body, out.content);
+  return Status::success();
+}
+
+Status proxy_policy_ack_encode(const ProxyPolicyStatus status, const std::uint32_t generation,
+                               std::array<std::uint8_t, kProxyPolicyAckSize>& out) noexcept {
+  ByteWriter writer(MutableByteView{out.data(), out.size()});
+  Status written = writer.write_u8(kProxyPolicyVersion);
+  if (written) written = writer.write_u8(kProxyPolicySubAck);
+  if (written) written = writer.write_u8(static_cast<std::uint8_t>(status));
+  if (written) written = writer.write_u8(0);
+  if (written) written = writer.write_u32(generation);
+  return written;
+}
+
+Status proxy_policy_record_encode(const ProxyPolicyRecord& record,
+                                  std::array<std::uint8_t, kProxyPolicyRecordLen>& out) noexcept {
+  if (!id_valid(record.site_id) || record.generation == 0) {
+    return Status::error(StatusCode::InvalidArgument, "rlpp1 fields");
+  }
+  ByteWriter writer(MutableByteView{out.data(), out.size()});
+  Status status = writer.write_u32(kProxyPolicyMagic);
+  if (status) status = writer.write_u16(kRecordFormat);
+  if (status) status = writer.write_u16(static_cast<std::uint16_t>(kProxyPolicyRecordLen));
+  if (status) status = writer.write_u64(record.site_id);
+  if (status) status = writer.write_u32(record.generation);
+  if (status) status = writer.write_u8(record.zero_touch_open ? kProxyPolicyFlagZeroTouchOpen : 0);
+  if (status) status = write_zeros(writer, 3);
+  if (status) status = write_array(writer, record.content);
+  if (status) status = writer.write_u32(crc32_iso_hdlc(ByteView{out.data(), writer.size()}));
+  return status;
+}
+
+Status proxy_policy_record_decode(const ByteView bytes, ProxyPolicyRecord& out) noexcept {
+  out = ProxyPolicyRecord{};
+  if (bytes.data == nullptr || bytes.size != kProxyPolicyRecordLen) {
+    return Status::error(StatusCode::ProtocolError, "rlpp1 size");
+  }
+  ByteReader reader(bytes);
+  std::uint32_t magic = 0, crc = 0;
+  std::uint16_t format = 0, used_len = 0;
+  std::uint8_t flags = 0;
+  Status status = reader.read_u32(magic);
+  if (status) status = reader.read_u16(format);
+  if (status) status = reader.read_u16(used_len);
+  if (status) status = reader.read_u64(out.site_id);
+  if (status) status = reader.read_u32(out.generation);
+  if (status) status = reader.read_u8(flags);
+  if (status) status = read_zeros(reader, 3, "rlpp1 reserved");
+  if (status) status = read_array(reader, out.content);
+  if (status) status = reader.read_u32(crc);
+  if (!status) return status;
+  if (magic != kProxyPolicyMagic || format != kRecordFormat || used_len != kProxyPolicyRecordLen ||
+      crc32_iso_hdlc(ByteView{bytes.data, kProxyPolicyRecordLen - 4}) != crc ||
+      (flags & ~kProxyPolicyFlagZeroTouchOpen) != 0 || !id_valid(out.site_id) ||
+      out.generation == 0) {
+    out = ProxyPolicyRecord{};
+    return Status::error(StatusCode::IntegrityError, "rlpp1 record");
+  }
+  out.zero_touch_open = (flags & kProxyPolicyFlagZeroTouchOpen) != 0;
+  return Status::success();
+}
+
+ProxyPolicyStatus proxy_policy_decide(const ProxyPolicyRecord* stored, const ProxyPolicySet& set,
+                                      bool& write) noexcept {
+  write = false;
+  if (stored != nullptr && set.generation < stored->generation) return ProxyPolicyStatus::Stale;
+  if (stored != nullptr && set.generation == stored->generation) {
+    return set.content == stored->content ? ProxyPolicyStatus::Applied
+                                          : ProxyPolicyStatus::Conflict;
+  }
+  write = true;
+  return ProxyPolicyStatus::Applied;
 }
 
 }  // namespace routeloom::sdkv1

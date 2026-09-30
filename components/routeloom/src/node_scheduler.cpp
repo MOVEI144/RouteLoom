@@ -35,11 +35,21 @@ SchedClass MeshNode::TxScheduler::classify(const TxJob& job) noexcept {
   }
   if (job.form == JobForm::Forwarded) {
     // Transit traffic keeps its lane across hops: receipts and application
-    // results ride management, everything else is normal.
-    return (job.forwarded.header.type == FrameType::EndReceipt ||
-            job.forwarded.header.type == FrameType::AppResult)
-               ? SchedClass::Management
-               : SchedClass::Normal;
+    // results ride management; everything else follows the header's
+    // traffic hint (wire.hpp byte 9), which can ask for Bulk or Urgent but
+    // never Management.
+    if (job.forwarded.header.type == FrameType::EndReceipt ||
+        job.forwarded.header.type == FrameType::AppResult) {
+      return SchedClass::Management;
+    }
+    switch (job.forwarded.header.traffic & wire::kTrafficPriorityMask) {
+      case wire::kTrafficBulk:
+        return SchedClass::Bulk;
+      case wire::kTrafficUrgent:
+        return SchedClass::Urgent;
+      default:
+        return SchedClass::Normal;
+    }
   }
   switch (job.plain.header.type) {
     case FrameType::Data:

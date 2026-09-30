@@ -59,9 +59,13 @@ constexpr bool member_frame_type(const FrameType type) noexcept {
     case FrameType::ControlObject:
     case FrameType::ObjectChunk:
     case FrameType::ObjectAck:
+    case FrameType::AppObjectStart:
+    case FrameType::AppObjectChunk:
+    case FrameType::AppObjectAck:
       return true;
   }
-  return false;
+  // The rest of the end-to-end extension range (wire.hpp) is member traffic.
+  return static_cast<std::uint8_t>(type) >= 64 && static_cast<std::uint8_t>(type) <= 95;
 }
 
 constexpr bool bootstrap_frame_type(const FrameType type) noexcept {

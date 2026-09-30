@@ -15,7 +15,8 @@
 // NVS layout (partition `rlsec`, 05 §5.1):
 //   rlident  i0 / i1        RLI1 twin pair        (blob ≤ 664 B, slot 1024 B)
 //   rlsite   s0 / s1        RLS1 A/B pair         (blob ≤ 712 B, slot 1024 B)
-//   rlrevo   r0 / r1        RRS1 storage record   (blob ≤ 640 B, slot 640 B)
+//            p0             RLPP1 proxy policy    (blob = 60 B, single key)
+//   rlrevo   r0 / r1        RRS1 storage record   (blob ≤ 672 B, slot 672 B)
 //   rlres2   s00…s15        RLP2 slots, node      (blob = 96 B)
 //            s000…s159      RLP2 slots, gateway   (3 digits once count > 100)
 // (The pre-P4 `rlres` RLP1 namespace is never opened anymore; stale
@@ -85,6 +86,7 @@ inline constexpr char kLocalRevocationKey0[] = "v0";
 inline constexpr char kLocalRevocationKey1[] = "v1";
 inline constexpr char kLifecycleKey0[] = "x0";
 inline constexpr char kLifecycleKey1[] = "x1";
+inline constexpr char kProxyPolicyKey[] = "p0";
 
 // Resume-cache slot counts (05 §3.2 / §5.1): a node keeps 16 slots, a
 // gateway 160. Key names are fixed per slot so NVS usage never grows with
@@ -174,6 +176,25 @@ class BlobResumeSlotStorage2 final : public ResumeSlotStorage2 {
  private:
   BlobNamespace& blobs_;
   std::size_t slot_count_;
+};
+
+// The applied ProxyPolicySet (RLPP1, #176) in the site namespace. One key:
+// NVS replaces a blob atomically, so a power cut leaves the old or the new
+// record, and commit() reads the write back before it reports success.
+// Nothing stays in RAM: the record is read when a policy arrives and once
+// at boot. Missing or another site's valid record means default open;
+// unreadable or corrupt storage is an error and keeps intake closed.
+class ProxyPolicyStore {
+ public:
+  explicit ProxyPolicyStore(BlobNamespace& blobs) noexcept : blobs_(blobs) {}
+
+  // `found` is true only for a valid record bound to this site.
+  Status load(std::uint64_t site_id, ProxyPolicyRecord& out, bool& found) noexcept;
+  Status commit(const ProxyPolicyRecord& record) noexcept;
+  Status erase() noexcept;
+
+ private:
+  BlobNamespace& blobs_;
 };
 
 }  // namespace routeloom::sdkv1

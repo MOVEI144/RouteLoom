@@ -92,7 +92,8 @@ enum class Priority : std::uint8_t {
 };
 
 // Frozen Wire v1 frame type IDs (see protocol/semantics.json frame_numeric_ids).
-// Gaps between groups are reserved for future types in the same class.
+// Gaps between groups are reserved for future types in the same class;
+// 64..95 are the end-to-end extension types (wire.hpp is_extension_type).
 enum class FrameType : std::uint8_t {
   Discover = 1,
   Offer = 2,
@@ -125,6 +126,11 @@ enum class FrameType : std::uint8_t {
   ControlObject = 49,
   ObjectChunk = 50,
   ObjectAck = 51,
+  // AppObject (#179) extension types. Registered so relays forward them;
+  // until the transfer exists a terminal answers UNSUPPORTED.
+  AppObjectStart = 64,
+  AppObjectChunk = 65,
+  AppObjectAck = 66,
 };
 
 enum class SecurityScope : std::uint8_t {
