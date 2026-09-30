@@ -282,6 +282,11 @@ impl NodeTable {
     /// the previous session was lost).
     pub fn attach(&mut self, gateway: u64, session: u64, supported: bool, now: u64) -> Vec<Change> {
         let mut changes = Vec::new();
+        if self.session != Some(session) || self.gateway != Some(gateway) {
+            for record in self.records.values_mut() {
+                record.last_heard_at = None;
+            }
+        }
         self.session = Some(session);
         self.synced_ms = None;
         self.source = if supported {
@@ -342,6 +347,16 @@ impl NodeTable {
         self.sweep
     }
 
+    /// End-verified ingress proves the origin alive, including multi-hop
+    /// origins. Only the current authenticated gateway session can renew it.
+    pub fn note_verified_origin(&mut self, gateway: u64, session: u64, origin: u64) {
+        if self.gateway == Some(gateway) && self.session == Some(session) {
+            if let Some(record) = self.records.get_mut(&origin) {
+                record.last_heard_at = Some(Instant::now());
+            }
+        }
+    }
+
     /// Applies one gateway-reported entry and returns the transitions.
     pub fn apply(
         &mut self,
@@ -367,8 +382,9 @@ impl NodeTable {
         if entry.heard_valid() {
             record.last_heard_ms = Some(now.saturating_sub(u64::from(entry.heard_age_ms)));
             if !entry.telemetry_stale() {
-                record.last_heard_at = Instant::now()
+                let heard = Instant::now()
                     .checked_sub(Duration::from_millis(u64::from(entry.heard_age_ms)));
+                record.last_heard_at = record.last_heard_at.max(heard);
             }
         }
         let was_neighbor = previous.is_some_and(|p| p.neighbor_active());
@@ -485,8 +501,8 @@ fn metric_opt(value: u16) -> String {
 /// (the Device's T_iso, #192).
 pub const CONNECTIVITY_ISOLATED_MS: u64 = 120_000;
 
-/// Connectivity from authenticated immediate-transmitter evidence, timed
-/// with Instant. A relayed route alone cannot establish node reachability.
+/// Connectivity from authenticated direct or end-verified origin evidence,
+/// timed with Instant. A relayed route alone cannot establish reachability.
 pub fn connectivity(record: &NodeRecord, _now: u64) -> &'static str {
     connectivity_at(record, Instant::now())
 }
@@ -514,10 +530,7 @@ fn connectivity_at(record: &NodeRecord, now: Instant) -> &'static str {
     let age = now.saturating_duration_since(heard);
     if age >= isolated || (!record.connected && since_change >= isolated) {
         "isolated"
-    } else if record.connected
-        && age < Duration::from_secs(60)
-        && !record.live_status().is_some_and(|s| s.telemetry_stale())
-    {
+    } else if record.connected && age < Duration::from_secs(60) {
         "reachable"
     } else {
         "degraded"
@@ -1342,6 +1355,19 @@ mod tests {
             ),
             "isolated"
         );
+        table.note_verified_origin(GW, SESSION + 1, 9);
+        table.note_verified_origin(GW + 1, SESSION, 9);
+        assert_eq!(connectivity(table.get(9).unwrap(), 2_000), "unknown");
+        table.note_verified_origin(GW, SESSION, 9);
+        assert_eq!(connectivity(table.get(9).unwrap(), 2_000), "reachable");
+        table.note_verified_origin(GW, SESSION, 2);
+        entry.flags |= routeloom_protocol::node_status::FLAG_TELEMETRY_STALE;
+        table.apply(&entry, Origin::Sync, None, 2_000);
+        assert_eq!(connectivity(table.get(2).unwrap(), 2_000), "reachable");
+        table.detach(3_000);
+        table.attach(GW, SESSION + 1, true, 4_000);
+        table.apply(&via(9, 2), Origin::Sync, None, 4_000);
+        assert_eq!(connectivity(table.get(9).unwrap(), 4_000), "unknown");
         let mut fresh = NodeRecord::new(3, 0);
         fresh.status = Some(direct(3));
         fresh.connected = true;
