@@ -50,6 +50,10 @@ pub(super) struct UsbHost {
     pub(super) errors: Vec<(u16, u16)>,
     /// DeliveryEvents as (state, reason_id).
     pub(super) deliveries: Vec<(u8, u16)>,
+    /// Sealed DeliveryEvents and Errors per USB request, in arrival
+    /// order: (request, delivery state or `None` for an Error, reason_id,
+    /// sim-time of arrival).
+    pub(super) outcomes: Vec<(u64, Option<u8>, u16, u64)>,
     /// Sim-time of the last inbound wire bytes — the silent-peer
     /// watchdog clock (mirrors `adapter_writer_loop`'s last_rx).
     pub(super) last_rx_ms: u64,
@@ -100,6 +104,7 @@ impl UsbHost {
             diagnostics: 0,
             errors: Vec::new(),
             deliveries: Vec::new(),
+            outcomes: Vec::new(),
             last_rx_ms: 0,
             last_begin_ms: 0,
             last_tx_ms: 0,
@@ -288,15 +293,26 @@ impl UsbHost {
                 self.session_losses += 1;
             }
             let Some(inner) = inbound.inner else { continue };
+            let request_at = |at: usize| {
+                inner
+                    .get(at..at + 8)
+                    .map(|b| u64::from_be_bytes(b.try_into().expect("8 bytes")))
+            };
             if kind == FrameKind::Error {
                 if let (Some(code), Some(reason)) = (reason_id(&inner, 0), reason_id(&inner, 10)) {
                     self.errors.push((code, reason));
+                    if let Some(request) = request_at(2) {
+                        self.outcomes.push((request, None, reason, now));
+                    }
                 }
             }
             if let (FrameKind::DeliveryEvent, Some(&state), Some(reason)) =
                 (kind, inner.get(20), reason_id(&inner, 21))
             {
                 self.deliveries.push((state, reason));
+                if let Some(request) = request_at(0) {
+                    self.outcomes.push((request, Some(state), reason, now));
+                }
             }
             match kind {
                 FrameKind::HostOps => {
@@ -427,23 +443,20 @@ impl UsbHost {
                 let _ = service.with(|a| a.channel_plan.note_sent(request, action, now));
             }
         }
-        let mut kept = Vec::new();
-        for mut pending in self.pending.drain(..) {
-            if self.session.protect(&mut pending.frame).is_ok() {
-                if let Some((adapter, key, terminal)) = pending.join_note {
-                    adapter.note_sent(pending.frame.request, key, terminal);
-                }
-                out.extend_from_slice(&encode_frame(&pending.frame).expect("pending encodes"));
-            } else {
-                kept.push(pending);
+        // `protect` consumes credit in wire order: the first refused frame
+        // and everything behind it keep their places for the next pump.
+        let mut sent = 0;
+        for pending in &mut self.pending {
+            if self.session.protect(&mut pending.frame).is_err() {
                 break;
             }
+            if let Some((adapter, key, terminal)) = pending.join_note.take() {
+                adapter.note_sent(pending.frame.request, key, terminal);
+            }
+            out.extend_from_slice(&encode_frame(&pending.frame).expect("pending encodes"));
+            sent += 1;
         }
-        // `protect` consumes credit in wire order: anything after the
-        // first refused frame keeps its place behind it.
-        let drained: Vec<PendingFrame> = self.pending.drain(..).collect();
-        kept.extend(drained);
-        self.pending = kept;
+        self.pending.drain(..sent);
         // An idle Active session gets a sealed KeepAlive on
         // KEEPALIVE_INTERVAL — the device's liveness accounting and the
         // lane's wire-quiet evidence stay honest (production

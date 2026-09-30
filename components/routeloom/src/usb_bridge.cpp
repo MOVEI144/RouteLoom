@@ -366,6 +366,23 @@ void UsbBridge::poll(const MonotonicMs now_ms) noexcept {
 #if ROUTELOOM_USB_OBSERVATION
   pump_observation_events(now_ms);
 #endif
+  if (state_ == SessionState::Active || state_ == SessionState::Draining) {
+    // Legacy send outcomes a full queue could not take earlier (bounded by
+    // the record table), oldest first.
+    for (IdempotencyRecord* record = idempotency_.next_unreported(keys_.session_id);
+         record != nullptr && report_outcome(*record, now_ms);
+         record = idempotency_.next_unreported(keys_.session_id)) {
+    }
+    for (std::size_t i = 0; i < kRxGrantFrames && !legacy_refusals_.empty(); ++i) {
+      const auto& refusal = *legacy_refusals_.front();
+      if (!send_error(refusal.code, refusal.request, refusal.reason, now_ms)) break;
+      legacy_refusals_.drop();
+    }
+    if (rx_grant_due_ && control_q_.empty() && legacy_refusals_.empty()) {
+      rx_grant_due_ = false;
+      issue_rx_grant(false, now_ms);
+    }
+  }
   pump_tx(now_ms);
   if (state_ == SessionState::Draining && !tx_wire_active_ && control_q_.empty() &&
       data_q_.empty()) {
@@ -618,7 +635,7 @@ void UsbBridge::handle_authenticated(const UsbFrame& frame,
     }
   }
   dispatch_inner(frame.kind, frame.flags, frame.request, inner, now_ms);
-  if (!is_control_kind(frame.kind)) issue_rx_grant(false, now_ms);
+  if (!is_control_kind(frame.kind)) rx_grant_due_ = true;
 }
 
 void UsbBridge::dispatch_inner(const FrameKind kind, const std::uint16_t flags,
@@ -718,70 +735,106 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
       payload_hash(ByteView{tx_body_.data(), inner.size + 1});
   IdempotencyRecord* record = nullptr;
   const IdempotencyResult result = idempotency_.submit(
-      ByteView{transcript_.principal.data(), transcript_.principal_len},
-      transcript_.network, static_cast<std::uint8_t>(FrameKind::DataToMesh),
-      idempotency_key, hash, now_ms, record);
+      idempotency_key, hash, keys_.session_id, now_ms, record);
   if (result == IdempotencyResult::Conflict) {
-    send_error(UsbErrorCode::Conflict, request, ROUTELOOM_REASON_IDEMPOTENCY_CONFLICT, now_ms);
+    refuse_legacy(request, UsbErrorCode::Conflict, ROUTELOOM_REASON_IDEMPOTENCY_CONFLICT, now_ms);
     return;
   }
-  if (result == IdempotencyResult::WindowExpired) {
-    send_error(UsbErrorCode::Conflict, request,
-               ROUTELOOM_REASON_IDEMPOTENCY_WINDOW_EXPIRED, now_ms);
+  if (result == IdempotencyResult::ResultExpired) {
+    // The key's record was reclaimed after it ended: never executed again,
+    // and its outcome is no longer known.
+    refuse_legacy(request, UsbErrorCode::Conflict, ROUTELOOM_REASON_RESULT_EXPIRED, now_ms);
     return;
   }
   if (result == IdempotencyResult::NoCapacity || record == nullptr) {
-    send_error(UsbErrorCode::NoCapacity, request, ROUTELOOM_REASON_IDEMPOTENCY_FULL, now_ms);
+    refuse_legacy(request, UsbErrorCode::NoCapacity, ROUTELOOM_REASON_IDEMPOTENCY_FULL, now_ms);
     return;
   }
   if (result == IdempotencyResult::Existing) {
-    if (record->accepted) {
-      std::array<std::uint8_t, 8 + 4 + 8 + 1 + 3> body{};
-      write_u64(body.data(), request);
-      write_u32(body.data() + 8, record->message_session);
-      write_u64(body.data() + 12, record->message_sequence);
-      body[20] = static_cast<std::uint8_t>(DeliveryState::Accepted);
-      const std::size_t size =
-          21 + write_reason(body.data() + 21, ROUTELOOM_REASON_IDEMPOTENT_REPLAY, nullptr, 0);
-      enqueue(FrameKind::DeliveryEvent, 0, request, ByteView{body.data(), size}, now_ms);
+    if (!idempotency_.repeat(record, request)) {
+      refuse_legacy(request, UsbErrorCode::NoCapacity, ROUTELOOM_REASON_IDEMPOTENCY_FULL, now_ms);
+      return;
+    }
+    if (record->settled) {
+      record->reported = false;
+      (void)report_outcome(*record, now_ms);
     } else {
-      send_error(static_cast<UsbErrorCode>(record->error_code), request,
-                 ROUTELOOM_REASON_IDEMPOTENT_REPLAY, now_ms);
+      (void)emit_delivery_event(request,
+          DeliveryResult{MessageId{record->message_session, record->message_sequence},
+                         DeliveryState::Accepted, nullptr},
+          nullptr, ROUTELOOM_REASON_IDEMPOTENT_REPLAY);
     }
     return;
   }
 
+  record->request = request;
   // First submission: fill the stored outcome honestly.
-  if (config_.mesh == nullptr) {
+  const auto refuse = [&](const UsbErrorCode code, const std::uint16_t reason_id,
+                          const char* detail) {
     record->accepted = false;
     record->settled = true;
-    record->error_code = static_cast<std::uint16_t>(UsbErrorCode::Unsupported);
-    send_error(UsbErrorCode::Unsupported, request, ROUTELOOM_REASON_NO_MESH, now_ms);
+    record->settled_ms = now_ms;
+    record->error_code = static_cast<std::uint16_t>(code);
+    record->reason_id = reason_id;
+    record->reason_detail = detail;
+    (void)report_outcome(*record, now_ms);
+  };
+  if (config_.mesh == nullptr) {
+    refuse(UsbErrorCode::Unsupported, ROUTELOOM_REASON_NO_MESH, nullptr);
     return;
   }
   if (payload.size > kMaxApplicationPayload) {
-    record->accepted = false;
-    record->settled = true;
-    record->error_code = static_cast<std::uint16_t>(UsbErrorCode::PayloadTooLarge);
-    send_error(UsbErrorCode::PayloadTooLarge, request, ROUTELOOM_REASON_PAYLOAD_TOO_LARGE, now_ms);
+    refuse(UsbErrorCode::PayloadTooLarge, ROUTELOOM_REASON_PAYLOAD_TOO_LARGE, nullptr);
     return;
   }
   pending_request_ = request;
+  pending_record_ = record;
   MessageId id{};
   const Status status =
       config_.mesh->send(destination, payload, SendOptions{}, now_ms, id);
   pending_request_ = 0;
+  pending_record_ = nullptr;
   if (!status) {
-    record->accepted = false;
-    record->settled = true;
-    record->error_code = static_cast<std::uint16_t>(UsbErrorCode::MeshRejected);
-    send_error(UsbErrorCode::MeshRejected, request, status.detail, now_ms);
+    refuse(UsbErrorCode::MeshRejected, reason_code(status.detail), status.detail);
     return;
   }
   record->accepted = true;
   record->message_session = id.session;
   record->message_sequence = id.sequence;
   track_request(id, request);
+  // A terminal callback inside mesh->send settled the record already.
+  if (record->settled) (void)report_outcome(*record, now_ms);
+}
+
+void UsbBridge::refuse_legacy(const std::uint64_t request, const UsbErrorCode code,
+                              const std::uint16_t reason, const MonotonicMs now_ms) noexcept {
+  if (!send_error(code, request, reason, now_ms)) {
+    // RX credit bounds this queue; grants wait for it to drain.
+    (void)legacy_refusals_.push(LegacyRefusal{request, code, reason});
+  }
+}
+
+bool UsbBridge::report_outcome(IdempotencyRecord& record,
+                                const MonotonicMs now_ms) noexcept {
+  if ((state_ != SessionState::Active && state_ != SessionState::Draining) ||
+      record.usb_session != keys_.session_id) {
+    return false;
+  }
+  const std::uint16_t reason_id =
+      record.replay ? static_cast<std::uint16_t>(ROUTELOOM_REASON_IDEMPOTENT_REPLAY)
+                    : record.reason_id;
+  const char* detail = record.replay ? nullptr : record.reason_detail;
+  bool queued = false;
+  if (record.accepted) {
+    queued = emit_delivery_event(record.request,
+        DeliveryResult{MessageId{record.message_session, record.message_sequence},
+                       record.final_state, detail}, nullptr, reason_id);
+  } else {
+    queued = send_error(static_cast<UsbErrorCode>(record.error_code), record.request,
+                        reason_id, detail, now_ms);
+  }
+  if (queued) record.reported = true;
+  return queued;
 }
 
 void UsbBridge::handle_host_ops(const std::uint64_t request,
@@ -2741,18 +2794,18 @@ void UsbBridge::issue_rx_grant(const bool initial, const MonotonicMs now_ms) noe
   enqueue(FrameKind::Credit, 0, 0, ByteView{grant.data(), grant.size()}, now_ms);
 }
 
-void UsbBridge::send_error(const UsbErrorCode code, const std::uint64_t request,
+bool UsbBridge::send_error(const UsbErrorCode code, const std::uint64_t request,
                            const std::uint16_t reason_id,
                            const MonotonicMs now_ms) noexcept {
-  send_error(code, request, reason_id, nullptr, now_ms);
+  return send_error(code, request, reason_id, nullptr, now_ms);
 }
 
-void UsbBridge::send_error(const UsbErrorCode code, const std::uint64_t request,
+bool UsbBridge::send_error(const UsbErrorCode code, const std::uint64_t request,
                            const char* detail, const MonotonicMs now_ms) noexcept {
-  send_error(code, request, reason_code(detail), detail, now_ms);
+  return send_error(code, request, reason_code(detail), detail, now_ms);
 }
 
-void UsbBridge::send_error(const UsbErrorCode code, const std::uint64_t request,
+bool UsbBridge::send_error(const UsbErrorCode code, const std::uint64_t request,
                            const std::uint16_t reason_id, const char* detail,
                            const MonotonicMs now_ms) noexcept {
   // inner: code u16 || request u64 || reason_id u16 || detail_len u8 || detail
@@ -2760,7 +2813,7 @@ void UsbBridge::send_error(const UsbErrorCode code, const std::uint64_t request,
   write_u16(body.data(), static_cast<std::uint16_t>(code));
   write_u64(body.data() + 2, request);
   const std::size_t size = 10 + write_reason(body.data() + 10, reason_id, detail, kMaxReasonLen);
-  enqueue(FrameKind::Error, 0, request, ByteView{body.data(), size}, now_ms);
+  return enqueue(FrameKind::Error, 0, request, ByteView{body.data(), size}, now_ms);
 }
 
 bool UsbBridge::enqueue(const FrameKind kind, const std::uint16_t flags,
@@ -2976,6 +3029,9 @@ void UsbBridge::reset_session_state() noexcept {
   tx_wire_size_ = 0;
   tx_wire_sent_ = 0;
   pending_request_ = 0;
+  pending_record_ = nullptr;
+  rx_grant_due_ = false;
+  legacy_refusals_.clear();
   request_map_ = FixedPool<RequestMap, kRequestMapCapacity>{};
   // Pending diagnostic queries are session state: a reconnected session can
   // never observe a late reply under a minted slot (04 §USB correlation).
@@ -3082,14 +3138,36 @@ void UsbBridge::emit_ingress(const MessageKey& key, const ByteView payload,
 }
 
 void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
-  // A terminal outcome settles the legacy send's idempotency record: its
-  // stored admission result stays replayable, but a full table may now
-  // evict it (oldest first) instead of wedging on failed deliveries.
-  if (result.state == DeliveryState::Delivered || result.state == DeliveryState::Failed ||
+  // A terminal outcome settles the legacy send's idempotency record. The
+  // record, not the TX queue, holds the outcome until it is reported, so a
+  // full queue delays the terminal event instead of losing it; a settled
+  // and reported record is what a full table reclaims.
+  const bool terminal =
+      result.state == DeliveryState::Delivered || result.state == DeliveryState::Failed ||
       result.state == DeliveryState::Expired ||
       result.state == DeliveryState::CancelledBeforeTx ||
-      result.state == DeliveryState::Indeterminate) {
-    idempotency_.settle(result.id.session, result.id.sequence);
+      result.state == DeliveryState::Indeterminate;
+  if (terminal) {
+    IdempotencyRecord* legacy =
+        pending_record_ != nullptr
+            ? pending_record_
+            : idempotency_.find_message(result.id.session, result.id.sequence);
+    if (legacy != nullptr) {
+      // Each accepted retry has its own bounded outcome reservation.
+      for (std::size_t i = 0; legacy != nullptr && i < IdempotencyTable::kCapacity; ++i) {
+        if (!legacy->settled) {
+          legacy->settled = true;
+          legacy->settled_ms = now_ms_;
+          legacy->final_state = result.state;
+          legacy->reason_id = reason_code(result.reason);
+          legacy->reason_detail = result.reason;
+          if (pending_record_ != nullptr) return;
+          (void)report_outcome(*legacy, now_ms_);
+        }
+        legacy = idempotency_.find_message(result.id.session, result.id.sequence, true);
+      }
+      return;
+    }
   }
   // Host-ops-correlated deliveries update the dispatch window instead of
   // emitting a DeliveryEvent: their authoritative state is pulled via
@@ -3124,10 +3202,11 @@ void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
   emit_delivery_event(request, result);
 }
 
-void UsbBridge::emit_delivery_event(const std::uint64_t request,
+bool UsbBridge::emit_delivery_event(const std::uint64_t request,
                                     const DeliveryResult& result,
                                     const std::array<std::uint8_t, kOperationIdSize>*
-                                        operation_id) noexcept {
+                                        operation_id,
+                                    const std::uint16_t reason_id) noexcept {
   // inner: request(8) || msg_session(4) || msg_seq(8) || state(1) ||
   //        reason_id(2) || detail_len(1) || detail || [operation_id(24)]
   std::array<std::uint8_t, 8 + 4 + 8 + 1 + 3 + kMaxReasonLen + kOperationIdSize>
@@ -3137,14 +3216,15 @@ void UsbBridge::emit_delivery_event(const std::uint64_t request,
   write_u64(inner.data() + 12, result.id.sequence);
   inner[20] = static_cast<std::uint8_t>(result.state);
   const std::size_t tail =
-      21 + write_reason(inner.data() + 21, reason_code(result.reason), result.reason,
-                        kMaxReasonLen);
+      21 + write_reason(inner.data() + 21,
+                        reason_id != 0 ? reason_id : reason_code(result.reason),
+                        result.reason, kMaxReasonLen);
   if (operation_id != nullptr) {
     std::memcpy(inner.data() + tail, operation_id->data(), operation_id->size());
   }
-  enqueue(FrameKind::DeliveryEvent, 0, request,
-          ByteView{inner.data(), tail + (operation_id != nullptr ? kOperationIdSize : 0)},
-          now_ms_);
+  return enqueue(FrameKind::DeliveryEvent, 0, request,
+                 ByteView{inner.data(), tail + (operation_id != nullptr ? kOperationIdSize : 0)},
+                 now_ms_);
 }
 
 bool UsbBridge::emit_diagnostic(const char* reason, const NodeId peer,

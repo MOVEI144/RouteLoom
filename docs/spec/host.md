@@ -12,7 +12,7 @@ admissionは`--admission-profile normal|bench-v1|control`で起動時に選ぶ�
 
 `NODES`は機器がnode_status_v1（[USB §7](usb-protocol.md)）で報告した接続状態・RSSI・直結hop数を返し、報告の無いnodeだけ`unknown`とする。`routeloomctl`は1コマンド接続、`routeloom-tui`は同一JSONをpollして全画面を描画する観測者で、USB deviceは開かない。これは版管理RPC schema（§3）の前段の開発profileであり、authority・承認済みmembership等daemonに情報源が無いfieldは`unknown`として返す。
 
-旧式の`SEND`を追う`DELIVERIES`は、機器の終端`DeliveryEvent`を受け取れない場合、受付から15秒（既定のmesh lifetime 5秒＋USB/event余裕10秒）で非終端状態を`indeterminate`／`DELIVERY_EVENT_TIMEOUT`へ進める。これは配送失敗の証明ではなく、遅れて届いた終端証拠は結果を更新できる。
+旧式の`SEND`を追う`DELIVERIES`は、機器の終端`DeliveryEvent`を受け取れない場合、受付から15秒（既定のmesh lifetime 5秒＋USB/event余裕10秒）で非終端状態を`indeterminate`／`DELIVERY_EVENT_TIMEOUT`へ進める。これは配送失敗の証明ではなく、遅れて届いた終端証拠は結果を更新できる。機器が`RESULT_EXPIRED`を返した送信（同じkeyが既に終端し、gatewayが記録を回収した。[USB §5](usb-protocol.md)）は再実行されておらず、成功とも失敗とも言えないため`indeterminate`／`RESULT_EXPIRED`にする。
 
 一つのdaemonが複数USB adapterと複数ネットワークを扱える。adapter、Network、Gateway、host serviceを別の識別子にする。相互転送は明示許可がある場合だけで、v1は異Networkの透過bridgeを提供しない。
 

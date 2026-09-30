@@ -1536,10 +1536,14 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     .iter()
                     .any(|d| d.request == request);
                 if request != 0 && tracked {
+                    // RESULT_EXPIRED: the key already ended and the device
+                    // reclaimed its record. It was not executed again and is
+                    // neither a success nor a failure of this request.
+                    let expired = reason.as_deref() == Some("RESULT_EXPIRED");
                     delivery_update(
                         state,
                         request,
-                        "failed",
+                        if expired { "indeterminate" } else { "failed" },
                         DeliveryPatch {
                             reason: reason.clone(),
                             ..DeliveryPatch::default()
@@ -2700,10 +2704,15 @@ fn serve_client(
                                 deny.scope, deny.retry_after_ms
                             )
                         } else {
-                        // Body: idempotency_key(8) || destination(8) ||
-                        // payload. The key is a daemon-unique identity the
-                        // device may persist across sessions; the CLI does
-                        // not resubmit, so a fresh key per SEND suffices.
+                        // Serialize key allocation and enqueue across clients:
+                        // the session floor requires monotonic keys in wire order.
+                        // The queue operation is nonblocking; release the session
+                        // lock before updating delivery state or writing to IPC.
+                        let send_guard = device_session.lock().map_err(|_| {
+                            io::Error::other("device session poisoned")
+                        })?;
+                        // Body: idempotency_key(8) || destination(8) || payload.
+                        // Legacy SEND never resubmits across HostLink sessions.
                         let mut body = next_idem_key
                             .fetch_add(1, Ordering::Relaxed)
                             .to_be_bytes()
@@ -2715,13 +2724,15 @@ fn serve_client(
                         // instead of blocking this client thread while the
                         // adapter is disconnected. The writer seals the body
                         // under the session key before writing.
-                        match outbound.try_send(Outbound::Seal(Frame {
+                        let queued = outbound.try_send(Outbound::Seal(Frame {
                             kind: FrameKind::DataToMesh,
                             flags: 0,
                             session: active_session.expect("authenticated above"),
                             request,
                             body,
-                        })) {
+                        }));
+                        drop(send_guard);
+                        match queued {
                             Ok(()) => {
                                 delivery_update(
                                     &state,
@@ -4351,6 +4362,24 @@ mod tests {
         let json = deliveries_json(&state);
         assert!(json.contains("\"state\":\"failed\""));
         assert!(json.contains("\"reason\":\"NACK\""));
+
+        // RESULT_EXPIRED: the key ended earlier and its record was
+        // reclaimed; neither delivered nor failed.
+        delivery_update(&state, 4, "sent", DeliveryPatch::default(), 300);
+        let mut body = 6_u16.to_be_bytes().to_vec();
+        body.extend_from_slice(&4_u64.to_be_bytes());
+        body.extend_from_slice(&routeloom_protocol::manifest::REASON_RESULT_EXPIRED.to_be_bytes());
+        body.push(0);
+        record_frame(
+            &state,
+            &frame(FrameKind::Error, 0, 4, body.clone()),
+            &body,
+            400,
+        );
+        let json = deliveries_json(&state);
+        assert!(json.contains(
+            "\"request\":4,\"destination\":0,\"state\":\"indeterminate\",\"reason\":\"RESULT_EXPIRED\""
+        ));
     }
 
     #[test]
