@@ -191,10 +191,15 @@ IdempotencyResult IdempotencyTable::submit(
   if (principal.size > kMaxPrincipalSize) {
     return IdempotencyResult::Conflict;  // unreachable via bridge (bounded)
   }
+  if (floor_session_ != usb_session) {
+    floor_session_ = usb_session;
+    has_floor_ = false;
+  }
   for (std::size_t i = 0; i < kCapacity; ++i) {
     if (!used_[i]) continue;
     IdempotencyRecord& entry = records_[i];
-    if (entry.network != network || entry.operation_class != operation_class ||
+    if (entry.usb_session != usb_session || entry.network != network ||
+        entry.operation_class != operation_class ||
         entry.key != key || entry.principal_len != principal.size) {
       continue;
     }
@@ -202,38 +207,13 @@ IdempotencyResult IdempotencyTable::submit(
         std::memcmp(entry.principal.data(), principal.data, principal.size) != 0) {
       continue;
     }
-    entry.last_use_ms = now_ms;
     record = &entry;
     return entry.hash == hash ? IdempotencyResult::Existing
                               : IdempotencyResult::Conflict;
   }
-  for (const SessionFloor& floor : floors_) {
-    if (floor.usb_session != 0 && key >= floor.low && key <= floor.high) {
-      return IdempotencyResult::ResultExpired;
-    }
-  }
-  std::size_t slot = kCapacity;
-  MonotonicMs oldest_use = ~MonotonicMs{0};
-  for (std::size_t i = 0; i < kCapacity; ++i) {
-    if (!used_[i]) {
-      slot = i;
-      break;
-    }
-    // Reclaimable: terminal and reported (or owed to a session that is
-    // gone), or past retention. An in-flight record is kept: the caller
-    // reports IDEMPOTENCY_FULL and the host backs off.
-    const IdempotencyRecord& entry = records_[i];
-    const MonotonicMs age = now_ms >= entry.last_use_ms ? now_ms - entry.last_use_ms : 0;
-    const bool reclaimable =
-        age >= kRetentionMs ||
-        (entry.settled && (entry.reported || entry.usb_session != usb_session));
-    if (reclaimable && entry.last_use_ms < oldest_use) {
-      oldest_use = entry.last_use_ms;
-      slot = i;
-    }
-  }
+  if (has_floor_ && key <= floor_) return IdempotencyResult::ResultExpired;
+  const std::size_t slot = reclaim_slot(usb_session);
   if (slot == kCapacity) return IdempotencyResult::NoCapacity;
-  if (used_[slot]) raise_floor(records_[slot]);
   used_[slot] = true;
   IdempotencyRecord& entry = records_[slot];
   entry = IdempotencyRecord{};
@@ -245,29 +225,50 @@ IdempotencyResult IdempotencyTable::submit(
   entry.operation_class = operation_class;
   entry.key = key;
   entry.hash = hash;
-  entry.last_use_ms = now_ms;
+  entry.settled_ms = now_ms;
   entry.usb_session = usb_session;
   record = &entry;
   return IdempotencyResult::Accepted;
 }
 
-void IdempotencyTable::raise_floor(const IdempotencyRecord& reclaimed) noexcept {
-  for (SessionFloor& floor : floors_) {
-    if (floor.usb_session == reclaimed.usb_session) {
-      if (reclaimed.key < floor.low) floor.low = reclaimed.key;
-      if (reclaimed.key > floor.high) floor.high = reclaimed.key;
-      return;
+std::size_t IdempotencyTable::reclaim_slot(const std::uint64_t usb_session) noexcept {
+  std::size_t slot = kCapacity;
+  for (std::size_t i = 0; i < kCapacity; ++i) {
+    if (!used_[i]) return i;
+    const IdempotencyRecord& entry = records_[i];
+    if (entry.settled && (entry.reported || entry.usb_session != usb_session) &&
+        (slot == kCapacity || entry.settled_ms < records_[slot].settled_ms)) {
+      slot = i;
     }
   }
-  // A new session's floor replaces the oldest one.
-  floors_[next_floor_] = SessionFloor{reclaimed.usb_session, reclaimed.key, reclaimed.key};
-  next_floor_ = (next_floor_ + 1) % kFloorCapacity;
+  if (slot != kCapacity && records_[slot].usb_session == floor_session_) {
+    if (!has_floor_ || records_[slot].key > floor_) floor_ = records_[slot].key;
+    has_floor_ = true;
+  }
+  return slot;
+}
+
+bool IdempotencyTable::repeat(IdempotencyRecord*& record,
+                               const std::uint64_t request) noexcept {
+  if (record->request == request) return true;
+  if (!record->settled || !record->reported) {
+    const std::size_t slot = reclaim_slot(record->usb_session);
+    if (slot == kCapacity) return false;
+    records_[slot] = *record;
+    used_[slot] = true;
+    record = &records_[slot];
+  }
+  record->request = request;
+  record->reported = false;
+  record->replay = true;
+  return true;
 }
 
 IdempotencyRecord* IdempotencyTable::find_message(
-    const std::uint32_t message_session, const std::uint64_t message_sequence) noexcept {
+    const std::uint32_t message_session, const std::uint64_t message_sequence,
+    const bool unsettled_only) noexcept {
   for (std::size_t i = 0; i < kCapacity; ++i) {
-    if (used_[i] && records_[i].accepted &&
+    if (used_[i] && records_[i].accepted && (!unsettled_only || !records_[i].settled) &&
         records_[i].message_session == message_session &&
         records_[i].message_sequence == message_sequence) {
       return &records_[i];
@@ -283,7 +284,7 @@ IdempotencyRecord* IdempotencyTable::next_unreported(const std::uint64_t usb_ses
     if (!used_[i] || !entry.settled || entry.reported || entry.usb_session != usb_session) {
       continue;
     }
-    if (oldest == nullptr || entry.last_use_ms < oldest->last_use_ms) oldest = &entry;
+    if (oldest == nullptr || entry.settled_ms < oldest->settled_ms) oldest = &entry;
   }
   return oldest;
 }

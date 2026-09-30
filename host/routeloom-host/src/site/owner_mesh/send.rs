@@ -154,9 +154,10 @@ fn mesh_send_thousand_per_boot_without_duplicates() {
         !histogram.contains_key(&(None, reasons::REASON_IDEMPOTENCY_FULL)),
         "no IDEMPOTENCY_FULL while terminal records are reclaimable"
     );
-    assert!(
-        u64::from(delivered) >= total * 99 / 100,
-        "{delivered}/{total} delivered"
+    assert_eq!(
+        u64::from(delivered),
+        total,
+        "every send accepted and delivered"
     );
 
     // A recent key replays its stored result; the first key's record was
@@ -182,4 +183,23 @@ fn mesh_send_thousand_per_boot_without_duplicates() {
         delivered,
         "each delivered key reached its destination exactly once"
     );
+}
+
+/// A retry before mesh completion must not steal the original request's
+/// terminal notification. Both requests describe one mesh delivery.
+#[test]
+fn mesh_send_inflight_replay_terminates_both_requests() {
+    let Some(mut world) = sent_world("m11-replay") else {
+        return;
+    };
+    let rx = world.snaps[1].rx_count;
+    let first = legacy_send(&mut world, 0x5300, NODE_A, b"retry");
+    let retry = legacy_send(&mut world, 0x5300, NODE_A, b"retry");
+    world.pump_until(((DEADLINE_MS + GRACE_MS) / 25) as u32, |_| false);
+    for request in [first, retry] {
+        let ends = terminals(&world, request);
+        assert_eq!(ends.len(), 1, "request {request}: {ends:?}");
+        assert_eq!(ends[0].0, Some(DELIVERY_DELIVERED));
+    }
+    assert_eq!(world.snaps[1].rx_count - rx, 1, "one logical delivery");
 }

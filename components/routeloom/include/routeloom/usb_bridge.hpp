@@ -623,14 +623,18 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // attempt, so a drop leaves a gap the PC can see.
   bool emit_diagnostic(const char* reason, NodeId peer, const MessageId* message,
                        MonotonicMs now_ms) noexcept;
+  // At most one refusal per outstanding RX credit; no new grant until
+  // these compact replies have entered the CONTROL queue.
+  void refuse_legacy(std::uint64_t request, UsbErrorCode code,
+                     std::uint16_t reason, MonotonicMs now_ms) noexcept;
   void handle_credit(std::uint64_t request, ByteView inner,
                      MonotonicMs now_ms) noexcept;
   void issue_rx_grant(bool initial, MonotonicMs now_ms) noexcept;
   // Queues a legacy send's terminal outcome (refusal Error or terminal
-  // DeliveryEvent) to the request it is owed to; `replay` answers a
+  // DeliveryEvent) to the request it is owed to; the record marks a
   // resubmission. False while that session is not the live one or the TX
   // queue is full: the record stays unreported and poll() retries it.
-  bool report_outcome(IdempotencyRecord& record, bool replay,
+  bool report_outcome(IdempotencyRecord& record,
                       MonotonicMs now_ms) noexcept;
   // Error frame with a registered reason id (manifest hostlink area) or,
   // from a Status detail, the detail's registered id or its text. False
@@ -779,6 +783,12 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // is empty, so grants never crowd out answers and the host sends no
   // faster than the device can answer.
   bool rx_grant_due_{false};
+  struct LegacyRefusal {
+    std::uint64_t request;
+    UsbErrorCode code;
+    std::uint16_t reason;
+  };
+  FixedQueue<LegacyRefusal, kRxGrantFrames> legacy_refusals_{};
   // True while a host_ops SUBMIT's synchronous mesh->send runs: the Accepted/
   // Queued callbacks it fires must be suppressed (the window record is
   // created right after, and later callbacks correlate through it).

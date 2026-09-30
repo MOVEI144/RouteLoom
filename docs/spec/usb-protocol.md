@@ -50,9 +50,13 @@ zero-credit時のqueryは500ms以上の間隔で最大3回、応答が無けれ�
 
 ## 5. 操作identityと結果
 
-USB request IDはsession内一意、Message IDは論理配送の寿命、host idempotency identityは `(principal, network, operation_class, key)`。同identity・同canonical payload hashは既存結果、同identity・異hashはCONFLICT。
+USB request IDはsession内一意、Message IDは論理配送の寿命、legacy DataToMeshのidempotency identityは `(HostLink session incarnation, principal, network, operation_class, key)`。同identity・同canonical payload hashは既存結果、同identity・異hashはCONFLICT。
 
-旧式の`DataToMesh`（key付き送信）は、gatewayが1起動の間16件の記録を持つ。同じidentityの再送は、未終端なら`Accepted`＋`IDEMPOTENT_REPLAY`、終端済みなら保存した終端状態（拒否ならそのError code）＋`IDEMPOTENT_REPLAY`を返し、終端はその再送のrequestへ返る。表が満杯になると、報告済みの終端記録（またはそのsessionが既に無い記録）のうち最も古いものを回収し、そのkeyをHostLink sessionの回収範囲（下限〜上限、直近4 session分）に加える。hostはsession内でkeyを単調に振るので、範囲は実質そのsessionのfloorになる。範囲内のkeyで記録の無い送信は実行せず`Conflict`＋`RESULT_EXPIRED`（結果は終端済みで、詳細が失われた）を返す。未終端の記録だけで満杯なら`NoCapacity`＋`IDEMPOTENCY_FULL`。受理した送信の終端（`DeliveryEvent`の終端状態、または拒否のError）は記録が報告済みになるまで保持し、TX queueが満杯でも後のpollで送り直すので、非終端のまま残らない。RX grantはCONTROL queueが空の時だけ1件にまとめて出し、hostは機器が答えられる速さでしか送れない。HostOps `SUBMIT`（dispatch window）は別の表で、hostの`RETIRE`で回収する。
+旧式の`DataToMesh`（key付き送信）は、gatewayが16件の記録を持つ。同じidentityの再送は、未終端なら`Accepted`＋`IDEMPOTENT_REPLAY`、終端済みなら保存した終端状態（拒否ならそのError code）＋`IDEMPOTENT_REPLAY`を返す。未報告のrequestがある再送は同じ16枠から通知枠を予約し、元requestと再送requestの両方へ終端を返す。予約できなければ受理前に`NoCapacity`＋`IDEMPOTENCY_FULL`。表が満杯になると、報告済みの終端記録（またはそのsessionが既に無い終端記録）のうち終端時刻が最も古いものを回収する。未終端記録は時間経過でも回収しない。
+
+回収したkeyまで、現HostLink sessionのfloorを単調に上げる。hostは新規keyをsession内で単調に割り当てる。記録が残っていればfloor以下でも保存した結果を返し、記録が無ければfloor以下の全keyを`Conflict`＋`RESULT_EXPIRED`（終端済みで詳細が失われた）として拒否し、再実行しない。floorとkeyの名前空間は認証されたincarnationに束縛する。再接続後の別sessionでは新しい名前空間となり、旧sessionのsealed frameは認証経路で拒否する。旧keyを新sessionへ載せ替えて再送してはならない（sessionをまたぐ耐久送信はHostOps `SUBMIT`／dispatch windowを使う）。daemonのlegacy SENDはsessionをまたいで再送しない。
+
+受理した送信の終端はTX queueに入るまで記録に保持する。CONTROL queueに入らない`RESULT_EXPIRED`／`CONFLICT`／`IDEMPOTENCY_FULL`もRX credit 1窓分だけ保持し、その拒否応答が進むまで追加grantを出さない。RX grantはCONTROL queueが空の時に1件へ合流する。USB接続とcreditが進む条件で、連続送信は既定deadline 5 s＋grace 1 s以内に終端する。切断・credit停止はhostの既存timeoutで`indeterminate`となる。HostOps `SUBMIT`は別の表で、`RETIRE`で回収する。
 
 COMMAND_ACCEPTEDは機器受付だけ。管理確定、PC永続保存、アプリ適用は別event。再接続で信用先が変わったら旧認可を引き継がない。
 

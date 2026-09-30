@@ -2704,10 +2704,15 @@ fn serve_client(
                                 deny.scope, deny.retry_after_ms
                             )
                         } else {
-                        // Body: idempotency_key(8) || destination(8) ||
-                        // payload. The key is a daemon-unique identity the
-                        // device may persist across sessions; the CLI does
-                        // not resubmit, so a fresh key per SEND suffices.
+                        // Serialize key allocation and enqueue across clients:
+                        // the session floor requires monotonic keys in wire order.
+                        // The queue operation is nonblocking; release the session
+                        // lock before updating delivery state or writing to IPC.
+                        let send_guard = device_session.lock().map_err(|_| {
+                            io::Error::other("device session poisoned")
+                        })?;
+                        // Body: idempotency_key(8) || destination(8) || payload.
+                        // Legacy SEND never resubmits across HostLink sessions.
                         let mut body = next_idem_key
                             .fetch_add(1, Ordering::Relaxed)
                             .to_be_bytes()
@@ -2719,13 +2724,15 @@ fn serve_client(
                         // instead of blocking this client thread while the
                         // adapter is disconnected. The writer seals the body
                         // under the session key before writing.
-                        match outbound.try_send(Outbound::Seal(Frame {
+                        let queued = outbound.try_send(Outbound::Seal(Frame {
                             kind: FrameKind::DataToMesh,
                             flags: 0,
                             session: active_session.expect("authenticated above"),
                             request,
                             body,
-                        })) {
+                        }));
+                        drop(send_guard);
+                        match queued {
                             Ok(()) => {
                                 delivery_update(
                                     &state,

@@ -120,8 +120,8 @@ Status open_body(const SessionKey& key, std::uint8_t direction, const UsbFrame& 
 SessionTag payload_hash(ByteView canonical_request) noexcept;
 
 // Fixed-capacity idempotency record set scoped by
-// (principal, network, operation_class, key). Same identity + same payload
-// hash returns the stored result; same identity + different hash conflicts.
+// (HostLink session, principal, network, operation_class, key). Same identity
+// and payload hash returns the stored result; different hash conflicts.
 struct IdempotencyRecord {
   std::array<std::uint8_t, kMaxPrincipalSize> principal{};
   std::uint8_t principal_len{0};
@@ -134,10 +134,10 @@ struct IdempotencyRecord {
   std::uint16_t error_code{0};
   std::uint32_t message_session{0};
   std::uint64_t message_sequence{0};
-  // Last identity touch; orders reclamation and drives retention expiry.
-  MonotonicMs last_use_ms{0};
+  // Terminal time; orders reclamation without extending it on replay.
+  MonotonicMs settled_ms{0};
   // HostLink session and USB request the terminal outcome is owed to (the
-  // latest submission of this identity; request ids are session-scoped).
+  // submission of this identity; request ids are session-scoped).
   std::uint64_t usb_session{0};
   std::uint64_t request{0};
   // Terminal outcome: admission refused (`error_code`), or the mesh
@@ -150,6 +150,7 @@ struct IdempotencyRecord {
   // The terminal outcome reached the TX queue of `usb_session`. A settled
   // record is reclaimable once reported or once its session is gone.
   bool reported{false};
+  bool replay{false};
 };
 
 enum class IdempotencyResult : std::uint8_t {
@@ -159,45 +160,34 @@ enum class IdempotencyResult : std::uint8_t {
 class IdempotencyTable {
  public:
   static constexpr std::size_t kCapacity = 16;
-  // A full table reclaims its oldest terminal record and raises that
-  // record's session floor: a later submission whose key falls inside a
-  // session's reclaimed range [low, high] answers ResultExpired instead of
-  // executing again (docs/spec/usb-protocol.md §5). Hosts draw keys
-  // monotonically per session, so the range is the session's floor. Floors
-  // of the last kFloorCapacity sessions are kept. In-flight records are
-  // never reclaimed before kRetentionMs; a table of in-flight records
-  // returns NoCapacity.
-  static constexpr MonotonicMs kRetentionMs = 24ULL * 3600ULL * 1000ULL;
-  static constexpr std::size_t kFloorCapacity = 4;
-
-  // Finds or creates the record for this identity. On Existing/Conflict,
-  // `record` points at the stored entry. On Accepted the caller must fill the
-  // result fields; records persist across sessions (host identity scope).
+  // Only terminal, reported records are reclaimed. Keys are monotonic in
+  // the authenticated HostLink session: absent keys at/below its floor
+  // never execute. A new incarnation starts a new key space; old sealed
+  // frames are rejected by UsbBridge before they reach this table.
   IdempotencyResult submit(ByteView principal, NetworkId network,
                            std::uint8_t operation_class, std::uint64_t key,
                            const SessionTag& hash, std::uint64_t usb_session,
                            MonotonicMs now_ms, IdempotencyRecord*& record) noexcept;
 
+  // Each outstanding USB request reserves one of the same 16 records.
+  // Refuses before changing the original request if all slots are owed.
+  bool repeat(IdempotencyRecord*& record, std::uint64_t request) noexcept;
   std::size_t size() const noexcept;
   // The accepted record carrying this mesh message id, or nullptr.
   IdempotencyRecord* find_message(std::uint32_t message_session,
-                                  std::uint64_t message_sequence) noexcept;
+                                  std::uint64_t message_sequence,
+                                  bool unsettled_only = false) noexcept;
   // Settled records whose outcome is still owed to `usb_session`, oldest
   // first through `record`; nullptr when none remain.
   IdempotencyRecord* next_unreported(std::uint64_t usb_session) noexcept;
 
  private:
-  struct SessionFloor {
-    std::uint64_t usb_session{0};
-    std::uint64_t low{0};
-    std::uint64_t high{0};
-  };
-  void raise_floor(const IdempotencyRecord& reclaimed) noexcept;
-
+  std::size_t reclaim_slot(std::uint64_t usb_session) noexcept;
   std::array<IdempotencyRecord, kCapacity> records_{};
   std::array<bool, kCapacity> used_{};
-  std::array<SessionFloor, kFloorCapacity> floors_{};
-  std::size_t next_floor_{0};
+  std::uint64_t floor_session_{0};
+  std::uint64_t floor_{0};
+  bool has_floor_{false};
 };
 
 }  // namespace routeloom::usb

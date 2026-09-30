@@ -370,10 +370,15 @@ void UsbBridge::poll(const MonotonicMs now_ms) noexcept {
     // Legacy send outcomes a full queue could not take earlier (bounded by
     // the record table), oldest first.
     for (IdempotencyRecord* record = idempotency_.next_unreported(keys_.session_id);
-         record != nullptr && report_outcome(*record, false, now_ms);
+         record != nullptr && report_outcome(*record, now_ms);
          record = idempotency_.next_unreported(keys_.session_id)) {
     }
-    if (rx_grant_due_ && control_q_.empty()) {
+    for (std::size_t i = 0; i < kRxGrantFrames && !legacy_refusals_.empty(); ++i) {
+      const auto& refusal = *legacy_refusals_.front();
+      if (!send_error(refusal.code, refusal.request, refusal.reason, now_ms)) break;
+      legacy_refusals_.drop();
+    }
+    if (rx_grant_due_ && control_q_.empty() && legacy_refusals_.empty()) {
       rx_grant_due_ = false;
       issue_rx_grant(false, now_ms);
     }
@@ -734,26 +739,27 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
       transcript_.network, static_cast<std::uint8_t>(FrameKind::DataToMesh),
       idempotency_key, hash, keys_.session_id, now_ms, record);
   if (result == IdempotencyResult::Conflict) {
-    send_error(UsbErrorCode::Conflict, request, ROUTELOOM_REASON_IDEMPOTENCY_CONFLICT, now_ms);
+    refuse_legacy(request, UsbErrorCode::Conflict, ROUTELOOM_REASON_IDEMPOTENCY_CONFLICT, now_ms);
     return;
   }
   if (result == IdempotencyResult::ResultExpired) {
     // The key's record was reclaimed after it ended: never executed again,
     // and its outcome is no longer known.
-    send_error(UsbErrorCode::Conflict, request, ROUTELOOM_REASON_RESULT_EXPIRED, now_ms);
+    refuse_legacy(request, UsbErrorCode::Conflict, ROUTELOOM_REASON_RESULT_EXPIRED, now_ms);
     return;
   }
   if (result == IdempotencyResult::NoCapacity || record == nullptr) {
-    send_error(UsbErrorCode::NoCapacity, request, ROUTELOOM_REASON_IDEMPOTENCY_FULL, now_ms);
+    refuse_legacy(request, UsbErrorCode::NoCapacity, ROUTELOOM_REASON_IDEMPOTENCY_FULL, now_ms);
     return;
   }
-  // From here the terminal outcome is owed to this request.
-  record->usb_session = keys_.session_id;
-  record->request = request;
   if (result == IdempotencyResult::Existing) {
+    if (!idempotency_.repeat(record, request)) {
+      refuse_legacy(request, UsbErrorCode::NoCapacity, ROUTELOOM_REASON_IDEMPOTENCY_FULL, now_ms);
+      return;
+    }
     if (record->settled) {
       record->reported = false;
-      (void)report_outcome(*record, true, now_ms);
+      (void)report_outcome(*record, now_ms);
     } else {
       std::array<std::uint8_t, 8 + 4 + 8 + 1 + 3> body{};
       write_u64(body.data(), request);
@@ -767,15 +773,17 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
     return;
   }
 
+  record->request = request;
   // First submission: fill the stored outcome honestly.
   const auto refuse = [&](const UsbErrorCode code, const std::uint16_t reason_id,
                           const char* detail) {
     record->accepted = false;
     record->settled = true;
+    record->settled_ms = now_ms;
     record->error_code = static_cast<std::uint16_t>(code);
     record->reason_id = reason_id;
     record->reason_detail = detail;
-    (void)report_outcome(*record, false, now_ms);
+    (void)report_outcome(*record, now_ms);
   };
   if (config_.mesh == nullptr) {
     refuse(UsbErrorCode::Unsupported, ROUTELOOM_REASON_NO_MESH, nullptr);
@@ -801,18 +809,27 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
   record->message_sequence = id.sequence;
   track_request(id, request);
   // A terminal callback inside mesh->send settled the record already.
-  if (record->settled) (void)report_outcome(*record, false, now_ms);
+  if (record->settled) (void)report_outcome(*record, now_ms);
 }
 
-bool UsbBridge::report_outcome(IdempotencyRecord& record, const bool replay,
-                               const MonotonicMs now_ms) noexcept {
+void UsbBridge::refuse_legacy(const std::uint64_t request, const UsbErrorCode code,
+                              const std::uint16_t reason, const MonotonicMs now_ms) noexcept {
+  if (!send_error(code, request, reason, now_ms)) {
+    // RX credit bounds this queue; grants wait for it to drain.
+    (void)legacy_refusals_.push(LegacyRefusal{request, code, reason});
+  }
+}
+
+bool UsbBridge::report_outcome(IdempotencyRecord& record,
+                                const MonotonicMs now_ms) noexcept {
   if ((state_ != SessionState::Active && state_ != SessionState::Draining) ||
       record.usb_session != keys_.session_id) {
     return false;
   }
   const std::uint16_t reason_id =
-      replay ? static_cast<std::uint16_t>(ROUTELOOM_REASON_IDEMPOTENT_REPLAY) : record.reason_id;
-  const char* detail = replay ? nullptr : record.reason_detail;
+      record.replay ? static_cast<std::uint16_t>(ROUTELOOM_REASON_IDEMPOTENT_REPLAY)
+                    : record.reason_id;
+  const char* detail = record.replay ? nullptr : record.reason_detail;
   bool queued = false;
   if (record.accepted) {
     // DeliveryEvent inner: request(8) || msg_session(4) || msg_seq(8) ||
@@ -3028,6 +3045,7 @@ void UsbBridge::reset_session_state() noexcept {
   pending_request_ = 0;
   pending_record_ = nullptr;
   rx_grant_due_ = false;
+  legacy_refusals_.clear();
   request_map_ = FixedPool<RequestMap, kRequestMapCapacity>{};
   // Pending diagnostic queries are session state: a reconnected session can
   // never observe a late reply under a minted slot (04 §USB correlation).
@@ -3143,19 +3161,26 @@ void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
       result.state == DeliveryState::Expired ||
       result.state == DeliveryState::CancelledBeforeTx ||
       result.state == DeliveryState::Indeterminate;
-  IdempotencyRecord* legacy = nullptr;
   if (terminal) {
-    legacy = pending_record_ != nullptr
-                 ? pending_record_
-                 : idempotency_.find_message(result.id.session, result.id.sequence);
+    IdempotencyRecord* legacy =
+        pending_record_ != nullptr
+            ? pending_record_
+            : idempotency_.find_message(result.id.session, result.id.sequence);
     if (legacy != nullptr) {
-      if (legacy->settled) return;  // duplicate terminal callback
-      legacy->settled = true;
-      legacy->final_state = result.state;
-      legacy->reason_id = reason_code(result.reason);
-      legacy->reason_detail = result.reason;
-      // Inside mesh->send the caller reports once the message id is known.
-      if (pending_record_ != nullptr) return;
+      // Each accepted retry has its own bounded outcome reservation.
+      for (std::size_t i = 0; legacy != nullptr && i < IdempotencyTable::kCapacity; ++i) {
+        if (!legacy->settled) {
+          legacy->settled = true;
+          legacy->settled_ms = now_ms_;
+          legacy->final_state = result.state;
+          legacy->reason_id = reason_code(result.reason);
+          legacy->reason_detail = result.reason;
+          if (pending_record_ != nullptr) return;
+          (void)report_outcome(*legacy, now_ms_);
+        }
+        legacy = idempotency_.find_message(result.id.session, result.id.sequence, true);
+      }
+      return;
     }
   }
   // Host-ops-correlated deliveries update the dispatch window instead of
@@ -3184,10 +3209,6 @@ void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
         result.state == DeliveryState::CancelledBeforeTx) {
       emit_delivery_event(request_for(result.id), result, &operation_id);
     }
-    return;
-  }
-  if (legacy != nullptr) {
-    (void)report_outcome(*legacy, false, now_ms_);
     return;
   }
   const std::uint64_t request =
