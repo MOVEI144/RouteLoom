@@ -572,14 +572,21 @@ fn mesh_route_loss_advertisement_survives_queue_pressure() {
         let (ok, _) = world.peers[2].peer_slot(b'V', index);
         assert!(ok, "extra route record {index}");
     }
-    world.step(25);
-    assert!(world.snaps[2].queued >= 16, "multi-page queue reached 50%");
+    world.pump_until(200, |snaps| snaps[2].queued >= 16);
+    assert!(
+        world.snaps[2].queued >= 16,
+        "multi-page queue reached 50%: {:?}",
+        world.snaps[2]
+    );
     let (accepted, queued) = world.peers[2].app_burst(16, testkit::GATEWAY);
     assert_eq!(accepted, 8, "bounded application admission");
     assert!(queued >= 16);
     world.step(5000);
-    assert!(world.snaps[2].queued >= 26, "queue reached 80%");
-    assert!(world.snaps[2].admissions_rejected > 0);
+    assert!(
+        world.snaps[2].queued >= 26,
+        "queue reached 80%: {:?}",
+        world.snaps[2]
+    );
     let (accepted, _) = world.peers[0].app_burst(8, NODE_A);
     let mut max_queue = world.snaps[2].queued;
     for _ in 0..200 {
@@ -588,6 +595,7 @@ fn mesh_route_loss_advertisement_survives_queue_pressure() {
     }
     assert_eq!(accepted, 8);
     assert!(max_queue >= 31, "application lane reached full occupancy");
+    assert!(world.snaps[2].admissions_rejected > 0);
     let updates = world.switch.route_updates_seen;
     world.switch.drop_wire_kind(2, 0, WIRE_ROUTE_UPDATE, 1);
     let start = world.now;

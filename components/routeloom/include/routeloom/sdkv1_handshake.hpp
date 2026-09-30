@@ -174,6 +174,9 @@ class HandshakeSessionSink {
                                   const InstallAttestation& att) noexcept = 0;
   virtual Status allocate_context_id(std::uint32_t& out) noexcept = 0;
   virtual bool context_id_live(std::uint32_t id) const noexcept = 0;
+  virtual bool has_authenticated_rx(SecurityScope, NodeId, std::uint32_t) const noexcept {
+    return false;
+  }
 };
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
@@ -200,6 +203,10 @@ class BankSessionSink final : public HandshakeSessionSink {
   }
   bool context_id_live(const std::uint32_t id) const noexcept override {
     return bank_.context_id_live(id);
+  }
+  bool has_authenticated_rx(SecurityScope scope, NodeId peer,
+                            std::uint32_t context_id) const noexcept override {
+    return bank_.has_authenticated_rx(scope, peer, context_id);
   }
   // Idle end contexts evicted to admit a new peer (saturating).
   std::uint32_t end_evictions() const noexcept { return end_evictions_; }
@@ -502,6 +509,7 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   // under the entry guard only).
   void cancel_all_internal() noexcept;
   void end_edhoc_flight() noexcept;
+  void finish_confirmed_exchange(NodeId peer) noexcept;
   CarrierRecord* find_record(SecurityScope scope, NodeId peer, HandshakeRole role) noexcept;
   CarrierRecord* find_record_by_token(std::uint32_t token) noexcept;
   CarrierRecord* alloc_record() noexcept;

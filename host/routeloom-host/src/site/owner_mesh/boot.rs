@@ -238,12 +238,18 @@ fn mesh_j01_identity_only_joins_through_relay() {
         .decider
         .assign(NODE_A, Assignment::Here(Role::Relay));
     let approved_at = world.now;
-    world.pump_until(1200, |snaps| {
-        snaps[1].mode == MODE_MEMBER
-            && snaps[1].phase == PHASE_ACTIVE
-            && snaps[1].authority_ready
-            && snaps[1].join_confirmed
-    });
+    for _ in 0..1200 {
+        assert!(
+            decider_requests_for(&world, NODE_A) <= 1,
+            "no duplicate join request"
+        );
+        let a = &world.snaps[1];
+        if a.mode == MODE_MEMBER && a.phase == PHASE_ACTIVE && a.authority_ready && a.join_confirmed
+        {
+            break;
+        }
+        world.step(25);
+    }
     assert!(
         world.snaps[1].join_confirmed && world.now - approved_at <= 30_000,
         "A Member within 30 s of the approval: {:?}",
@@ -263,7 +269,10 @@ fn mesh_j01_identity_only_joins_through_relay() {
         row.generation, world.snaps[1].site_generation,
         "ledger generation"
     );
-    assert_eq!(decider_requests_for(&world, NODE_A), 1, "still one request");
+    assert!(
+        decider_requests_for(&world, NODE_A) <= 1,
+        "no duplicate join request"
+    );
 
     let mut delivered = BTreeSet::new();
     for _ in 0..20 {

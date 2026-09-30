@@ -224,6 +224,11 @@ struct TestSink final : public HandshakeSessionSink {
     return bank.context_id_live(id);
   }
 
+  bool has_authenticated_rx(SecurityScope scope, NodeId peer,
+                            std::uint32_t context_id) const noexcept override {
+    return bank.has_authenticated_rx(scope, peer, context_id);
+  }
+
   TestBank& bank;
   std::size_t installs{0};
   std::uint32_t last_created_gk{0};
@@ -757,6 +762,78 @@ void test_m1_park_yields_to_live_m4() {
   const PumpResult late = pump(c2, *pair.b, frozen_c2b, kT0 + 9200);
   CHECK(late.established_a && late.established_b);
   CHECK(late.failed_a == StatusCode::Ok && late.failed_b == StatusCode::Ok);
+}
+
+// Admitted m4 may be lost over the air. Its exact m3 retry must still
+// retrieve m4 while another peer uses the single crypto flight.
+void test_authenticated_traffic_releases_quiet_m4() {
+  Pair pair = Pair::make();
+  const FrozenLink ab = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+  CHECK_OK(request_link(*pair.a, *pair.b, ab, kT0));
+  HandshakeResult m1{}, m2{}, m3{}, m4{}, out{};
+  CHECK_OK(pair.a->engine.take_result(m1));
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m1, ab, kT0 + 50));
+  CHECK_OK(pair.b->engine.take_result(m2));
+  CHECK_OK(deliver_to(*pair.a, *pair.b, m2, ab, kT0 + 100));
+  CHECK_OK(pair.a->engine.take_result(m3));
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m3, ab, kT0 + 150));
+  CHECK_OK(pair.b->engine.take_result(m4));
+  CHECK_OK(pair.b->engine.accept_send(m4.token, m4.phase, m4.step));
+  CHECK_OK(pair.b->engine.take_result(out));
+  CHECK(out.event == HandshakeEvent::Established);
+  const HandshakeResult established_b = out;
+  constexpr NodeId c_id = kNodeA;
+  const auto cert = member_cert_for(c_id, sdkv1_test::verifier_key().pub,
+                                    kMemberRoleEndpoint, 5);
+  Side c(c_id, kNodeB, mac_of(0x0C), mac_of(0x0B), sdkv1_test::verifier_key(), cert,
+         5, kMemberRoleEndpoint, 0xC3, kGk);
+  CHECK(c.start());
+  const FrozenLink cb = freeze_link(c, *pair.b, kT0 + 2100, kCapsFull, kCapsFull);
+  HandshakeRequest next{};
+  next.scope = SecurityScope::EndToEnd;
+  next.peer = kNodeB;
+  CHECK_OK(c.engine.request(next, kT0 + 2100));
+  HandshakeResult next_m1{};
+  CHECK_OK(c.engine.take_result(next_m1));
+  // An unverified origin is no confirmation.
+  CHECK_OK(deliver_to(*pair.b, c, next_m1, cb, kT0 + 2150));
+  CHECK(pair.b->engine.take_result(out).code == StatusCode::NotFound);
+
+  // Altered retries cannot solicit a cached reply or affect C's flight.
+  m3.message[0] ^= 1;
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m3, ab, kT0 + 2175));
+  CHECK(pair.b->engine.take_result(out).code == StatusCode::NotFound);
+  m3.message[0] ^= 1;
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m3, ab, kT0 + 2200));
+  CHECK_OK(pair.b->engine.take_result(out));
+  CHECK(out.step == 4 && out.token == m4.token && out.message_size == m4.message_size);
+  CHECK(std::memcmp(out.message.data(), m4.message.data(), m4.message_size) == 0);
+  CHECK_OK(pair.b->engine.accept_send(out.token, out.phase, out.step));
+  CHECK_OK(deliver_to(*pair.a, *pair.b, out, ab, kT0 + 2225));
+  CHECK_OK(pair.a->engine.take_result(out));
+  CHECK(out.event == HandshakeEvent::Established);
+  CHECK(pair.b->sink.installs == 1);
+  // Only a real authenticated frame in the new link proves m4 arrived.
+  CHECK(roundtrip_ok(*pair.a, *pair.b, out, established_b));
+  CHECK(pair.b->bank.has_authenticated_rx(SecurityScope::Link, kNodeA,
+                                           established_b.rx_context_id));
+  CHECK(!pair.b->bank.has_authenticated_rx(SecurityScope::Link, kNodeA,
+                                            established_b.rx_context_id + 1));
+  CHECK_OK(pair.b->engine.poll(kT0 + 2230));
+  CHECK_OK(deliver_to(*pair.b, c, next_m1, cb, kT0 + 2240));
+  HandshakeResult m2c{};
+  CHECK_OK(pair.b->engine.take_result(m2c));
+  CHECK(m2c.event == HandshakeEvent::Send && m2c.step == 2);
+  CHECK_OK(deliver_to(c, *pair.b, m2c, cb, kT0 + 2250));
+  CHECK_OK(c.engine.take_result(out));
+  CHECK_OK(deliver_to(*pair.b, c, out, cb, kT0 + 2300));
+  CHECK_OK(pair.b->engine.take_result(out));
+  CHECK(out.step == 4);
+  CHECK_OK(pair.b->engine.accept_send(out.token, out.phase, out.step));
+  CHECK_OK(deliver_to(c, *pair.b, out, cb, kT0 + 2350));
+  CHECK_OK(c.engine.take_result(out));
+  CHECK(out.event == HandshakeEvent::Established);
+  CHECK(pair.b->sink.installs == 2);
 }
 
 void test_resume_after_edhoc() {
@@ -1940,6 +2017,7 @@ int main() {
   test_link_edhoc_full();
   test_responder_waits_for_m4_admission();
   test_m1_park_yields_to_live_m4();
+  test_authenticated_traffic_releases_quiet_m4();
   test_resume_after_edhoc();
   test_gateway_resume_lookup_budget();
   test_routed_end_exchange();

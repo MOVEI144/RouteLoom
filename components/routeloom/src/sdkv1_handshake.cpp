@@ -823,6 +823,7 @@ bool HandshakeEngine::big_tx_parkable() noexcept {
   switch (owner->state) {
     case RecordState::EdhocWaitM4:
     case RecordState::EdhocM4Pending:
+    case RecordState::EdhocM4Sent:
     case RecordState::EdhocM1Parked:
       return false;
     default:
@@ -877,6 +878,19 @@ HandshakeEngine::CarrierRecord* HandshakeEngine::alloc_record() noexcept {
     }
   }
   return nullptr;
+}
+
+void HandshakeEngine::finish_confirmed_exchange(const NodeId peer) noexcept {
+  if (!edhoc_flight_.active) return;
+  CarrierRecord* record = find_record_by_token(edhoc_flight_.owner_token);
+  if (record != nullptr && record->peer == peer &&
+      record->state == RecordState::EdhocM4Sent &&
+      sink_.has_authenticated_rx(record->scope, peer, edhoc_flight_.cid_own)) {
+    // Traffic opened under this exact installed context proves m4
+    // arrived. A bare m1 or an old RX overlap cannot end the quiet duty.
+    // Yield only when another exchange with this peer needs the flight.
+    drop_record(*record);
+  }
 }
 
 void HandshakeEngine::drop_record(CarrierRecord& record) noexcept {
@@ -1626,6 +1640,7 @@ Status HandshakeEngine::read_peer_cid(std::uint32_t& out) noexcept {
 Status HandshakeEngine::responder_begin_m1(CarrierRecord& record,
                                                    const ByteView message,
                                                    const MonotonicMs now) noexcept {
+  finish_confirmed_exchange(record.peer);
   if (edhoc_flight_.active || !ecc_budget_ok(now)) {
     park_m1(record, message);
     return Status::success();
@@ -2851,6 +2866,7 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
         now < record.retransmit_at || now >= record.deadline) {
       continue;
     }
+    finish_confirmed_exchange(record.peer);
     if (edhoc_flight_.active || !ecc_budget_ok(now)) return Status::success();  // wait
     if (record.state == RecordState::EdhocQueued) {
       const Status begun = begin_edhoc(record, now);
