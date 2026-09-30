@@ -1080,6 +1080,20 @@ void test_deferred_ticket_cap() {
   w.run(150);
   CHECK(sink.tickets.size() == kAppliedTicketMax + 1);
   CHECK(a->delivery(next).state != DeliveryState::Failed);
+  // Completed verdicts are acknowledged, so a steady stream of deferred
+  // requests reuses their records beyond the pool of kAppliedResultCapacity
+  // well within the records' retention.
+  for (std::size_t i = 1; i <= kAppliedTicketMax; ++i) {
+    CHECK_OK(b->complete_applied(sink.tickets[i], reply, w.now));
+  }
+  w.run(500);
+  for (std::size_t round = 0; round < 2 * kAppliedResultCapacity; ++round) {
+    const MessageId id = applied_exchange(w, 8000);
+    w.run(150);
+    CHECK_OK(b->complete_applied(sink.tickets.back(), reply, w.now));
+    CHECK(w.run_until([&] { return a->delivery(id).state == DeliveryState::Delivered; }, 2000));
+  }
+  CHECK(b->applied_stats().refusals_capacity == 1);
 }
 
 void test_no_sink_commits_no_endpoint() {
