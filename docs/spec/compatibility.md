@@ -176,8 +176,10 @@ tests: its security vtable holds static keys only, and production security
 - APPLIED: `rl_send_applied()` with the destination's lease;
   the destination's `on_applied_request` receives a ticket and answers later
   with `rl_complete_applied()`. A late (`RL_STATUS_EXPIRED`), repeated or
-  foreign-boot (`RL_STATUS_NOT_FOUND`) completion is never applied;
-  `rl_get_applied_result()` reads the origin's verified RESULT.
+  foreign-boot (`RL_STATUS_NOT_FOUND`) completion is never applied. At most
+  four tickets are open at once; a further request is refused as Capacity
+  without calling the endpoint. `rl_get_applied_result()` reads the
+  origin's verified RESULT.
 - Delivery results carry `reason_id`, the u16 id of the reason string in the
   reason-code registry (§1; delivery area of `protocol/manifest.json`,
   generated as `ROUTELOOM_REASON_*` and `ROUTELOOM_REASON_TABLE` in
