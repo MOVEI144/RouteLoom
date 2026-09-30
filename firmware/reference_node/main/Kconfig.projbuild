@@ -14,4 +14,26 @@ config ROUTELOOM_HIL_SEND_COUNT
     default 0
     depends on ROUTELOOM_HIL_SEND_DESTINATION != 0
 
+config ROUTELOOM_HIL_GATEWAY_SEND_COUNT
+    int "HIL-only explicit gateway sends (0 disables)"
+    range 0 100
+    default 0
+    depends on ROUTELOOM_SECURITY_MODE_DEV_RAM || ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+    help
+        Bench-only: 20 s after boot the node resolves the named gateway
+        (GATEWAY_SDK_RAM) through Device::gateway() and sends this many
+        explicit gateway messages, one every 3 s, logging each terminal
+        state. Afterwards it resolves ROUTELOOM_HIL_GATEWAY_WRONG, which
+        holds no gateway role, and logs that outcome. Keep at zero.
+
+config ROUTELOOM_HIL_GATEWAY_ID
+    hex "HIL-only explicit gateway NodeId"
+    default 0x1
+    depends on ROUTELOOM_HIL_GATEWAY_SEND_COUNT != 0
+
+config ROUTELOOM_HIL_GATEWAY_WRONG
+    hex "HIL-only NodeId without a gateway role (negative resolve, 0 skips)"
+    default 0x0
+    depends on ROUTELOOM_HIL_GATEWAY_SEND_COUNT != 0
+
 endmenu

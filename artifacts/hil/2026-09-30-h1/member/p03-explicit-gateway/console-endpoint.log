@@ -1,0 +1,18 @@
+[2026-09-29T22:21:53.618+00:00] !! opened
+[2026-09-29T22:22:04.031+00:00] I (886) RouteLoomRef: sdkv1 identity: node=3 kid=72b2282f385b2d8W (12929) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T22:22:04.031+00:00] W (12930) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:22:15.648+00:00] W (24694) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:22:44.084+00:00] W (52971) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:23:00.105+00:00] W (69094) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:23:30.745+00:00] W (99624) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:23:50.769+00:00] W (119656) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:24:28.615+00:00] W (157609) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:25:28.691+00:00] W (217609) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:25:39.905+00:00] W (228964) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T22:26:28.566+00:00] W (277611) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:27:28.644+00:00] W (337611) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:28:28.719+00:00] W (397613) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:29:28.598+00:00] W (457615) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:30:28.681+00:00] W (517617) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:31:28.558+00:00] W (577617) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-29T22:32:28.644+00:00] W (637618) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none

@@ -1,0 +1,211 @@
+[2026-09-29T22:05:13.595+00:00] !! opened
+[2026-09-29T22:05:15.398+00:00] W (806376) rl_migrate: migration event PHASE_PREPARING peer=0
+[2026-09-29T22:05:15.398+00:00] W (806377) RouteLoomRef: diagnostic reason=PHASE_PREPARING peer=0 message=none
+[2026-09-29T22:05:20.204+00:00] W (811178) rl_migrate: migration event CHANNEL_NOTICE peer=1
+[2026-09-29T22:05:20.204+00:00] W (811178) RouteLoomRef: diagnostic reason=CHANNEL_NOTICE peer=1 message=none
+[2026-09-29T22:05:20.405+00:00] W (811358) rl_migrate: migration event PHASE_COMMITTED peer=0
+[2026-09-29T22:05:20.405+00:00] W (811358) RouteLoomRef: diagnostic reason=PHASE_COMMITTED peer=0 message=none
+[2026-09-29T22:05:45.036+00:00] W (836014) rl_migrate: migration event PHASE_SWITCHING peer=0
+[2026-09-29T22:05:45.036+00:00] W (836014) RouteLoomRef: diagnostic reason=PHASE_SWITCHING peer=0 message=none
+[2026-09-29T22:05:45.036+00:00] W (836023) rl_migrate: migration event PHASE_VERIFYING peer=0
+[2026-09-29T22:05:45.036+00:00] W (836023) RouteLoomRef: diagnostic reason=PHASE_VERIFYING peer=0 message=none
+[2026-09-29T22:05:45.637+00:00] W (836642) rl_migrate: migration event VERIFY_PASSED peer=1
+[2026-09-29T22:05:45.637+00:00] W (836642) RouteLoomRef: diagnostic reason=VERIFY_PASSED peer=1 message=none
+[2026-09-29T22:05:45.637+00:00] W (836644) rl_migrate: migration event PHASE_STABLE peer=0
+[2026-09-29T22:05:45.637+00:00] W (836648) RouteLoomRef: diagnostic reason=PHASE_STABLE peer=0 message=none
+[2026-09-29T22:05:52.245+00:00] W (843149) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:05:52.245+00:00] W (843240) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:05:52.645+00:00] W (843527) RouteLoomRef: diagnostic reason=session replay peer=1 message=none
+[2026-09-29T22:05:53.847+00:00] W (844755) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:05:53.847+00:00] W (844842) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:05:54.047+00:00] W (844987) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:05:54.047+00:00] W (845083) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:05:55.448+00:00] W (846374) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:05:55.649+00:00] W (846540) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:05:55.849+00:00] W (846695) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:05:56.049+00:00] W (846923) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:05:57.050+00:00] W (847956) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:05:57.050+00:00] W (848044) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:05:57.251+00:00] W (848174) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:05:57.251+00:00] W (848270) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:05:57.451+00:00] W (848399) RouteLoomRef: diagnostic reason=ADMISSION_NO_ACK_SLOT peer=1 message=present
+[2026-09-29T22:05:57.651+00:00] W (848538) RouteLoomRef: diagnostic reason=session replay peer=1 message=present
+[2026-09-29T22:06:11.470+00:00] W (862373) RouteLoomRef: diagnostic reason=STALE peer=2 message=none
+[2026-09-29T22:06:13.472+00:00] W (864375) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:06:30.495+00:00] W (881482) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:06:37.704+00:00] W (888556) RouteLoomRef: diagnostic reason=STALE peer=1 message=none
+[2026-09-29T22:06:40.910+00:00] W (891948) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:47.318+00:00] W (898180) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:47.318+00:00] W (898258) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:06:47.718+00:00] W (898702) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:48.719+00:00] W (899579) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:50.322+00:00] W (901301) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:53.526+00:00] W (904518) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:06:59.735+00:00] W (910704) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:00.335+00:00] W (911193) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:00.536+00:00] W (911546) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:07:02.138+00:00] W (913130) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:11.150+00:00] W (922093) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:17.759+00:00] W (928622) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:18.359+00:00] W (929382) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:07:18.562+00:00] W (929454) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:20.564+00:00] W (931459) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:24.169+00:00] W (935104) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:31.378+00:00] W (942391) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:45.797+00:00] W (956705) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:46.598+00:00] W (957562) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:48.400+00:00] W (959428) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:07:48.601+00:00] W (959471) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:52.205+00:00] W (963094) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:07:59.212+00:00] W (970227) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:13.229+00:00] W (984178) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:21.840+00:00] W (992830) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:08:22.040+00:00] W (992949) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:24.042+00:00] W (994962) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:28.048+00:00] W (999075) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:30.251+00:00] W (1001122) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:38.461+00:00] W (1009496) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:08:38.661+00:00] W (1009648) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:40.664+00:00] W (1011556) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:41.665+00:00] W (1012577) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:43.668+00:00] W (1014578) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.473+00:00] W (1018410) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:47.473+00:00] W (1018468) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T22:08:48.074+00:00] W (1019089) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:08:48.074+00:00] W (1019090) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:08:51.478+00:00] W (1022420) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:14.508+00:00] W (1045530) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:09:14.708+00:00] W (1045562) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:16.310+00:00] W (1047347) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:19.717+00:00] W (1050726) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:27.126+00:00] W (1058003) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:28.528+00:00] W (1059514) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:09:28.728+00:00] W (1059574) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:29.930+00:00] W (1060798) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:32.132+00:00] W (1063013) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:36.538+00:00] W (1067469) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:44.949+00:00] W (1075967) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:09:45.149+00:00] W (1076007) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:47.151+00:00] W (1078011) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:48.554+00:00] W (1079542) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:51.358+00:00] W (1082360) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:56.965+00:00] W (1087974) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:09:58.167+00:00] W (1089189) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:09:58.367+00:00] W (1089320) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:00.570+00:00] W (1091524) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:01.971+00:00] W (1092812) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:04.374+00:00] W (1095236) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:08.780+00:00] W (1099687) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:10:08.780+00:00] W (1099779) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:12.188+00:00] W (1103053) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:13.990+00:00] W (1104869) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:14.791+00:00] W (1105781) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:16.192+00:00] W (1107229) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:10:16.393+00:00] W (1107268) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:19.397+00:00] W (1110340) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:25.204+00:00] W (1116139) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:55.242+00:00] W (1146091) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:10:55.242+00:00] W (1146163) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:56.043+00:00] W (1147011) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:57.645+00:00] W (1148496) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:10:57.846+00:00] W (1148818) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:03.252+00:00] W (1154133) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:10.062+00:00] W (1161015) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:10.062+00:00] W (1161021) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T22:11:11.864+00:00] W (1162739) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:11:11.864+00:00] W (1162811) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:12.865+00:00] W (1163775) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:19.876+00:00] W (1170791) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:33.695+00:00] W (1184573) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:11:33.695+00:00] W (1184726) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:34.896+00:00] W (1185883) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:35.697+00:00] W (1186680) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:37.299+00:00] W (1188185) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:39.902+00:00] W (1190802) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:45.310+00:00] W (1196151) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:11:45.310+00:00] W (1196162) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:48.514+00:00] W (1199519) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:49.515+00:00] W (1200548) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:51.317+00:00] W (1202272) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:52.518+00:00] W (1203488) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:11:52.719+00:00] W (1203568) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:11:59.127+00:00] W (1210148) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:00.328+00:00] W (1211348) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:01.930+00:00] W (1212927) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:12:01.930+00:00] W (1212959) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:02.731+00:00] W (1213691) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:08.738+00:00] W (1219658) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:12:20.352+00:00] W (1231279) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:12:20.352+00:00] W (1231359) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:00.605+00:00] W (1271502) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:13:00.605+00:00] W (1271554) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:02.207+00:00] W (1273122) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:05.011+00:00] W (1275967) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:10.618+00:00] W (1281635) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:22.035+00:00] W (1292884) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:22.836+00:00] W (1293813) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:25.039+00:00] W (1295895) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:13:25.039+00:00] W (1295915) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:25.840+00:00] W (1296789) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:34.050+00:00] W (1304892) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:35.052+00:00] W (1305953) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T22:13:35.452+00:00] W (1306364) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:13:35.653+00:00] W (1306496) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:36.654+00:00] W (1307513) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:37.855+00:00] W (1308868) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:40.458+00:00] W (1311449) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:41.660+00:00] W (1312670) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:45.267+00:00] W (1316286) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:53.078+00:00] W (1323925) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:13:53.078+00:00] W (1323926) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:54.480+00:00] W (1325346) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:13:57.083+00:00] W (1328018) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:02.090+00:00] W (1332986) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:11.903+00:00] W (1342861) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:14.507+00:00] W (1345445) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:14:14.507+00:00] W (1345477) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:15.708+00:00] W (1346649) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:17.711+00:00] W (1348609) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:18.512+00:00] W (1349462) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:19.313+00:00] W (1350246) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:25.922+00:00] W (1356891) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:27.524+00:00] W (1358479) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:14:27.524+00:00] W (1358558) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:30.728+00:00] W (1361746) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:36.737+00:00] W (1367758) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:39.541+00:00] W (1370420) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:42.746+00:00] W (1373779) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:14:42.946+00:00] W (1373831) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:43.947+00:00] W (1374820) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:45.749+00:00] W (1376786) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:49.554+00:00] W (1380401) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:14:56.563+00:00] W (1387601) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:12.584+00:00] W (1403532) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:15:12.784+00:00] W (1403644) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:13.785+00:00] W (1404788) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:16.189+00:00] W (1407082) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:20.598+00:00] W (1411478) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:29.010+00:00] W (1420035) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:30.612+00:00] W (1421638) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:15:30.812+00:00] W (1421678) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:15:31.814+00:00] W (1422768) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:46.200+00:00] W (1557164) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:46.200+00:00] W (1557215) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:46.200+00:00] W (1557234) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:46.400+00:00] W (1557252) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:46.400+00:00] W (1557269) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:46.800+00:00] W (1557760) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:46.800+00:00] W (1557776) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:46.800+00:00] W (1557793) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:46.800+00:00] W (1557810) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:47.001+00:00] W (1557884) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:47.001+00:00] W (1557904) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:47.001+00:00] W (1557923) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:47.001+00:00] W (1557939) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-29T22:17:49.804+00:00] W (1560763) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:18:12.235+00:00] W (1583138) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-29T22:18:12.235+00:00] W (1583139) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:18:37.066+00:00] W (1608054) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:19:03.301+00:00] W (1634336) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none
+[2026-09-29T22:19:23.533+00:00] W (1654475) RouteLoomRef: diagnostic reason=REDISCOVERY peer=2 message=none
+[2026-09-29T22:20:01.984+00:00] W (1692876) RouteLoomRef: diagnostic reason=REDISCOVERY peer=1 message=none

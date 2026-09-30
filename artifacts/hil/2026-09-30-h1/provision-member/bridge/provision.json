@@ -1,0 +1,62 @@
+{
+  "board": "bridge",
+  "node": "0000000000000001",
+  "role": "bridge",
+  "setup_bundle": "h1-setup-bridge-c3-member",
+  "field_bundle": "h1-br-os",
+  "erase": "ok",
+  "config": {
+    "generation": 1,
+    "node": "0000000000000001",
+    "role": "bridge",
+    "security": "member",
+    "secrets_generation": "1",
+    "fingerprint": "863cd129748b6f845fd8fadd9d2ecf923aeabb5e6abc85a820b18bf6cd09e4d1",
+    "secrets_fingerprint": "863cd129748b6f845fd8fadd9d2ecf923aeabb5e6abc85a820b18bf6cd09e4d1"
+  },
+  "identity_status": "OK identity=sealed pending=0 locked=1 node=0000000000000001 kid=68472bcc8e42e6db199a6cc19399a172bc4b984c335298b4c3b08f4addcbf04b serial=301 devcert_sha256=cd29f1cc9a1963c79e34c0b31a81ee304d06f1c171dda",
+  "nvs_after_identity": {
+    "rlcfg": {
+      "sha256": "3ae00971366d0be670d25f922d6d907f30423f45627a71e715611f32a9baf60f",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "01bc014e2df87bc13df999f179a2f26b1e1d7284a9924255d077e776df760183",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "8470141d51cebb13006d436fd842055ce558c8b6039ae367f8d05c30ca6cfff7",
+      "blank": false
+    }
+  },
+  "app_only": {
+    "identity": {
+      "chip": "esp32c3",
+      "mac": "94:a9:90:7a:26:ac",
+      "log": "flash-bridge-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "e897063714f45de969b5114b80af7141b7b56723ff17eb8a314908abba6d0189",
+    "app_bytes": 1209120,
+    "bundle": "hil-h1-br-os-bridge_node-esp32c3"
+  },
+  "nvs_after_app_write": {
+    "rlcfg": {
+      "sha256": "3ae00971366d0be670d25f922d6d907f30423f45627a71e715611f32a9baf60f",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "01bc014e2df87bc13df999f179a2f26b1e1d7284a9924255d077e776df760183",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "8470141d51cebb13006d436fd842055ce558c8b6039ae367f8d05c30ca6cfff7",
+      "blank": false
+    }
+  },
+  "nvs_preserved": {
+    "rlcfg": true,
+    "rlkeys": true,
+    "rlsec": true
+  }
+}

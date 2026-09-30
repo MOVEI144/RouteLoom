@@ -10,6 +10,9 @@
 #include "esp_log.h"
 #include "esp_rom_serial_output.h"
 #include "routeloom/device.hpp"
+#if CONFIG_ROUTELOOM_HIL_GATEWAY_SEND_COUNT != 0
+#include "routeloom/gateway.hpp"
+#endif
 #include "routeloom/observation.hpp"
 #include "sdkconfig.h"
 
@@ -78,6 +81,20 @@ struct ReferenceApp {
   routeloom::MonotonicMs hil_next_ms{0};
   std::uint32_t hil_attempt{0};
 #endif
+#if CONFIG_ROUTELOOM_HIL_GATEWAY_SEND_COUNT != 0
+  // Explicit gateway bench sender: resolve -> send -> wait for the terminal
+  // state -> next, then one negative resolve of a non-gateway node.
+  routeloom::MonotonicMs gw_next_ms{0};
+  routeloom::MonotonicMs gw_started_ms{0};
+  routeloom::GatewayEndpoint gw_endpoint{};
+  routeloom::MessageId gw_id{};
+  routeloom::NodeId gw_target{CONFIG_ROUTELOOM_HIL_GATEWAY_ID};
+  std::uint32_t gw_sent{0};
+  bool gw_valid{false};
+  bool gw_in_flight{false};
+  bool gw_negative{false};
+  bool gw_done{false};
+#endif
 };
 
 #if CONFIG_ROUTELOOM_HIL_SEND_DESTINATION != 0
@@ -103,6 +120,129 @@ void poll_hil_send(routeloom::Device& device, ReferenceApp& app,
 }
 #endif
 
+#if CONFIG_ROUTELOOM_HIL_GATEWAY_SEND_COUNT != 0
+// Delivery completion is reported once through the observer; the record is
+// then released, so send_result() alone cannot see the terminal state.
+class HilGatewayObserver final : public routeloom::GatewayDeliveryObserver {
+ public:
+  void on_gateway_resolved(const routeloom::GatewayEndpoint&, routeloom::NodeId gateway,
+                           routeloom::Status result) noexcept override {
+    ESP_LOGI("RouteLoomRef", "HIL GW RESOLVED gw=%llu ok=%u detail=%s",
+             static_cast<unsigned long long>(gateway), static_cast<unsigned>(result.ok()),
+             result.detail);
+  }
+  void on_gateway_result(const routeloom::GatewaySendResult& result) noexcept override {
+    last = result;
+    fresh = true;
+  }
+  routeloom::GatewaySendResult last{};
+  bool fresh{false};
+};
+HilGatewayObserver s_gw_observer;
+
+void poll_hil_gateway(routeloom::Device& device, ReferenceApp& app,
+                      routeloom::MonotonicMs now_ms) {
+  using routeloom::EndpointState;
+  using routeloom::GatewaySendState;
+  if (app.gw_done) return;
+  if (app.gw_next_ms == 0) app.gw_next_ms = now_ms + 20000;
+  if (now_ms < app.gw_next_ms) return;
+  routeloom::GatewayDelivery* delivery = device.gateway();
+  if (delivery == nullptr) return;  // not attached yet; retry next pass
+  delivery->set_observer(s_gw_observer);
+  if (!app.gw_valid) {
+    const auto resolved = delivery->resolve(app.gw_target, routeloom::endpoint::GatewayScope::GatewaySdkRam,
+                                            routeloom::HostDigest{}, 5000, now_ms, app.gw_endpoint);
+    ESP_LOGI("RouteLoomRef", "HIL GW RESOLVE start gw=%llu ok=%u detail=%s",
+             static_cast<unsigned long long>(app.gw_target), static_cast<unsigned>(resolved.ok()),
+             resolved.detail);
+    if (!resolved) {
+      app.gw_next_ms = now_ms + 3000;
+      return;
+    }
+    app.gw_valid = true;
+    app.gw_started_ms = now_ms;
+    return;
+  }
+  if (!app.gw_in_flight) {
+    const EndpointState state = delivery->endpoint_state(app.gw_endpoint);
+    if (state == EndpointState::Resolving) return;
+    if (state != EndpointState::Ready) {
+      ESP_LOGI("RouteLoomRef", "HIL GW RESOLVE end gw=%llu state=%u ms=%lu negative=%u",
+               static_cast<unsigned long long>(app.gw_target), static_cast<unsigned>(state),
+               static_cast<unsigned long>(now_ms - app.gw_started_ms),
+               static_cast<unsigned>(app.gw_negative));
+      delivery->endpoint_release(app.gw_endpoint);
+      app.gw_valid = false;
+      if (app.gw_negative) {
+        app.gw_done = true;
+        return;
+      }
+      app.gw_next_ms = now_ms + 3000;
+      return;
+    }
+    if (app.gw_negative || app.gw_sent >= CONFIG_ROUTELOOM_HIL_GATEWAY_SEND_COUNT) {
+      ESP_LOGI("RouteLoomRef", "HIL GW RESOLVE end gw=%llu state=%u ms=%lu negative=%u",
+               static_cast<unsigned long long>(app.gw_target), static_cast<unsigned>(state),
+               static_cast<unsigned long>(now_ms - app.gw_started_ms),
+               static_cast<unsigned>(app.gw_negative));
+      delivery->endpoint_release(app.gw_endpoint);
+      app.gw_valid = false;
+      if (app.gw_negative || CONFIG_ROUTELOOM_HIL_GATEWAY_WRONG == 0) {
+        app.gw_done = true;
+        ESP_LOGI("RouteLoomRef", "HIL GW DONE sent=%lu", static_cast<unsigned long>(app.gw_sent));
+        return;
+      }
+      app.gw_negative = true;
+      app.gw_target = CONFIG_ROUTELOOM_HIL_GATEWAY_WRONG;
+      app.gw_next_ms = now_ms + 1000;
+      return;
+    }
+    const std::array<std::uint8_t, 8> payload{
+        'R', 'L', 'H', 'I', 'L', 'G',
+        static_cast<std::uint8_t>(app.gw_sent >> 8), static_cast<std::uint8_t>(app.gw_sent)};
+    const auto sent = delivery->send(app.gw_endpoint, routeloom::ByteView{payload.data(), payload.size()},
+                                     5000, now_ms, app.gw_id);
+    if (!sent) {
+      ESP_LOGI("RouteLoomRef", "HIL GW SEND i=%lu refused detail=%s",
+               static_cast<unsigned long>(app.gw_sent), sent.detail);
+      if (std::strstr(sent.detail, "LEASE") != nullptr) {
+        // The descriptor lease cannot cover the send: resolve again.
+        delivery->endpoint_release(app.gw_endpoint);
+        app.gw_valid = false;
+        app.gw_next_ms = now_ms + 500;
+        return;
+      }
+      ++app.gw_sent;
+      app.gw_next_ms = now_ms + 3000;
+      return;
+    }
+    s_gw_observer.fresh = false;
+    app.gw_in_flight = true;
+    app.gw_started_ms = now_ms;
+    return;
+  }
+  routeloom::GatewaySendResult result{};
+  if (s_gw_observer.fresh && s_gw_observer.last.id == app.gw_id) {
+    result = s_gw_observer.last;
+  } else {
+    result = delivery->send_result(app.gw_id);
+    if (now_ms - app.gw_started_ms < 8000 &&
+        (result.state == GatewaySendState::Queued || result.state == GatewaySendState::HopAccepted ||
+         result.state == GatewaySendState::WaitingEndpoint || !s_gw_observer.fresh)) {
+      return;
+    }
+  }
+  ESP_LOGI("RouteLoomRef", "HIL GW SEND i=%lu state=%u reason=%u detail=%s ms=%lu",
+           static_cast<unsigned long>(app.gw_sent), static_cast<unsigned>(result.state),
+           static_cast<unsigned>(result.reason), result.detail,
+           static_cast<unsigned long>(now_ms - app.gw_started_ms));
+  app.gw_in_flight = false;
+  ++app.gw_sent;
+  app.gw_next_ms = now_ms + 3000;
+}
+#endif
+
 void reference_poll(routeloom::Device& device, routeloom::MonotonicMs now_ms, void* ctx) {
   auto& app = *static_cast<ReferenceApp*>(ctx);
   if (device.observation() != nullptr) {
@@ -110,6 +250,9 @@ void reference_poll(routeloom::Device& device, routeloom::MonotonicMs now_ms, vo
   }
 #if CONFIG_ROUTELOOM_HIL_SEND_DESTINATION != 0
   poll_hil_send(device, app, now_ms);
+#endif
+#if CONFIG_ROUTELOOM_HIL_GATEWAY_SEND_COUNT != 0
+  poll_hil_gateway(device, app, now_ms);
 #endif
 }
 

@@ -1,0 +1,14 @@
+{
+  "expected": [
+    "0000000000000002",
+    "0000000000000003"
+  ],
+  "authenticated_at_s": 0.252,
+  "routes_at_s": {
+    "0000000000000002": 13.789,
+    "0000000000000003": 30.701
+  },
+  "all_routes_at_s": 30.701,
+  "elapsed_s": 30.71,
+  "source": "/home/sahur/orca/workspaces/RouteLoom/v2-h1/artifacts/hil/2026-09-30-h1/member/j01-simultaneous/routes.jsonl"
+}
