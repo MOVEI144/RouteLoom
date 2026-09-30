@@ -1138,7 +1138,10 @@ struct DeviceEvents final : public routeloom::DeviceObserver {
     }
     if (device->leave(op).code == routeloom::StatusCode::Busy) ++reentry_busy;
   }
-  void on_membership(const routeloom::MembershipSnapshot&, std::uint16_t cause) noexcept override {
+  void on_membership(const routeloom::MembershipSnapshot& snapshot, std::uint16_t cause) noexcept override {
+    if (device != nullptr && device->membership().stage != snapshot.stage) {
+      fatal("membership callback disagrees with snapshot API");
+    }
     ++membership_events;
     last_cause = cause;
     try_reentry();
@@ -1172,6 +1175,7 @@ struct DeferredApplied final : public routeloom::AppliedEndpointSink {
   void on_applied_request(const routeloom::AppliedRequest& request,
                           routeloom::AppliedReply& reply) noexcept override {
     ++requests;
+    if (g_device_events != nullptr) g_device_events->try_reentry();
     reply.deferred = true;
     open.push_back(Open{request.ticket, now + delay_ms});
   }
@@ -1687,6 +1691,9 @@ int main(int argc, char** argv) {
       case 'Y': {
         OperationId op = 0;
         status = payload[0] == 'L' ? device.leave(op) : device.request_join(op);
+        if (status && payload[0] == 'L' && device.membership().stage != MembershipStage::Leaving) {
+          fatal("leave must expose its durable intent immediately");
+        }
         // Tracked sends a leave cancelled report before the restart.
         for (auto& entry : app_tx) {
           if (!entry.used || entry.id.sequence == 0) continue;

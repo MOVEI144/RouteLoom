@@ -1327,10 +1327,16 @@ Status EspNowSecurityOwner::local_leave(const MonotonicMs now_ms) noexcept {
   if (!booted_ || !lifecycle_live_ || !lifecycle_booted_ || runtime_ == nullptr) {
     return Status::error(StatusCode::InvalidState, "LEAVE_NOT_MEMBER");
   }
+  if (runtime_->node().in_external_callback()) {
+    return Status::error(StatusCode::Busy, "owner leave in callback");
+  }
   const Status status = lifecycle().dispatch(sdkv1::LifecycleInput::LocalLeave(), now_ms);
   if (!status) return status;
   // The intent is durable: nothing queued may leave under the old site.
   (void)runtime_->node().cancel_all("CANCELLED_LEAVE");
+  // Stop admission and dispatch before returning, including the runtime
+  // pass that precedes the lifecycle's next erasure step.
+  (void)lifecycle_runtime_.remove_member_runtime();
   return Status::success();
 }
 

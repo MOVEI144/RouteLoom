@@ -167,7 +167,7 @@ struct MembershipSnapshot {
 
 // Reachability of this site's gateways from authenticated evidence only: a
 // verified message from a gateway, or a route to a gateway refreshed by the
-// gateway's own advertisements. RSSI or a table entry alone never counts.
+// gateway directly (never a relay's route lease). RSSI or a table entry alone never counts.
 // Membership is separate: Isolated never drops the membership.
 enum class Connectivity : std::uint8_t {
   Unknown = 0,    // no evidence yet this boot, or not a member
@@ -334,6 +334,7 @@ class Device {
     void on_message(const MessageKey& key, NodeId source, ByteView payload,
                     const DeliveryAssurance& assurance) noexcept override;
     void on_group_message(const GroupMessageInfo& info, ByteView payload) noexcept override;
+    void on_verified_contact(NodeId source, MonotonicMs now_ms) noexcept override;
     void on_delivery(const DeliveryResult& result) noexcept override;
     void on_group_delivery(const GroupDeliveryResult& result) noexcept override;
     void on_applied_result(const MessageKey& key,
@@ -351,6 +352,7 @@ class Device {
 
   enum class Operation : std::uint8_t { None = 0, Join, Leave };
 
+  bool callback_active() const noexcept;
   void run_posted() noexcept;
   void update_observation_remote() noexcept;
   Status apply_join_policy(const JoinPolicy& policy) noexcept;

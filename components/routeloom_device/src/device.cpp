@@ -70,6 +70,17 @@ class CallbackScope {
 // A request_join ends here at the latest (a join attempt and its retries).
 constexpr std::uint32_t kJoinOperationMs = 60000;
 
+std::uint16_t membership_cause(const MembershipStage stage) noexcept {
+  switch (stage) {
+    case MembershipStage::Member: return ROUTELOOM_REASON_JOINED;
+    case MembershipStage::PendingAuthority: return ROUTELOOM_REASON_JOIN_PENDING;
+    case MembershipStage::Leaving: return ROUTELOOM_REASON_LEAVING;
+    case MembershipStage::Removed: return ROUTELOOM_REASON_REMOVED;
+    case MembershipStage::Recovery: return ROUTELOOM_REASON_RECOVERY_REQUIRED;
+    default: return ROUTELOOM_REASON_MEMBERSHIP_CHANGED;
+  }
+}
+
 }  // namespace
 
 // --- Observer -------------------------------------------------------------------
@@ -122,6 +133,11 @@ void Device::Observer::on_group_message(const GroupMessageInfo& info,
     CallbackScope scope(device_->in_callback_);
     device_->app_->on_group_message(info, payload);
   }
+}
+
+void Device::Observer::on_verified_contact(const NodeId source,
+                                           const MonotonicMs now_ms) noexcept {
+  device_->note_gateway_contact(source, now_ms);
 }
 
 void Device::Observer::on_delivery(const DeliveryResult& result) noexcept {
@@ -531,22 +547,26 @@ void Device::update_observation_remote() noexcept {
 
 // --- Facade ---------------------------------------------------------------------
 
+bool Device::callback_active() const noexcept {
+  return in_callback_ || (runtime_ != nullptr && runtime_->node().in_external_callback());
+}
+
 Status Device::send(const NodeId destination, const ByteView payload,
                     const SendOptions& options, MessageId& id) noexcept {
-  if (in_callback_) return Status::error(StatusCode::Busy, "reentrant call");
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
   if (runtime_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
   return runtime_->send_application(destination, payload, options, id);
 }
 
 Status Device::send_group(const GroupId group, const ByteView payload,
                           const GroupSendOptions& options, MessageId& id) noexcept {
-  if (in_callback_) return Status::error(StatusCode::Busy, "reentrant call");
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
   if (runtime_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
   return runtime_->node().send_group(group, payload, options, runtime_->now_ms(), id);
 }
 
 Status Device::cancel(const MessageId& id) noexcept {
-  if (in_callback_) return Status::error(StatusCode::Busy, "reentrant call");
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
   if (runtime_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
   return runtime_->node().cancel(id);
 }
@@ -603,20 +623,20 @@ GatewayDelivery* Device::gateway() noexcept {
 Status Device::send_applied(const NodeId destination, const ByteView payload,
                             const ExecutionLease& lease, const SendOptions& options,
                             MessageId& id) noexcept {
-  if (in_callback_) return Status::error(StatusCode::Busy, "reentrant call");
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
   if (runtime_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
   return runtime_->node().send_applied(destination, payload, lease, options, runtime_->now_ms(),
                                        id);
 }
 
 Status Device::set_applied_sink(AppliedEndpointSink* sink) noexcept {
-  if (in_callback_) return Status::error(StatusCode::Busy, "reentrant call");
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
   if (runtime_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
   return runtime_->node().set_applied_sink(sink);
 }
 
 Status Device::complete_applied(const std::uint64_t ticket, const AppliedReply& reply) noexcept {
-  if (in_callback_) return Status::error(StatusCode::Busy, "reentrant call");
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
   if (runtime_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
   return runtime_->node().complete_applied(ticket, reply, runtime_->now_ms());
 }
@@ -629,14 +649,19 @@ MembershipStage Device::current_stage() const noexcept {
   if (mode == sdkv1::CoordinatorMode::Dev) return MembershipStage::Member;
   const sdkv1::LifecyclePhase phase = owner_->lifecycle().snapshot().phase;
   const sdkv1::LifecycleStore& journal = stores_->lifecycle();
+  if (phase == sdkv1::LifecyclePhase::StorageBlocked) return MembershipStage::Recovery;
   if (journal.has_record() && journal.record().mode == sdkv1::LifecycleMode::LocalLeave) {
     return MembershipStage::Leaving;
+  }
+  if (phase == sdkv1::LifecyclePhase::UnassignedReady && journal.has_record() &&
+      journal.record().mode == sdkv1::LifecycleMode::LeftReady) {
+    return MembershipStage::Joining;
   }
   if (phase == sdkv1::LifecyclePhase::Removing || phase == sdkv1::LifecyclePhase::Holdoff ||
       mode == sdkv1::CoordinatorMode::Removed) {
     return MembershipStage::Removed;
   }
-  if (mode == sdkv1::CoordinatorMode::Recovery || phase == sdkv1::LifecyclePhase::StorageBlocked) {
+  if (mode == sdkv1::CoordinatorMode::Recovery) {
     return MembershipStage::Recovery;
   }
   if (mode == sdkv1::CoordinatorMode::Member) return MembershipStage::Member;
@@ -648,13 +673,14 @@ MembershipStage Device::current_stage() const noexcept {
 
 MembershipSnapshot Device::membership() const noexcept {
   MembershipSnapshot out{};
-  out.stage = stage_;
-  out.since_ms = stage_since_ms_;
-  out.reason = stage_reason_;
+  out.stage = current_stage();
+  const bool observed = out.stage == stage_;
+  out.since_ms = observed ? stage_since_ms_ : (runtime_ != nullptr ? runtime_->now_ms() : 0);
+  out.reason = observed ? stage_reason_ : membership_cause(out.stage);
   out.boot = boot_session_;
   out.operation = operation_ != Operation::None ? operation_id_ : 0;
   if (runtime_ != nullptr) out.node = runtime_->node().node_id();
-  if (stage_ == MembershipStage::Member && security_ == DeviceSecurity::DevRam &&
+  if (out.stage == MembershipStage::Member && security_ == DeviceSecurity::DevRam &&
       runtime_ != nullptr) {
     out.network = runtime_->node().config().network;
   } else if (stores_ != nullptr && stores_->site().has_site()) {
@@ -684,15 +710,7 @@ void Device::update_membership(const MonotonicMs now_ms) noexcept {
     stage_since_ms_ = now_ms;
     if (stage == MembershipStage::Member) member_since_ms_ = now_ms;
   } else if (stage != stage_) {
-    std::uint16_t cause = ROUTELOOM_REASON_MEMBERSHIP_CHANGED;
-    switch (stage) {
-      case MembershipStage::Member: cause = ROUTELOOM_REASON_JOINED; break;
-      case MembershipStage::PendingAuthority: cause = ROUTELOOM_REASON_JOIN_PENDING; break;
-      case MembershipStage::Leaving: cause = ROUTELOOM_REASON_LEAVING; break;
-      case MembershipStage::Removed: cause = ROUTELOOM_REASON_REMOVED; break;
-      case MembershipStage::Recovery: cause = ROUTELOOM_REASON_RECOVERY_REQUIRED; break;
-      default: break;
-    }
+    const std::uint16_t cause = membership_cause(stage);
     stage_ = stage;
     stage_since_ms_ = now_ms;
     stage_reason_ = cause;
@@ -735,13 +753,11 @@ void Device::on_restart(void* self, const bool leave) noexcept {
   // local leave is reported here, since the next boot keeps no trace of it.
   auto& device = *static_cast<Device*>(self);
   if (!leave) return;
+  device.stage_ = MembershipStage::Joining;
+  device.stage_since_ms_ = device.runtime_ != nullptr ? device.runtime_->now_ms() : 0;
+  device.stage_reason_ = ROUTELOOM_REASON_LEFT;
   if (device.device_observer_ != nullptr) {
-    MembershipSnapshot snapshot{};
-    snapshot.stage = MembershipStage::Joining;
-    snapshot.node = device.runtime_ != nullptr ? device.runtime_->node().node_id() : kInvalidNodeId;
-    snapshot.since_ms = device.runtime_ != nullptr ? device.runtime_->now_ms() : 0;
-    snapshot.boot = device.boot_session_;
-    snapshot.reason = ROUTELOOM_REASON_LEFT;
+    const MembershipSnapshot snapshot = device.membership();
     CallbackScope scope(device.in_callback_);
     device.device_observer_->on_membership(snapshot, ROUTELOOM_REASON_LEFT);
   }
@@ -750,7 +766,7 @@ void Device::on_restart(void* self, const bool leave) noexcept {
 
 Status Device::request_join(OperationId& operation) noexcept {
   operation = 0;
-  if (in_callback_) return Status::error(StatusCode::Busy, "reentrant call");
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
   if (owner_ == nullptr || runtime_ == nullptr) {
     return Status::error(StatusCode::InvalidState, "device not started");
   }
@@ -776,7 +792,7 @@ Status Device::request_join(OperationId& operation) noexcept {
 
 Status Device::leave(OperationId& operation) noexcept {
   operation = 0;
-  if (in_callback_) return Status::error(StatusCode::Busy, "reentrant call");
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
   if (owner_ == nullptr || runtime_ == nullptr) {
     return Status::error(StatusCode::InvalidState, "device not started");
   }
@@ -817,7 +833,7 @@ Status Device::join_policy(JoinPolicy& policy, std::uint32_t& revision) noexcept
 Status Device::set_join_policy(const JoinPolicy& policy, const std::uint32_t expected_revision,
                                std::uint32_t& revision) noexcept {
   revision = 0;
-  if (in_callback_) return Status::error(StatusCode::Busy, "reentrant call");
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
   if (owner_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
   if (security_ != DeviceSecurity::Member) {
     return Status::error(StatusCode::Unsupported, "DevRam has no join");
@@ -901,17 +917,21 @@ void Device::update_connectivity(const MonotonicMs now_ms) noexcept {
       }
     }
     bool routed = false;
-    const std::uint32_t lifetime = node.config().route_lifetime_ms;
     for (std::size_t i = 0; i < count; ++i) {
       if (!node.routes().best(gateways[i]).valid) continue;
       routed = true;
-      // A candidate's lease restarts at each advertisement that carried it.
-      const MonotonicMs expires = node.routes().selection_expires_at(gateways[i]);
-      if (expires < lifetime) continue;
-      const MonotonicMs refreshed = expires - lifetime;
-      if (refreshed <= now_ms && (!contact_valid_ || refreshed > contact_ms_)) {
-        contact_ms_ = refreshed;
-        contact_valid_ = true;
+      // Only authenticated frames heard from the gateway itself count.
+      // Relays can renew a route lease after the gateway has stopped.
+      NodeStatus status{};
+      if (node.node_status(gateways[i], now_ms, status) &&
+          (status.flags & kNodeStatusHeardValid) != 0 &&
+          (status.flags & kNodeStatusTelemetryStale) == 0 &&
+          status.heard_age_ms <= now_ms) {
+        const MonotonicMs heard = now_ms - status.heard_age_ms;
+        if (!contact_valid_ || heard > contact_ms_) {
+          contact_ms_ = heard;
+          contact_valid_ = true;
+        }
       }
     }
     if (count == 0) {

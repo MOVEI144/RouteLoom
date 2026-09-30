@@ -73,7 +73,16 @@ fn mesh_j04_leave_and_rejoin() {
         .device_op(true, world.now)
         .expect("leave answered");
     assert!(status == STATUS_OK && op != 0, "leave accepted: {status}");
+    world.peers[a].app_send_with(NODE_GHOST, 0, 0, b"after-leave-intent");
     world.step(25);
+    assert!(
+        world.snaps[a]
+            .app_tx
+            .iter()
+            .any(|tx| tx.reason == "NODE_PAUSED"),
+        "no new send after durable leave intent: {:?}",
+        world.snaps[a].app_tx
+    );
     let cancelled = world.snaps[a]
         .app_tx
         .iter()
@@ -180,6 +189,30 @@ fn mesh_f01_leave_intent_power_cuts() {
         "the leave resumed after the cut: {s:?}"
     );
     rejoin(&mut world, a);
+
+    // A failed tombstone commit keeps the intent and closes the gate.
+    world.peers[a].arm_key_fault(0, "s0");
+    let (status, op) = world.peers[a]
+        .device_op(true, world.now)
+        .expect("leave accepted");
+    assert_eq!(status, STATUS_OK);
+    until(&mut world, 5_000, |w| w.snaps[a].op_last == op);
+    assert_eq!(world.snaps[a].stage, 5, "failed erasure reports Recovery");
+    assert_eq!(world.snaps[a].op_result, reasons::REASON_RECOVERY_REQUIRED);
+    let events = world.snaps[a].membership_events;
+    until(&mut world, 1_000, |_| false);
+    assert_eq!(
+        world.snaps[a].membership_events, events,
+        "Recovery event once"
+    );
+    world.peers[a].power_cut();
+    until(&mut world, 5_000, |w| {
+        !w.snaps[a].has_site && w.snaps[a].stage == STAGE_JOINING
+    });
+    assert!(
+        !world.snaps[a].has_site && world.snaps[a].id_fp == id_fp,
+        "reboot resumes the durable leave intent"
+    );
 }
 
 /// F05-R: a send and a leave made from inside Device callbacks (a received
@@ -326,6 +359,7 @@ fn mesh_p05_deferred_applied_ticket() {
     let a = world.index_of(NODE_A);
     deliver_each(&mut world, 0, a, 1, b"p05-warm");
     world.peers[a].defer_applied(2_000);
+    world.peers[a].probe_reentry(true);
     let lease = world.peers[a].applied_lease();
     for round in 0..20_u32 {
         let completed = world.snaps[a].applied_completed;
@@ -337,6 +371,14 @@ fn mesh_p05_deferred_applied_ticket() {
             .unwrap_or(0);
         world.peers[0].applied_send(NODE_A, &lease, &round.to_le_bytes());
         until(&mut world, 1_900, |_| false);
+        assert!(
+            world.snaps[a].reentry_calls >= 2,
+            "APPLIED callback tried reentry"
+        );
+        assert_eq!(
+            world.snaps[a].reentry_calls, world.snaps[a].reentry_busy,
+            "APPLIED callback calls must be Busy"
+        );
         let pending = world.snaps[0].app_tx.iter().find(|t| t.seq > last).cloned();
         assert!(
             pending
@@ -430,5 +472,38 @@ fn mesh_join_policy_range_cas_and_holdoff() {
     assert!(
         world.peers[a].reboots > reboots && (59_000..=61_000).contains(&held),
         "restarted after the 60 s holdoff ({held} ms)"
+    );
+}
+
+/// M04: G stops while A and B keep exchanging authenticated route updates.
+/// B's lease refreshes cannot stand in for communication with G.
+#[test]
+fn mesh_m04_gateway_stop_does_not_refresh_evidence() {
+    let Some(mut world) = MeshWorld::start("m04-gateway", Switch::forced_multihop()) else {
+        return;
+    };
+    converge_gated(&mut world, 1, "m04 gateway");
+    let a = world.index_of(NODE_A);
+    deliver_each(&mut world, a, 0, 1, b"m04-before-stop");
+    assert_eq!(world.snaps[a].connectivity, 1);
+    let events = world.snaps[a].connectivity_events;
+    world.switch.isolate(0);
+    until(&mut world, 120_025, |_| false);
+    assert_eq!(
+        world.snaps[a].connectivity, 3,
+        "Isolated at T_iso despite relay refreshes"
+    );
+    assert_eq!(
+        world.snaps[a].connectivity_events,
+        events + 2,
+        "Degraded and Isolated once"
+    );
+    assert!(world.snaps[a].has_site, "isolation keeps membership");
+    world.switch.heal(0);
+    until(&mut world, 60_000, |w| w.snaps[a].join_confirmed);
+    deliver_each(&mut world, 0, a, 1, b"m04-gateway-back");
+    assert_eq!(
+        world.snaps[a].connectivity, 1,
+        "Reachable after verified communication"
     );
 }

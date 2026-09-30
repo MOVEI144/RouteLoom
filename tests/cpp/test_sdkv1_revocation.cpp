@@ -3260,7 +3260,7 @@ void test_zt_adopt_cuts_prepared_stage() {
 // durable before anything is erased; a cut while writing it leaves either
 // no intent and the membership, or the intent. A reboot mid-erasure resumes
 // it. The site, RRS1 and resume state go, the identity stays, the journal
-// ends empty (no holdoff, no watermark) and the device restarts unassigned.
+// ends in LeftReady (no holdoff, no watermark) and the device restarts unassigned.
 void test_local_leave() {
   NodeFixture f{};
   CHECK(!f.dispatch(LifecycleInput::LocalLeave(), 1));  // not adopted yet
@@ -3306,6 +3306,29 @@ void test_local_leave() {
   CHECK_OK(f.dispatch(LifecycleInput::MemberReady(f.site.commit_seq(), 0), 301));
   CHECK(f.snap().phase != LifecyclePhase::StorageBlocked &&
         f.snap().phase != LifecyclePhase::UnassignedReady);
+
+  // Rebuild lifecycle RAM after every erasure pass, including all resume
+  // slots, Trust, Site, Revocation and the final LeftReady commit.
+  for (int cut_after = 0; cut_after <= 22; ++cut_after) {
+    NodeFixture cut{};
+    CHECK(cut.provision(2, 14));
+    CHECK_OK(cut.dispatch(LifecycleInput::LocalLeave(), 100));
+    for (int pass = 0; pass < cut_after && cut.snap().phase == LifecyclePhase::Removing; ++pass) {
+      CHECK_OK(cut.dispatch(LifecycleInput::Poll(), 101 + pass));
+    }
+    reboot_lifecycle(cut);
+    CHECK_OK(cut.journal.initialize());
+    CHECK_OK(cut.identity.initialize());
+    CHECK_OK(cut.site.initialize());
+    CHECK_OK(cut.revocations.initialize());
+    CHECK_OK(cut.dispatch(LifecycleInput::Boot(true), 1000));
+    for (int pass = 0; pass < 24 && cut.snap().phase == LifecyclePhase::Removing; ++pass) {
+      CHECK_OK(cut.dispatch(LifecycleInput::Poll(), 1001 + pass));
+    }
+    CHECK(cut.snap().phase == LifecyclePhase::UnassignedReady);
+    CHECK(cut.journal.record().mode == LifecycleMode::LeftReady);
+    CHECK(!cut.site.has_site() && !cut.revocations.has_set() && cut.identity.has_identity());
+  }
 
   for (std::size_t byte = 0; byte <= kLifecycleSlotBytes; byte += 97) {
     FaultyRecordStorage storage{kLifecycleSlotBytes};

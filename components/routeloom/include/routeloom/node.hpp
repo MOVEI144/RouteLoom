@@ -349,6 +349,12 @@ class NodeObserver {
     (void)assurance;
     on_message(key, source, payload);
   }
+  // Successful end-to-end authentication at this destination, including
+  // control replies and END_RECEIPT. A relay's link proof never fires it.
+  virtual void on_verified_contact(NodeId source, MonotonicMs now_ms) noexcept {
+    (void)source;
+    (void)now_ms;
+  }
   virtual void on_delivery(const DeliveryResult& result) noexcept = 0;
   virtual void on_diagnostic(const char* reason, NodeId peer, const MessageId* message) noexcept = 0;
   // APPLIED verdict at the origin (sdk-completion/01 §1.3): fires once per
@@ -1385,7 +1391,7 @@ class MeshNode {
     bool saved_;
   };
 
-  // Forwards the six NodeObserver methods to the application observer with an
+  // Forwards the NodeObserver methods to the application observer with an
   // ExternalCallbackScope held, so the node reports in_external_callback()
   // without instrumenting every notification site. The default
   // on_group_message -> on_message forward stays inside the scope because it
@@ -1403,6 +1409,10 @@ class MeshNode {
                     const DeliveryAssurance& assurance) noexcept {
       ExternalCallbackScope scope(flag_);
       app_.on_message(key, source, payload, assurance);
+    }
+    void on_verified_contact(NodeId source, MonotonicMs now_ms) noexcept {
+      ExternalCallbackScope scope(flag_);
+      app_.on_verified_contact(source, now_ms);
     }
     void on_delivery(const DeliveryResult& result) noexcept {
       ExternalCallbackScope scope(flag_);

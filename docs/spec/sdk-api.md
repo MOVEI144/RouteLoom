@@ -44,11 +44,11 @@ ESP-IDF の機器は `components/routeloom_device` の `routeloom::Device` を�
 |---|---|
 | `send(dst, payload, options, id)` | 受付だけ。結果は `on_delivery` と `delivery(id)`。`options.coalesce_key`（0 以外）は BEST_EFFORT のみ：同じ宛先・同じ key のまだ無線に渡していない仕事を置き換え、古い方は `CANCELLED_SUPERSEDED`（CancelledBeforeTx）で終わる。無線に渡した仕事は置き換えない。RELIABLE・APPLIED・sleep 保存との組合せは `InvalidArgument` |
 | `send_applied(dst, payload, lease, options, id)` | APPLIED。lease は相手の現在の lease（StaleLease の返事に入る）。payload は 112 B まで |
-| `set_applied_sink(sink)`／`complete_applied(ticket, reply)` | 受信側。sink は `AppliedReply::deferred` で判定を後回しにでき、後で `complete_applied` を呼ぶ。同時に開ける ticket は 4 件（`kAppliedTicketMax`）で、5 件目の要求は endpoint を呼ばずに Capacity で拒否する。期限後の完了は Expired、二度目・別の boot の ticket は NotFound で、どちらも適用しない。その間の QUERY には Pending と答える |
+| `set_applied_sink(sink)`／`complete_applied(ticket, reply)` | 受信側。sink は `AppliedReply::deferred` で判定を後回しにでき、後で `complete_applied` を呼ぶ。同時に開ける ticket は 4 件（`kAppliedTicketMax`）で、5 件目の要求は endpoint を呼ばずに Capacity で拒否する。期限後の完了は Expired、二度目・別の boot・送信元の失効・離脱で取り消した ticket は NotFound で、どちらも適用しない。その間の QUERY には Pending と答える |
 | `membership()` | 段階（Unprovisioned／Joining／PendingAuthority／Member／Removed／Recovery／Leaving）、site_id、64 bit の network、NodeId、割当の世代、認められた役割、`since_ms`（同じ boot の単調時計）、boot、最後の変化の理由 ID、進行中の OperationId |
-| `connectivity()` | 自現場の gateway に届くか（scope = SiteGateway）。Unknown／Reachable／Degraded／Isolated／Sleeping、`since_ms`、boot、最後の gateway の証拠の時刻、理由 ID。証拠は gateway から届いた検証済みの message と、gateway 自身の経路広告で更新された gateway への経路だけ（RSSI や表に載っていることは数えない）。証拠が 60 s 以内で経路があれば Reachable、それより古いか経路が無ければ Degraded、120 s 無ければ Isolated。所属とは独立で、Isolated でも所属は捨てない。gateway 自身は Reachable。Sleeping は sleep の経路（V2-15）が設定する |
+| `connectivity()` | 自現場の gateway に届くか（scope = SiteGateway）。Unknown／Reachable／Degraded／Isolated／Sleeping、`since_ms`、boot、最後の gateway の証拠の時刻、理由 ID。証拠は gateway 本人から直接受けた認証済みの通信と、E2E の検証に通った gateway の message・制御返信・END_RECEIPT（RSSI、表への登録、中継機による経路 lease の更新は数えない）。証拠が 60 s 以内で経路があれば Reachable、それより古いか経路が無ければ Degraded、120 s 無ければ Isolated。所属とは独立で、Isolated でも所属は捨てない。gateway 自身は Reachable。Sleeping は sleep の経路（V2-15）が設定する |
 | `request_join(op)` | 未所属：zero-touch の scan の待ちを今終える（避ける一覧は守る）。所属済み：既存の所属を site に再検証させる。結果は `on_operation`（JOINED／JOIN_DENIED／JOIN_PENDING／JOIN_TIMEOUT（60 s）／RECOVERY_REQUIRED）。DevRam は Unsupported |
-| `leave(op)` | RLX1 に LocalLeave の意図（schema 2）を書いてから消す。消すのは rlsite・rlrevo・rlres2・受付方針と RAM の session、残すのは本人（RLI1）・rlboot・rlcfg・rlkeys・JoinPolicy。自分から離れたので holdoff も RLV1 も残さない。未送信の仕事は `CANCELLED_LEAVE`、送信済みは Indeterminate で終わる。どの段で電源が切れても次の起動で先へ進めて完了する。完了すると `on_membership(LEFT)` と `on_operation(LEFT)` を出して未所属で再起動する。旧現場への通知はしない（host の台帳は変えない） |
+| `leave(op)` | RLX1 に LocalLeave の意図（schema 2）を書いてから消す。消すのは rlsite・rlrevo・rlres2・受付方針と RAM の session、残すのは本人（RLI1）・rlboot・rlcfg・rlkeys・JoinPolicy。自分から離れたので holdoff も RLV1 も残さない。意図の保存後は戻る前に新規受付と送信を止める。消去の失敗は Recovery と RECOVERY_REQUIRED で通知し、耐久 intent は再起動から再開できる。未送信の仕事は `CANCELLED_LEAVE`、送信済みは Indeterminate で終わる。どの段で電源が切れても次の起動で先へ進めて完了する。完了すると `on_membership(LEFT)` と `on_operation(LEFT)` を出して未所属で再起動する。旧現場への通知はしない（host の台帳は変えない） |
 | `set_join_policy(policy, expected_revision, revision)`／`join_policy(policy, revision)` | 下の JoinPolicy。範囲外は InvalidArgument、revision の不一致は Conflict。RLJP1（rlmaint の `j0`）に書いて読み戻してから次の判断に効かせる。再起動と leave の後も残る |
 | `capabilities()` | 役割、MemberEdhoc か、`security_profile`（DevRam は Development、MemberEdhoc は Candidate）、USB gateway、payload の上限など |
 
@@ -61,7 +61,7 @@ ESP-IDF の機器は `components/routeloom_device` の `routeloom::Device` を�
 | `avoid_not_here_s`（断られた現場を避ける時間） | 21600（6 h） | 300〜86400 |
 | `avoid_blocked_s` | 86400（24 h） | 3600〜604800 |
 | `removal_holdoff_s`（撤去の後の holdoff、RLV1 と再起動までの待ち） | 600 | 60〜3600 |
-| `retry_max_s`（retry_after の上限） | 600 | 60〜3600 |
+| `retry_max_s`（探索・失敗 backoff と retry_after hint の上限） | 600 | 60〜3600 |
 | `isolation_notice_s` | 0（無効） | 0 または 300〜2592000 |
 | `start_jitter_ms`（未所属で起動したときの開始の散らし） | 0 | 0〜60000 |
 | `role`（名乗る役割の bit、0 は image の既定） | 0 | endpoint／relay、gateway は gateway の image だけ |
