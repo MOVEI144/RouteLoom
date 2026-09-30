@@ -1,0 +1,204 @@
+[
+  {
+    "label": "stab-before-br",
+    "commit": "1fbd3a284420c789354c17e18353c86db449a5b5",
+    "source_digest": "1c7e0a50a630b4bb5e9e6dbd17dde4c016b02e35bb718c4ec646c7ccf961c766",
+    "chip": "esp32c3",
+    "app_bytes": 1267808,
+    "app_sha256": "74e6e873699d32cddd7df9cb71069247011ae3fb85333709f8e26660ad77f7c0",
+    "static_free": 34192,
+    "floor": 27648,
+    "sdkconfig_sha256": "a40912370644e9facee2033856c8ad50298d730ff72fa8462bc046a9230fb36a"
+  },
+  {
+    "label": "stab-5f-br",
+    "commit": "5fca34e26f69282536cda77be36efd979dfbee14",
+    "source_digest": "ff9113ea3fe1948f8dacd34614eeaf98306bffbfc3fdcd37a795223ae7365d7b",
+    "chip": "esp32c3",
+    "app_bytes": 1268272,
+    "app_sha256": "b0506fbb2044e98d90e86177f3c28324d024044108eb9b37cf89963106328ec1",
+    "static_free": 34192,
+    "floor": 27648,
+    "sdkconfig_sha256": "a40912370644e9facee2033856c8ad50298d730ff72fa8462bc046a9230fb36a"
+  },
+  {
+    "label": "stab-before-relay",
+    "commit": "1fbd3a284420c789354c17e18353c86db449a5b5",
+    "source_digest": "1c7e0a50a630b4bb5e9e6dbd17dde4c016b02e35bb718c4ec646c7ccf961c766",
+    "chip": "esp32c6",
+    "app_bytes": 1351952,
+    "app_sha256": "5bd5fbba74ab6b4493697ae7450577ea63c800f09a23baafd29053e7973aa413",
+    "static_free": 93977,
+    "floor": 8192,
+    "sdkconfig_sha256": "0f6389c90f268ce4a6e982ec11e52d3151588564aed7b9e8fa2444983be1cd9c"
+  },
+  {
+    "label": "stab-5f-relay",
+    "commit": "5fca34e26f69282536cda77be36efd979dfbee14",
+    "source_digest": "ff9113ea3fe1948f8dacd34614eeaf98306bffbfc3fdcd37a795223ae7365d7b",
+    "chip": "esp32c6",
+    "app_bytes": 1352512,
+    "app_sha256": "d87d0bcf10f840b484b44bcb1e038879ca280b5b000400cee733e887ee72f2bb",
+    "static_free": 93977,
+    "floor": 8192,
+    "sdkconfig_sha256": "0f6389c90f268ce4a6e982ec11e52d3151588564aed7b9e8fa2444983be1cd9c"
+  },
+  {
+    "label": "stab-before-endpoint",
+    "commit": "1fbd3a284420c789354c17e18353c86db449a5b5",
+    "source_digest": "1c7e0a50a630b4bb5e9e6dbd17dde4c016b02e35bb718c4ec646c7ccf961c766",
+    "chip": "esp32c6",
+    "app_bytes": 1296416,
+    "app_sha256": "f8b457831e28f56da3ab6e22449735178781af53563fc563ac616c2e5dd8fb94",
+    "static_free": 142045,
+    "floor": 8192,
+    "sdkconfig_sha256": "4e766ff7dfae48d41af677ac12e63bf350d555653c01c2741a0b8a0c96cf0bc2"
+  },
+  {
+    "label": "stab-5f-endpoint",
+    "commit": "5fca34e26f69282536cda77be36efd979dfbee14",
+    "source_digest": "ff9113ea3fe1948f8dacd34614eeaf98306bffbfc3fdcd37a795223ae7365d7b",
+    "chip": "esp32c6",
+    "app_bytes": 1296976,
+    "app_sha256": "8bf04f55a72d41335a895d2816d7b7deb51ef5366ce47287963a623e3ffb7821",
+    "static_free": 142045,
+    "floor": 8192,
+    "sdkconfig_sha256": "4e766ff7dfae48d41af677ac12e63bf350d555653c01c2741a0b8a0c96cf0bc2"
+  },
+  {
+    "label": "stab-5f-endpoint-direct",
+    "commit": "5fca34e26f69282536cda77be36efd979dfbee14",
+    "source_digest": "663e4a054d44a508964efb99e8c12d2210956e40a7f4f4feb21c8bb9eb8e6a52",
+    "chip": "esp32c6",
+    "app_bytes": 1297168,
+    "app_sha256": "645eb870d43324aa7d039f8c07490456e2b3d02740b2ac8e39deb5a54c2d14d9",
+    "sdkconfig_sha256": "f2628f665ee34962946da977ea396c873674985cc43325d38d6748ddec02829b",
+    "ram_guard": {
+      "memory_type": "DIRAM",
+      "static_bss": 195408,
+      "static_data": 15567,
+      "free": 142045,
+      "min_free": 8192,
+      "passed": true
+    }
+  },
+  {
+    "label": "stab-5f-n1",
+    "commit": "5fca34e26f69282536cda77be36efd979dfbee14",
+    "source_digest": "534123be3c7bafb0664eb7d42abfe87df1fe17c2ef22dbd1e958444a89681138",
+    "chip": "esp32c3",
+    "app_bytes": 1218768,
+    "app_sha256": "eef91ed7bee98197ca4b6422bfe40725091d5fb61f2f42af3c42cd19f8b019ea",
+    "sdkconfig_sha256": "efdd8823b66b78ac1ae345c806019097fadd28589acb18b898be9225330787d4",
+    "ram_guard": {
+      "memory_type": "DRAM",
+      "static_bss": 205768,
+      "static_data": 13284,
+      "free": 52896,
+      "min_free": 27648,
+      "passed": true
+    }
+  },
+  {
+    "label": "stab-5f-setup-br",
+    "commit": "5fca34e26f69282536cda77be36efd979dfbee14",
+    "source_digest": "ff9113ea3fe1948f8dacd34614eeaf98306bffbfc3fdcd37a795223ae7365d7b",
+    "chip": "esp32c3",
+    "app_bytes": 302000,
+    "app_sha256": "1688a818f509f5ff6057a6167a424dac0cd95c02e3d5fccd28b0763f08024731",
+    "sdkconfig_sha256": "251258222d4c448f62a37f4a885ccc7f9768b7a64bad879c5b898c477b5134a7",
+    "ram_guard": {
+      "memory_type": "DRAM",
+      "static_bss": 25592,
+      "static_data": 9519,
+      "free": 244607,
+      "min_free": 27648,
+      "passed": true
+    }
+  },
+  {
+    "label": "stab-5f-setup-ref",
+    "commit": "5fca34e26f69282536cda77be36efd979dfbee14",
+    "source_digest": "ff9113ea3fe1948f8dacd34614eeaf98306bffbfc3fdcd37a795223ae7365d7b",
+    "chip": "esp32c6",
+    "app_bytes": 391200,
+    "app_sha256": "c55a41ee4ae4117305d19f59c4fc576aafde4b83c2d7e2e8457997ce40eb0691",
+    "sdkconfig_sha256": "2c10604050ed60853d035bc1b44f93c3dbeb952433ec7894a2b43554f785949a",
+    "ram_guard": {
+      "memory_type": "DIRAM",
+      "static_bss": 30744,
+      "static_data": 11143,
+      "free": 332455,
+      "min_free": 8192,
+      "passed": true
+    }
+  },
+  {
+    "label": "stab-final-br",
+    "commit": "6d3d2ffc1a4cc8e99469fe276248c10b6910840e",
+    "source_digest": "e63a12e1b65975050c0a649308c71ea5b6f916b0ace417e8b7c368c245eb7018",
+    "chip": "esp32c3",
+    "app_bytes": 1268240,
+    "app_sha256": "e0e4c40ae97abe2bcfb1af1f5c6f26566a47975ec48c9a4387b1c77e93ca0ce6",
+    "sdkconfig_sha256": "a40912370644e9facee2033856c8ad50298d730ff72fa8462bc046a9230fb36a",
+    "ram_guard": {
+      "memory_type": "DRAM",
+      "static_bss": 224320,
+      "static_data": 13436,
+      "free": 34192,
+      "min_free": 27648,
+      "passed": true
+    }
+  },
+  {
+    "label": "stab-final-relay",
+    "commit": "6d3d2ffc1a4cc8e99469fe276248c10b6910840e",
+    "source_digest": "e63a12e1b65975050c0a649308c71ea5b6f916b0ace417e8b7c368c245eb7018",
+    "chip": "esp32c6",
+    "app_bytes": 1352480,
+    "app_sha256": "addfef92f1696c41ac417b29ca9b70ac6ac05d5056bc150abdeb5ffe8c10bbbd",
+    "sdkconfig_sha256": "0f6389c90f268ce4a6e982ec11e52d3151588564aed7b9e8fa2444983be1cd9c",
+    "ram_guard": {
+      "memory_type": "DIRAM",
+      "static_bss": 240904,
+      "static_data": 18103,
+      "free": 93977,
+      "min_free": 8192,
+      "passed": true
+    }
+  },
+  {
+    "label": "stab-final-endpoint",
+    "commit": "6d3d2ffc1a4cc8e99469fe276248c10b6910840e",
+    "source_digest": "e63a12e1b65975050c0a649308c71ea5b6f916b0ace417e8b7c368c245eb7018",
+    "chip": "esp32c6",
+    "app_bytes": 1296944,
+    "app_sha256": "813129e92f558e14aa01f6e386459807fd52269a695de9a6c07d94342927083c",
+    "sdkconfig_sha256": "4e766ff7dfae48d41af677ac12e63bf350d555653c01c2741a0b8a0c96cf0bc2",
+    "ram_guard": {
+      "memory_type": "DIRAM",
+      "static_bss": 195408,
+      "static_data": 15567,
+      "free": 142045,
+      "min_free": 8192,
+      "passed": true
+    }
+  },
+  {
+    "label": "stab-final-n1",
+    "commit": "6d3d2ffc1a4cc8e99469fe276248c10b6910840e",
+    "source_digest": "e63a12e1b65975050c0a649308c71ea5b6f916b0ace417e8b7c368c245eb7018",
+    "chip": "esp32c3",
+    "app_bytes": 1218736,
+    "app_sha256": "6cabc91eeecd9341f57dcce0511c4fd46ed1242255d5ef5f4e150f152967ca6c",
+    "sdkconfig_sha256": "efdd8823b66b78ac1ae345c806019097fadd28589acb18b898be9225330787d4",
+    "ram_guard": {
+      "memory_type": "DRAM",
+      "static_bss": 205768,
+      "static_data": 13284,
+      "free": 52896,
+      "min_free": 27648,
+      "passed": true
+    }
+  }
+]

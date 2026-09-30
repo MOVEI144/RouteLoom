@@ -1,0 +1,301 @@
+[2026-09-30T19:28:02.421+00:00] !! opened
+[2026-09-30T19:28:02.622+00:00] I (878) RouteLoomRef: sdkv1 identity: node=2 kid=bf689dc8a44cb79I (2882) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-30T19:28:02.622+00:00] W (2883) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-30T19:28:02.622+00:00] I (2910) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T19:28:02.622+00:00] W (2911) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T19:28:02.622+00:00] W (2929) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-30T19:28:12.849+00:00] W (13201) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:28:15.054+00:00] W (15274) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:00.153+00:00] I (60478) RouteLoom: stack hwm rl_owner 10268 B
+[2026-09-30T19:29:00.153+00:00] I (60479) RouteLoom: owner polls=14425 empty=14252 rxq_max=1 max_us rx=2876 bootstrap=20702 node=3517 security=694518
+[2026-09-30T19:29:00.153+00:00] I (60482) RouteLoom: owner expiry_slots=5192280 hop_accept_expired=1
+[2026-09-30T19:29:00.153+00:00] I (60488) RouteLoom: HIL HEAP free=90516 largest=73728 min=89648 B
+[2026-09-30T19:29:00.153+00:00] I (60494) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=0 busy=0 quarantined=0 fenced=0 tx_ok=58 tx_failed=1 stale=0 send_errors=0 last_error=0x0 rx=116 rx_other_channel=0
+[2026-09-30T19:29:00.354+00:00] I (60510) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=4 send_failures=3 kind_rejects=0
+[2026-09-30T19:29:00.354+00:00] I (60521) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=272 seq=1
+[2026-09-30T19:29:00.354+00:00] I (60528) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T19:29:12.371+00:00] W (72604) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:12.371+00:00] W (72617) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:12.571+00:00] W (72770) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:12.571+00:00] W (72794) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:12.972+00:00] W (73275) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:12.972+00:00] W (73289) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:13.172+00:00] W (73366) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:13.172+00:00] W (73382) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:13.172+00:00] W (73454) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:13.573+00:00] W (73777) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:13.573+00:00] W (73794) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:13.573+00:00] W (73874) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:13.573+00:00] W (73926) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:14.174+00:00] I (74530) RouteLoomRef: p6: RRS1 applied rs_epoch=5
+[2026-09-30T19:29:33.411+00:00] I (93727) RouteLoomRef: discovery event=BOUND peer=3
+[2026-09-30T19:29:33.411+00:00] W (93728) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-09-30T19:29:33.611+00:00] I (93820) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-30T19:29:33.611+00:00] W (93821) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-30T19:29:36.215+00:00] W (96408) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:29:38.218+00:00] W (98400) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:29:38.218+00:00] W (98423) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:29:40.221+00:00] W (100415) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:29:42.023+00:00] W (102282) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:42.224+00:00] W (102409) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:29:42.224+00:00] W (102424) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:29:42.224+00:00] W (102575) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:42.624+00:00] W (102977) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:42.824+00:00] W (103103) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:43.025+00:00] W (103377) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:43.225+00:00] W (103505) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:44.226+00:00] W (104410) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:44.426+00:00] W (104701) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:44.627+00:00] W (104824) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:44.627+00:00] W (104836) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:44.627+00:00] W (104853) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:44.627+00:00] W (104901) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:44.627+00:00] W (104926) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:44.627+00:00] W (104980) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:44.827+00:00] W (104994) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:44.827+00:00] W (105011) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:44.827+00:00] W (105058) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:44.827+00:00] W (105115) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:44.827+00:00] W (105130) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:44.827+00:00] W (105149) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:45.027+00:00] W (105310) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:45.027+00:00] W (105339) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:29:45.027+00:00] W (105350) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:45.227+00:00] W (105405) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:45.227+00:00] W (105443) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:45.227+00:00] W (105456) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:45.227+00:00] W (105486) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:45.227+00:00] W (105503) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:45.428+00:00] W (105713) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:45.628+00:00] W (105965) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:45.828+00:00] W (106121) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:29:45.828+00:00] W (106137) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:29:45.828+00:00] W (106151) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:29:45.828+00:00] W (106165) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:29:45.828+00:00] W (106179) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:29:45.828+00:00] W (106189) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:29:46.028+00:00] W (106200) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:46.028+00:00] W (106217) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:46.028+00:00] W (106224) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:46.028+00:00] W (106312) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:46.028+00:00] W (106340) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:46.028+00:00] W (106384) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:46.228+00:00] W (106413) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:46.228+00:00] W (106462) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:46.228+00:00] W (106506) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:46.228+00:00] W (106544) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:46.228+00:00] W (106562) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:46.429+00:00] W (106594) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:46.429+00:00] W (106654) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:46.429+00:00] W (106685) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:46.429+00:00] W (106703) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:46.429+00:00] W (106720) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:46.429+00:00] W (106740) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:46.429+00:00] W (106747) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:46.629+00:00] W (106845) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:46.629+00:00] W (106857) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:46.629+00:00] W (106882) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:46.629+00:00] W (106902) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:46.629+00:00] W (106918) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:46.629+00:00] W (106935) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:46.629+00:00] W (106988) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:46.829+00:00] W (107034) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:46.829+00:00] W (107073) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:47.029+00:00] W (107239) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=3 message=present
+[2026-09-30T19:29:47.029+00:00] W (107280) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=3 message=present
+[2026-09-30T19:29:47.029+00:00] W (107314) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:47.029+00:00] W (107354) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:47.029+00:00] W (107372) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:47.029+00:00] W (107386) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:47.230+00:00] W (107404) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:47.230+00:00] W (107414) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:47.230+00:00] W (107432) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:47.230+00:00] W (107460) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:47.230+00:00] W (107503) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:29:47.230+00:00] W (107573) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:47.230+00:00] W (107591) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:47.430+00:00] W (107697) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:47.631+00:00] W (107858) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:48.032+00:00] W (108264) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:48.432+00:00] W (108665) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:49.233+00:00] W (109581) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:49.634+00:00] W (109865) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:50.034+00:00] W (110272) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:50.435+00:00] W (110681) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:51.236+00:00] W (111528) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:29:51.236+00:00] W (111578) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:51.436+00:00] W (111677) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=3 message=present
+[2026-09-30T19:29:51.636+00:00] W (111864) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:52.037+00:00] W (112266) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:29:52.437+00:00] W (112665) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:00.250+00:00] I (120478) RouteLoom: stack hwm rl_owner 8696 B
+[2026-09-30T19:30:00.250+00:00] I (120478) RouteLoom: owner polls=28765 empty=27951 rxq_max=2 max_us rx=3539 bootstrap=341962 node=4642 security=694518
+[2026-09-30T19:30:00.250+00:00] I (120482) RouteLoom: owner expiry_slots=10354680 hop_accept_expired=31
+[2026-09-30T19:30:00.250+00:00] I (120488) RouteLoom: HIL HEAP free=90192 largest=73728 min=89176 B
+[2026-09-30T19:30:00.250+00:00] I (120495) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=0 busy=0 quarantined=0 fenced=0 tx_ok=131 tx_failed=1 stale=0 send_errors=0 last_error=0x0 rx=465 rx_other_channel=0
+[2026-09-30T19:30:00.250+00:00] I (120511) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=0 probes=11 send_failures=10 kind_rejects=0
+[2026-09-30T19:30:00.250+00:00] I (120522) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=272 seq=1
+[2026-09-30T19:30:00.250+00:00] I (120529) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=70 seq=1
+[2026-09-30T19:30:11.667+00:00] W (131977) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T19:30:11.667+00:00] I (132002) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T19:30:11.667+00:00] W (132003) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T19:30:14.872+00:00] W (135156) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T19:30:14.872+00:00] W (135162) RouteLoomRef: diagnostic reason=ROUTE_STALE_GENERATION peer=3 message=none
+[2026-09-30T19:30:15.673+00:00] W (135920) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:15.873+00:00] W (136130) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:15.873+00:00] W (136230) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:16.074+00:00] W (136289) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:16.875+00:00] W (137223) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:30:16.875+00:00] W (137237) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:30:17.075+00:00] W (137262) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:30:17.075+00:00] W (137278) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:30:17.075+00:00] W (137292) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:30:17.075+00:00] W (137306) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:30:17.075+00:00] W (137317) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:30:17.075+00:00] W (137334) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:30:17.075+00:00] W (137375) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:30:17.075+00:00] W (137393) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:17.275+00:00] W (137472) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:17.275+00:00] W (137480) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:30:17.275+00:00] W (137489) RouteLoomRef: diagnostic reason=session replay peer=1 message=none
+[2026-09-30T19:30:17.275+00:00] W (137575) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:17.275+00:00] W (137587) RouteLoomRef: diagnostic reason=session replay peer=3 message=none
+[2026-09-30T19:30:17.275+00:00] W (137602) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:30:17.275+00:00] W (137623) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:17.475+00:00] W (137691) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:30:17.475+00:00] W (137736) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:17.475+00:00] W (137823) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:30:17.676+00:00] W (137848) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:17.676+00:00] W (137872) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:17.676+00:00] W (137904) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:30:17.676+00:00] W (137921) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:17.676+00:00] W (137944) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:30:17.876+00:00] W (138048) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:17.876+00:00] W (138070) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:30:17.876+00:00] W (138107) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:17.876+00:00] W (138128) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:17.876+00:00] W (138161) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:30:17.876+00:00] W (138175) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:17.876+00:00] W (138197) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:30:18.076+00:00] W (138244) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:30:18.076+00:00] W (138293) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:18.076+00:00] W (138369) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:18.076+00:00] W (138401) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:18.076+00:00] W (138417) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:18.277+00:00] W (138571) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:18.277+00:00] W (138585) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:18.277+00:00] W (138598) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:18.277+00:00] W (138608) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:18.277+00:00] W (138617) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:18.277+00:00] W (138632) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:18.277+00:00] W (138633) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=3 message=present
+[2026-09-30T19:30:18.477+00:00] W (138645) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:18.477+00:00] W (138651) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=3 message=present
+[2026-09-30T19:30:18.477+00:00] W (138657) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:18.477+00:00] W (138685) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:18.477+00:00] W (138700) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:18.477+00:00] W (138709) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:18.477+00:00] W (138716) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:18.477+00:00] W (138834) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T19:30:18.678+00:00] W (138962) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:19.078+00:00] W (139367) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:19.279+00:00] W (139513) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=3 message=present
+[2026-09-30T19:30:19.479+00:00] W (139768) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:19.680+00:00] W (139920) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:19.680+00:00] W (139938) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=3 message=present
+[2026-09-30T19:30:20.481+00:00] W (140680) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:20.681+00:00] W (140994) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:21.081+00:00] W (141300) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:21.081+00:00] W (141375) RouteLoomRef: diagnostic reason=BOOTSTRAP_TRANSIT_NO_ROUTE peer=1 message=present
+[2026-09-30T19:30:21.282+00:00] W (141586) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-30T19:30:21.482+00:00] W (141678) RouteLoomRef: diagnostic reason=BOOTSTRAP_TRANSIT_NO_ROUTE peer=1 message=present
+[2026-09-30T19:30:22.283+00:00] W (142493) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:24.686+00:00] W (144973) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:25.086+00:00] W (145375) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:25.487+00:00] W (145778) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:26.488+00:00] W (146697) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:26.688+00:00] W (146978) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:27.089+00:00] W (147378) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:27.489+00:00] W (147702) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:27.489+00:00] W (147750) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:27.489+00:00] W (147784) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:28.490+00:00] W (148690) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:28.691+00:00] W (148894) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:28.691+00:00] W (148916) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:28.691+00:00] W (148924) RouteLoomRef: diagnostic reason=session replay peer=3 message=none
+[2026-09-30T19:30:28.691+00:00] W (148938) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:28.691+00:00] W (149006) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:28.891+00:00] W (149154) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:28.891+00:00] W (149209) RouteLoomRef: diagnostic reason=session replay peer=1 message=none
+[2026-09-30T19:30:29.091+00:00] W (149258) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:29.091+00:00] W (149332) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:29.091+00:00] W (149349) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:29.091+00:00] W (149392) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:29.491+00:00] W (149788) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:29.491+00:00] W (149824) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:30.493+00:00] W (150692) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:30.693+00:00] W (150977) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:30.693+00:00] W (151001) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=3 message=present
+[2026-09-30T19:30:31.294+00:00] W (151582) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:31.294+00:00] W (151612) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:31.494+00:00] W (151672) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:31.494+00:00] W (151710) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:31.494+00:00] W (151739) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:31.494+00:00] W (151802) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:31.694+00:00] W (151865) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:31.694+00:00] W (151886) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:32.095+00:00] W (152390) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:32.295+00:00] W (152486) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:32.295+00:00] W (152515) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:32.495+00:00] W (152693) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:30:32.495+00:00] W (152704) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T19:30:32.495+00:00] W (152718) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:32.495+00:00] W (152749) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:33.096+00:00] W (153385) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:34.699+00:00] W (154980) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:35.099+00:00] W (155380) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:35.500+00:00] W (155783) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:36.501+00:00] W (156710) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:39.505+00:00] W (159763) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T19:30:39.505+00:00] I (159794) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T19:30:39.505+00:00] W (159795) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T19:30:42.710+00:00] W (162946) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T19:30:42.910+00:00] W (163265) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:43.311+00:00] W (163552) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:43.712+00:00] W (163948) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T19:30:43.912+00:00] W (164134) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:44.312+00:00] W (164504) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:45.113+00:00] W (165406) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:45.514+00:00] W (165685) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:45.914+00:00] W (166095) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:46.315+00:00] W (166486) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:47.116+00:00] W (167401) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:47.516+00:00] W (167707) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:47.917+00:00] W (168085) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:48.318+00:00] W (168495) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:49.119+00:00] W (169432) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:49.520+00:00] W (169688) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:49.920+00:00] W (170098) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:50.321+00:00] W (170504) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:51.122+00:00] W (171403) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:51.522+00:00] W (171703) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:51.923+00:00] W (172111) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:52.323+00:00] W (172497) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:53.124+00:00] W (173411) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:53.525+00:00] W (173705) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:53.725+00:00] I (174070) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-30T19:30:53.725+00:00] W (174070) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-30T19:30:55.127+00:00] W (175477) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_EVIDENCE peer=1 message=present
+[2026-09-30T19:30:55.528+00:00] W (175721) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=3 message=present
+[2026-09-30T19:30:55.528+00:00] I (175739) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-30T19:30:55.528+00:00] W (175740) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-30T19:30:55.528+00:00] W (175741) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=3 seq=2 att=1 peer=3 message=none
+[2026-09-30T19:30:57.530+00:00] W (177739) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_SENT dest=3 seq=2 att=2 peer=3 message=none
+[2026-09-30T19:31:00.134+00:00] I (180479) RouteLoom: stack hwm rl_owner 8696 B
+[2026-09-30T19:31:00.134+00:00] I (180479) RouteLoom: owner polls=43247 empty=41665 rxq_max=2 max_us rx=4826 bootstrap=341962 node=10389 security=694518
+[2026-09-30T19:31:00.134+00:00] I (180483) RouteLoom: owner expiry_slots=15568200 hop_accept_expired=125
+[2026-09-30T19:31:00.134+00:00] I (180490) RouteLoom: HIL HEAP free=90192 largest=73728 min=89176 B
+[2026-09-30T19:31:00.334+00:00] I (180496) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=0 busy=0 quarantined=0 fenced=0 tx_ok=204 tx_failed=1 stale=0 send_errors=0 last_error=0x0 rx=850 rx_other_channel=0
+[2026-09-30T19:31:00.334+00:00] I (180512) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=5 stale=1 probes=29 send_failures=19 kind_rejects=0
+[2026-09-30T19:31:00.334+00:00] I (180523) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=274 seq=1
+[2026-09-30T19:31:00.334+00:00] I (180531) RouteLoom: HIL ROUTE peer=3 phase=5 via=3 metric=1 generation=70 seq=3

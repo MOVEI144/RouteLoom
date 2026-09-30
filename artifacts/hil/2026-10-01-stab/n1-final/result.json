@@ -1,0 +1,68 @@
+{
+  "source_sha": "5fca34e26f69282536cda77be36efd979dfbee14",
+  "image": "stab-5f-n1",
+  "app_only": {
+    "identity": {
+      "chip": "esp32c3",
+      "mac": "94:a9:90:7a:26:ac",
+      "log": "flash-bridge-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "eef91ed7bee98197ca4b6422bfe40725091d5fb61f2f42af3c42cd19f8b019ea",
+    "app_bytes": 1218768,
+    "bundle": "hil-stab-5f-n1-bridge_node-esp32c3"
+  },
+  "nvs_before": {
+    "rlcfg": {
+      "sha256": "32efb346ccdd786acb9dd36b986752052b8b46cf70d6832443e20529d3d5da1f",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "e4a2730a0a82b6499bf7ef682eaf336e1e0dd3722c2681827aae8ca653605e0b",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "6e6505cde43bcdf50c93a906cfe4fea57389a6ee086110e4c17f8324a5bcceb6",
+      "blank": false
+    }
+  },
+  "nvs_after": {
+    "rlcfg": {
+      "sha256": "32efb346ccdd786acb9dd36b986752052b8b46cf70d6832443e20529d3d5da1f",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "e4a2730a0a82b6499bf7ef682eaf336e1e0dd3722c2681827aae8ca653605e0b",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "6e6505cde43bcdf50c93a906cfe4fea57389a6ee086110e4c17f8324a5bcceb6",
+      "blank": false
+    }
+  },
+  "nvs_preserved": true,
+  "after_reset_s": 4.793,
+  "adapter": {
+    "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00",
+    "connected": true,
+    "session": {
+      "authenticated": true,
+      "id": 11716107948491904067,
+      "node": 1,
+      "boot": 20,
+      "network": 6231974242,
+      "capability": 7719,
+      "version": 2
+    },
+    "credit": {
+      "observed": true,
+      "grant_frames": 12,
+      "grant_bytes": 16740
+    },
+    "rx_frames": 18,
+    "tx_frames": 11,
+    "tx_bytes": 1059,
+    "protocol_errors": 1,
+    "last_error": "InvalidCobs"
+  }
+}

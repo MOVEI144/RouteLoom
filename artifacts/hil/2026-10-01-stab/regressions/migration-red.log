@@ -1,0 +1,3 @@
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_migration.cpp:670: after.phase() == ParticipantPhase::Verifying
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_migration.cpp:671: after.active_epoch() == plan.new_epoch
+2 test checks failed

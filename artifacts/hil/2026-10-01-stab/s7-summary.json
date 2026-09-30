@@ -1,0 +1,100 @@
+{
+  "cycles": [
+    {
+      "cycle": 1,
+      "all_routes_after_release_s": 4.597,
+      "route_summary": {
+        "expected": [
+          "0000000000000002",
+          "0000000000000003"
+        ],
+        "authenticated_at_s": 0.0,
+        "routes_at_s": {
+          "0000000000000003": 0.252,
+          "0000000000000002": 0.505
+        },
+        "all_routes_at_s": 0.505,
+        "elapsed_s": 0.509,
+        "source": "/home/sahur/orca/workspaces/RouteLoom/v2-stab-b/artifacts/hil/2026-10-01-stab/s7-1/routes.jsonl",
+        "offset_after_release_s": 4.091684341430664
+      }
+    },
+    {
+      "cycle": 2,
+      "all_routes_after_release_s": 26.667,
+      "route_summary": {
+        "expected": [
+          "0000000000000002",
+          "0000000000000003"
+        ],
+        "authenticated_at_s": 0.0,
+        "routes_at_s": {
+          "0000000000000003": 0.0,
+          "0000000000000002": 22.578
+        },
+        "all_routes_at_s": 22.578,
+        "elapsed_s": 22.588,
+        "source": "/home/sahur/orca/workspaces/RouteLoom/v2-stab-b/artifacts/hil/2026-10-01-stab/s7-2/routes.jsonl",
+        "offset_after_release_s": 4.088748455047607
+      }
+    },
+    {
+      "cycle": 3,
+      "all_routes_after_release_s": 5.378,
+      "route_summary": {
+        "expected": [
+          "0000000000000002",
+          "0000000000000003"
+        ],
+        "authenticated_at_s": 0.0,
+        "routes_at_s": {
+          "0000000000000003": 0.0,
+          "0000000000000002": 1.285
+        },
+        "all_routes_at_s": 1.285,
+        "elapsed_s": 1.294,
+        "source": "/home/sahur/orca/workspaces/RouteLoom/v2-stab-b/artifacts/hil/2026-10-01-stab/s7-3/routes.jsonl",
+        "offset_after_release_s": 4.093004465103149
+      }
+    },
+    {
+      "cycle": 4,
+      "all_routes_after_release_s": 4.863,
+      "route_summary": {
+        "expected": [
+          "0000000000000002",
+          "0000000000000003"
+        ],
+        "authenticated_at_s": 0.0,
+        "routes_at_s": {
+          "0000000000000002": 0.0,
+          "0000000000000003": 0.779
+        },
+        "all_routes_at_s": 0.779,
+        "elapsed_s": 0.787,
+        "source": "/home/sahur/orca/workspaces/RouteLoom/v2-stab-b/artifacts/hil/2026-10-01-stab/s7-4/routes.jsonl",
+        "offset_after_release_s": 4.084217071533203
+      }
+    },
+    {
+      "cycle": 5,
+      "all_routes_after_release_s": null,
+      "route_summary": {
+        "expected": [
+          "0000000000000002",
+          "0000000000000003"
+        ],
+        "authenticated_at_s": 0.0,
+        "routes_at_s": {
+          "0000000000000002": 0.506
+        },
+        "all_routes_at_s": null,
+        "elapsed_s": 120.107,
+        "source": "/home/sahur/orca/workspaces/RouteLoom/v2-stab-b/artifacts/hil/2026-10-01-stab/s7-5/routes.jsonl",
+        "offset_after_release_s": 4.079432725906372
+      }
+    }
+  ],
+  "converged": 4,
+  "attempted": 5
+}

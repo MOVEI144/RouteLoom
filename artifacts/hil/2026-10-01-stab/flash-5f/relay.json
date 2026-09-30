@@ -1,0 +1,11 @@
+{
+  "identity": {
+    "chip": "esp32c6",
+    "mac": "10:bd:a3:ff:fe:b1:48:a8",
+    "log": "flash-relay-preflight.log",
+    "flash_bytes": 4194304
+  },
+  "app_sha256": "d87d0bcf10f840b484b44bcb1e038879ca280b5b000400cee733e887ee72f2bb",
+  "app_bytes": 1352512,
+  "bundle": "hil-stab-5f-relay-reference_node-esp32c6"
+}
