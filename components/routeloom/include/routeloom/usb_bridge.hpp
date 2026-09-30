@@ -614,7 +614,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
                                    MonotonicMs now_ms) noexcept;
   // Frames one reason-carrying DeliveryEvent (shared by the legacy path
   // and by window-correlated terminal failures).
-  void emit_delivery_event(std::uint64_t request,
+  bool emit_delivery_event(std::uint64_t request,
                            const DeliveryResult& result,
                            const std::array<std::uint8_t, kOperationIdSize>*
                                operation_id = nullptr) noexcept;
@@ -626,13 +626,20 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   void handle_credit(std::uint64_t request, ByteView inner,
                      MonotonicMs now_ms) noexcept;
   void issue_rx_grant(bool initial, MonotonicMs now_ms) noexcept;
+  // Queues a legacy send's terminal outcome (refusal Error or terminal
+  // DeliveryEvent) to the request it is owed to; `replay` answers a
+  // resubmission. False while that session is not the live one or the TX
+  // queue is full: the record stays unreported and poll() retries it.
+  bool report_outcome(IdempotencyRecord& record, bool replay,
+                      MonotonicMs now_ms) noexcept;
   // Error frame with a registered reason id (manifest hostlink area) or,
-  // from a Status detail, the detail's registered id or its text.
-  void send_error(UsbErrorCode code, std::uint64_t request, std::uint16_t reason_id,
+  // from a Status detail, the detail's registered id or its text. False
+  // when the TX queue could not take it.
+  bool send_error(UsbErrorCode code, std::uint64_t request, std::uint16_t reason_id,
                   MonotonicMs now_ms) noexcept;
-  void send_error(UsbErrorCode code, std::uint64_t request, const char* detail,
+  bool send_error(UsbErrorCode code, std::uint64_t request, const char* detail,
                   MonotonicMs now_ms) noexcept;
-  void send_error(UsbErrorCode code, std::uint64_t request, std::uint16_t reason_id,
+  bool send_error(UsbErrorCode code, std::uint64_t request, std::uint16_t reason_id,
                   const char* detail, MonotonicMs now_ms) noexcept;
   bool enqueue(FrameKind kind, std::uint16_t flags, std::uint64_t request,
                ByteView inner, MonotonicMs now_ms,
@@ -765,6 +772,9 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   bool tx_wire_active_{false};
 
   std::uint64_t pending_request_{0};
+  // The legacy send whose synchronous mesh->send is running: a terminal
+  // callback inside it settles this record (its message id is not known yet).
+  IdempotencyRecord* pending_record_{nullptr};
   // True while a host_ops SUBMIT's synchronous mesh->send runs: the Accepted/
   // Queued callbacks it fires must be suppressed (the window record is
   // created right after, and later callbacks correlate through it).
