@@ -47,6 +47,9 @@ use zeroize::Zeroizing;
 /// observes on the USB stream; mesh truth it cannot see stays `unknown`.
 const MAX_EVENTS: usize = 256;
 const MAX_DELIVERIES: usize = 512;
+// Legacy SEND uses SendOptions' 5 s mesh lifetime. Leave 10 s for USB
+// admission and the terminal event; missing evidence ends as uncertainty.
+const LEGACY_DELIVERY_TIMEOUT_MS: u64 = 15_000;
 const MAX_NODES: usize = 256;
 const MAX_OUTBOUND: usize = 64;
 /// Concurrent control-socket clients. Each connection owns a thread and a
@@ -648,6 +651,7 @@ struct Delivery {
     msg_session: Option<u64>,
     msg_seq: Option<u64>,
     updated_ms: u64,
+    deadline_mono_ms: u64,
 }
 
 /// One ring-buffer entry. `seq`/`kind` are stored alongside `json` (which
@@ -1121,12 +1125,22 @@ struct DeliveryPatch {
     msg_seq: Option<u64>,
 }
 
+fn legacy_delivery_terminal(state: &str) -> bool {
+    matches!(
+        state,
+        "delivered" | "failed" | "expired" | "cancelled-before-tx" | "indeterminate" | "rejected"
+    )
+}
+
 fn apply_delivery_patch(
     delivery: &mut Delivery,
     new_state: &str,
     patch: DeliveryPatch,
     updated_ms: u64,
 ) {
+    if legacy_delivery_terminal(&delivery.state) && !legacy_delivery_terminal(new_state) {
+        return;
+    }
     delivery.state = new_state.to_string();
     if patch.reason.is_some() {
         delivery.reason = patch.reason;
@@ -1182,6 +1196,7 @@ fn delivery_update(
         msg_session: patch.msg_session,
         msg_seq: patch.msg_seq,
         updated_ms,
+        deadline_mono_ms: mono_ms().saturating_add(LEGACY_DELIVERY_TIMEOUT_MS),
     });
 }
 
@@ -1910,6 +1925,22 @@ fn nodes_json(state: &State) -> String {
 }
 
 fn deliveries_json(state: &State) -> String {
+    expire_legacy_deliveries(state, mono_ms(), now_ms());
+    deliveries_json_at(state)
+}
+
+fn expire_legacy_deliveries(state: &State, now_mono: u64, now_wall: u64) {
+    let mut deliveries = state.deliveries.lock().expect("deliveries poisoned");
+    for delivery in deliveries.iter_mut() {
+        if now_mono >= delivery.deadline_mono_ms && !legacy_delivery_terminal(&delivery.state) {
+            delivery.state = "indeterminate".to_string();
+            delivery.reason = Some("DELIVERY_EVENT_TIMEOUT".to_string());
+            delivery.updated_ms = now_wall;
+        }
+    }
+}
+
+fn deliveries_json_at(state: &State) -> String {
     let deliveries = state.deliveries.lock().expect("deliveries poisoned");
     let mut out = String::from("{\"deliveries\":[");
     for (index, delivery) in deliveries.iter().enumerate() {
@@ -4144,6 +4175,56 @@ mod tests {
         let json = deliveries_json(&state);
         assert!(json.contains("\"state\":\"delivered\""));
         assert!(json.contains("\"msg_seq\":900"));
+    }
+
+    #[test]
+    fn missing_delivery_event_concludes_after_the_legacy_send_deadline() {
+        let state = State::default();
+        delivery_update(
+            &state,
+            9,
+            "queued",
+            DeliveryPatch {
+                destination: Some(5),
+                ..DeliveryPatch::default()
+            },
+            100,
+        );
+        let deadline = state
+            .deliveries
+            .lock()
+            .expect("deliveries poisoned")
+            .front()
+            .expect("queued send")
+            .deadline_mono_ms;
+        expire_legacy_deliveries(&state, deadline - 1, 200);
+        let pending = deliveries_json_at(&state);
+        assert!(pending.contains("\"state\":\"queued\""));
+        expire_legacy_deliveries(&state, deadline, 201);
+        let expired = deliveries_json_at(&state);
+        assert!(expired.contains("\"state\":\"indeterminate\""));
+        assert!(expired.contains("DELIVERY_EVENT_TIMEOUT"));
+        expire_legacy_deliveries(&state, deadline + 1, 202);
+        assert!(!deliveries_json_at(&state).contains("\"state\":\"queued\""));
+        assert!(delivery_update_tracked(
+            &state,
+            9,
+            "sent",
+            DeliveryPatch::default(),
+            203,
+        ));
+        assert!(deliveries_json_at(&state).contains("\"state\":\"indeterminate\""));
+        assert!(delivery_update_tracked(
+            &state,
+            9,
+            "delivered",
+            DeliveryPatch {
+                reason: Some("END_RECEIVED".to_string()),
+                ..DeliveryPatch::default()
+            },
+            204,
+        ));
+        assert!(deliveries_json_at(&state).contains("\"state\":\"delivered\""));
     }
 
     #[test]

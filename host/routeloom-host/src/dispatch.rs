@@ -2637,6 +2637,7 @@ pub fn dispatch_once(
     now: u64,
     mono: u64,
 ) {
+    crate::expire_legacy_deliveries(state, mono, now);
     let replies = state.dispatch_inbox.drain();
     let ingress = state.ingress_inbox.drain();
     let link = link_snapshot(state);

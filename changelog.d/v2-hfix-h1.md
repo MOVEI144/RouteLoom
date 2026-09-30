@@ -22,6 +22,12 @@
   single link TX slot, which blocked every later chunked link handshake.
 - A USB gateway no longer refuses explicit gateway sends with `CAPACITY`
   after eight GATEWAY_SDK_RAM receipts.
+- A USB gateway refuses new SDK_RAM work with `HOST_UNAVAILABLE` while its
+  host reader is absent, instead of accepting mail that no app can drain.
+- A channel cutover recovers a fenced ESP-NOW send whose driver callback never
+  arrives; the peer is no longer blocked indefinitely by that fence.
 - A remote-config propose with a field of the wrong type for the SDK
   namespace is refused `INVALID` by the host instead of ending
   `INDETERMINATE`.
+- A legacy SEND without a terminal delivery event ends as `indeterminate`
+  after its mesh lifetime plus the host event allowance.
