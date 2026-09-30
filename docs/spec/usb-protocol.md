@@ -52,6 +52,8 @@ zero-credit時のqueryは500ms以上の間隔で最大3回、応答が無けれ�
 
 USB request IDはsession内一意、Message IDは論理配送の寿命、host idempotency identityは `(principal, network, operation_class, key)`。同identity・同canonical payload hashは既存結果、同identity・異hashはCONFLICT。
 
+旧式の`DataToMesh`（key付き送信）は、gatewayが1起動の間16件の記録を持つ。同じidentityの再送は、未終端なら`Accepted`＋`IDEMPOTENT_REPLAY`、終端済みなら保存した終端状態（拒否ならそのError code）＋`IDEMPOTENT_REPLAY`を返し、終端はその再送のrequestへ返る。表が満杯になると、報告済みの終端記録（またはそのsessionが既に無い記録）のうち最も古いものを回収し、そのkeyをHostLink sessionの回収範囲（下限〜上限、直近4 session分）に加える。hostはsession内でkeyを単調に振るので、範囲は実質そのsessionのfloorになる。範囲内のkeyで記録の無い送信は実行せず`Conflict`＋`RESULT_EXPIRED`（結果は終端済みで、詳細が失われた）を返す。未終端の記録だけで満杯なら`NoCapacity`＋`IDEMPOTENCY_FULL`。受理した送信の終端（`DeliveryEvent`の終端状態、または拒否のError）は記録が報告済みになるまで保持し、TX queueが満杯でも後のpollで送り直すので、非終端のまま残らない。RX grantはCONTROL queueが空の時だけ1件にまとめて出し、hostは機器が答えられる速さでしか送れない。HostOps `SUBMIT`（dispatch window）は別の表で、hostの`RETIRE`で回収する。
+
 COMMAND_ACCEPTEDは機器受付だけ。管理確定、PC永続保存、アプリ適用は別event。再接続で信用先が変わったら旧認可を引き継がない。
 
 開発profileのHostOps `SUBMIT` が `MeshRejected` を返す場合、固定長 `RECEIPT` の32B hash位置は `RLFR`（4B）＋理由長（1B）＋印字可能ASCII理由（最大27B）＋ゼロ埋めになる。旧機器のcanonical hash echoや形式不正は理由として扱わない。受理された送信の終端失敗では、`DeliveryEvent` の `reason` の後に24B `operation_id` を付ける。hostはそのidと `msg_session/msg_seq` をともに照合して当該操作に理由を保存する。末尾の無い旧eventは観測eventとして残すが、操作の理由には結び付けない。
