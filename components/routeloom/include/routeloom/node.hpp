@@ -807,6 +807,7 @@ class MeshNode {
   // Install/clear the application endpoint (nullptr disables — inbound
   // APPLIED requests then commit a NoEndpoint refusal RESULT).
   Status set_applied_sink(AppliedEndpointSink* sink) noexcept;
+  AppliedEndpointSink* applied_sink() const noexcept { return applied_sink_; }
   // The stored RESULT view for a delivery: false when none was verified.
   bool applied_result(const MessageId& id, AppliedResultView& out) const noexcept;
   // Commits the verdict of a deferred APPLIED request (see AppliedReply).
