@@ -111,7 +111,7 @@ HostAuthのtranscript／COMMAND保護は[USB](usb-protocol.md)に従う。DATA�
 - `nodes.list` params `{connected?:bool, after?:"16hex", limit?:1..128}` → `{"source":{...},"nodes":[node...],"next_after":"16hex"|null}`
 - `nodes.get` params `{node:"16hex"}` → `{"source":{...},"node":node}`、未報告nodeは`NOT_FOUND`（`detail.source`付き、retryable）
 - `source`：`{"state":"unavailable|unsupported|syncing|live","gateway":"16hex"|null,"session_id":n|null,"synced_ms":n|null,"tracked":n,"evicted":n,"clock":"host_unix_ms"}`
-- `node`：`{"node","role":"peer|gateway","connected","listed","neighbor","direct","hops":0|1|null,"next_hop","route_metric","link_cost","rssi_dbm","rssi_avg_dbm","telemetry_stale","last_heard_ms","heard_age_ms","updated_ms","changed_ms"}`。多hopのhop数はroute metricから推測せずnull。`listed:false`（消滅・gateway喪失後）のnodeはlink系fieldがnullで、`last_heard_ms`だけ残る（「最終通信 xx」表示用）。
+- `node`：`{"node","role":"peer|gateway","connected","connectivity","listed","neighbor","direct","hops":0|1|null,"next_hop","route_metric","link_cost","rssi_dbm","rssi_avg_dbm","telemetry_stale","last_heard_ms","heard_age_ms","updated_ms","changed_ms"}`。多hopのhop数はroute metricから推測せずnull。`connectivity`はgatewayから見た接続状態で、Device APIと同じ語彙（`reachable`：gatewayが経路を持つ、telemetryが古ければ`degraded`／経路を失ってから120 s未満は`degraded`、以後`isolated`／一度も報告の無いnodeは`unknown`）。hostはsleepを知らないので`sleeping`は返さない。`listed:false`（消滅・gateway喪失後）のnodeはlink系fieldがnullで、`last_heard_ms`だけ残る（「最終通信 xx」表示用）。
 - event（`stream:"events"`）：`{"seq","ms","kind":"node_joined|node_left|link_changed","node":"16hex","gateway","reason"|"change","status":node}`。reasonは`route_up`／`route_down`／`sync`／`vanished`／`gateway_attached`／`gateway_lost`、changeは`neighbor_up`／`neighbor_down`／`next_hop`。
 
 daemon表は最大512件（機器側は最大160 node）で、溢れたら最も古い未接続記録から追い出す。
