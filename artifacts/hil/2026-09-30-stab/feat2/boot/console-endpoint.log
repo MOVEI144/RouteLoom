@@ -1,0 +1,71 @@
+[2026-09-30T11:21:41.813+00:00] !! opened
+[2026-09-30T11:21:57.836+00:00] I (875) RouteLoomRef: sdkv1 identity: node=3 kid=72b2282f385b2d8I (18514) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-30T11:21:57.836+00:00] W (18514) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-30T11:21:57.836+00:00] I (18516) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T11:21:57.836+00:00] W (18521) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T11:22:15.863+00:00] I (36490) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T11:22:15.863+00:00] W (36491) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T11:22:34.488+00:00] I (55298) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T11:22:34.488+00:00] W (55299) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T11:22:39.696+00:00] I (60468) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T11:22:39.696+00:00] I (60468) RouteLoom: owner polls=14936 empty=14915 rxq_max=1 max_us rx=45 bootstrap=13786 node=662 security=692222
+[2026-09-30T11:22:39.696+00:00] I (60472) RouteLoom: owner expiry_slots=2030888 hop_accept_expired=0
+[2026-09-30T11:22:39.696+00:00] I (60478) RouteLoom: HIL HEAP free=159992 largest=143360 min=159692 B
+[2026-09-30T11:22:39.696+00:00] I (60484) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0
+[2026-09-30T11:22:39.696+00:00] I (60493) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T11:22:39.696+00:00] I (60504) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T11:22:39.896+00:00] I (60511) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T11:22:56.920+00:00] I (77549) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T11:22:56.920+00:00] W (77550) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T11:23:11.740+00:00] I (92383) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T11:23:11.740+00:00] W (92384) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T11:23:39.783+00:00] I (120468) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T11:23:39.783+00:00] I (120468) RouteLoom: owner polls=32447 empty=32411 rxq_max=1 max_us rx=45 bootstrap=13786 node=662 security=692222
+[2026-09-30T11:23:39.783+00:00] I (120472) RouteLoom: owner expiry_slots=4412384 hop_accept_expired=0
+[2026-09-30T11:23:39.783+00:00] I (120478) RouteLoom: HIL HEAP free=159992 largest=143360 min=159692 B
+[2026-09-30T11:23:39.783+00:00] I (120485) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0
+[2026-09-30T11:23:39.783+00:00] I (120493) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T11:23:39.783+00:00] I (120504) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T11:23:39.783+00:00] I (120512) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T11:23:41.385+00:00] I (122049) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T11:23:41.385+00:00] W (122050) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T11:23:41.986+00:00] W (122687) rl_migrate: migration event PHASE_RECOVERING peer=0
+[2026-09-30T11:23:41.986+00:00] W (122687) RouteLoomRef: diagnostic reason=PHASE_RECOVERING peer=0 message=none
+[2026-09-30T11:23:57.008+00:00] W (137688) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T11:23:57.008+00:00] I (137694) rl_migrate: radio generation now 2 after verified cutover
+[2026-09-30T11:23:57.008+00:00] W (137694) rl_migrate: migration event PHASE_VERIFYING peer=0
+[2026-09-30T11:23:57.008+00:00] W (137696) RouteLoomRef: diagnostic reason=PHASE_VERIFYING peer=0 message=none
+[2026-09-30T11:24:27.053+00:00] W (167694) rl_migrate: migration event PHASE_RECOVERING peer=0
+[2026-09-30T11:24:27.053+00:00] W (167694) RouteLoomRef: diagnostic reason=PHASE_RECOVERING peer=0 message=none
+[2026-09-30T11:24:39.671+00:00] I (180468) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T11:24:39.671+00:00] I (180468) RouteLoom: owner polls=50907 empty=50866 rxq_max=1 max_us rx=45 bootstrap=13786 node=13297 security=692222
+[2026-09-30T11:24:39.671+00:00] I (180472) RouteLoom: owner expiry_slots=6922944 hop_accept_expired=0
+[2026-09-30T11:24:39.671+00:00] I (180478) RouteLoom: HIL HEAP free=159980 largest=143360 min=159692 B
+[2026-09-30T11:24:39.871+00:00] I (180485) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=2 busy=0 quarantined=0 fenced=0
+[2026-09-30T11:24:39.871+00:00] I (180493) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T11:24:39.871+00:00] I (180505) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T11:24:39.871+00:00] I (180512) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T11:24:40.672+00:00] I (181379) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T11:24:40.672+00:00] W (181380) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T11:24:41.273+00:00] I (181964) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-30T11:24:41.273+00:00] W (181964) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-30T11:24:41.273+00:00] W (181968) RouteLoomRef: channel plan: rejoined the site on channel 6 (epoch 2)
+[2026-09-30T11:24:41.273+00:00] I (182047) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T11:24:41.273+00:00] W (182048) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T11:25:29.534+00:00] W (230208) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-30T11:25:39.748+00:00] I (240470) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T11:25:39.748+00:00] I (240471) RouteLoom: owner polls=65806 empty=65649 rxq_max=5 max_us rx=137705 bootstrap=13786 node=13297 security=692222
+[2026-09-30T11:25:39.748+00:00] I (240474) RouteLoom: owner expiry_slots=8949208 hop_accept_expired=1
+[2026-09-30T11:25:39.748+00:00] I (240481) RouteLoom: HIL HEAP free=159012 largest=143360 min=158144 B
+[2026-09-30T11:25:39.748+00:00] I (240487) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=2 busy=0 quarantined=0 fenced=0
+[2026-09-30T11:25:39.748+00:00] I (240496) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=5 send_failures=3 kind_rejects=0
+[2026-09-30T11:25:39.748+00:00] I (240507) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=76 seq=1
+[2026-09-30T11:25:39.748+00:00] I (240514) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T11:26:39.836+00:00] I (300471) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T11:26:39.836+00:00] I (300472) RouteLoom: owner polls=80756 empty=80508 rxq_max=5 max_us rx=137705 bootstrap=13786 node=13297 security=692222
+[2026-09-30T11:26:39.836+00:00] I (300476) RouteLoom: owner expiry_slots=10982408 hop_accept_expired=1
+[2026-09-30T11:26:39.836+00:00] I (300482) RouteLoom: HIL HEAP free=159012 largest=143360 min=158144 B
+[2026-09-30T11:26:39.836+00:00] I (300488) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=2 busy=0 quarantined=0 fenced=0
+[2026-09-30T11:26:39.836+00:00] I (300497) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=10 send_failures=5 kind_rejects=0
+[2026-09-30T11:26:39.836+00:00] I (300508) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=76 seq=1
+[2026-09-30T11:26:39.836+00:00] I (300515) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0

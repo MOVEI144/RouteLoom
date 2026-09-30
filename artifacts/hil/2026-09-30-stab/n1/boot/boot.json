@@ -1,0 +1,9 @@
+{
+  "auth_after_release_s": 2.35,
+  "routes_after_release_s": {},
+  "released_unix": 1790774730.011968,
+  "capture_pids": [
+    2726075,
+    2726076
+  ]
+}
