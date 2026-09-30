@@ -91,6 +91,7 @@ Joiner::Joiner(const JoinerConfig& config, IdentityStore& identity, SiteStore& s
       link_observer_(*this),
       link_(make_link_config(config), port, entropy_, link_observer_) {
   candidates_.set_avoid(config_.avoid_not_here_ms, config_.avoid_blocked_ms);
+  candidates_.set_retry_max(config_.retry_max_ms);
 }
 
 Joiner::~Joiner() {
@@ -469,6 +470,7 @@ Status Joiner::apply_policy(const JoinerConfig& policy) noexcept {
   next.start_jitter_ms = policy.start_jitter_ms;
   config_ = next;
   candidates_.set_avoid(config_.avoid_not_here_ms, config_.avoid_blocked_ms);
+  candidates_.set_retry_max(config_.retry_max_ms);
   return Status::success();
 }
 
@@ -488,6 +490,7 @@ Status Joiner::stop(const MonotonicMs now) noexcept {
     candidates_.~JoinCandidates();
     new (&candidates_) JoinCandidates();
     candidates_.set_avoid(config_.avoid_not_here_ms, config_.avoid_blocked_ms);
+    candidates_.set_retry_max(config_.retry_max_ms);
     last_now_ = 0;
     clock_uncertain_ = false;
     last_m1_ms_ = 0;
