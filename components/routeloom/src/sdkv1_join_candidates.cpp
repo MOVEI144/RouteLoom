@@ -552,14 +552,14 @@ Status JoinCandidates::apply_outcome(const JoinAttempt& attempt,
       break;
     case JoinAttemptOutcome::DenyNotHere:
       record->policy = JoinCandidatePolicy::AvoidNotHere;
-      record->eligible_at_ms = sat_add(now_ms, kJoinAvoidNotHereMs);
+      record->eligible_at_ms = sat_add(now_ms, avoid_not_here_ms_);
       break;
     case JoinAttemptOutcome::DenyBlocked:
     case JoinAttemptOutcome::MalformedResult:
     case JoinAttemptOutcome::AuthenticationFailed:
     case JoinAttemptOutcome::RemovedDenied:
       record->policy = JoinCandidatePolicy::AvoidBlocked;
-      record->eligible_at_ms = sat_add(now_ms, kJoinAvoidBlockedMs);
+      record->eligible_at_ms = sat_add(now_ms, avoid_blocked_ms_);
       break;
     case JoinAttemptOutcome::RemovedVerified:
       *record = JoinCandidate{};

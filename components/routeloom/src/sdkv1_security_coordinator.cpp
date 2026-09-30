@@ -715,11 +715,12 @@ Status SecurityCoordinator::on_boot(const CoordinatorEvent& event) noexcept {
                  // channel, once adopted) sets it; until then RLD1 RX drops
   radio_generation_ = event.radio_generation;
   usb_direct_ = event.usb_direct;
-  // A standing removal record restarts its 10-minute RAM holdoff on every
-  // boot — the Cleaned commit time does not survive the reboot.
+  // A standing removal record restarts its RAM holdoff (the length it
+  // recorded) on every boot — the Cleaned commit time does not survive the
+  // reboot.
   if (deps_.local_revocation->has_record()) {
     removal_holdoff_armed_ = true;
-    removal_holdoff_at_ = event.now + kRemovalHoldoffMs;
+    removal_holdoff_at_ = event.now + deps_.local_revocation->record().holdoff_ms;
   }
   sat_inc(counters_.boots);
   // Every boot runs the Joiner's boot/store check — it is the classifier
@@ -3437,6 +3438,7 @@ Status SecurityCoordinator::land_removal(const RemovalNotice& notice,
   }
   record.rls_commit_seq = deps_.site->commit_seq();
   record.boot_witness = boot_witness_;
+  record.holdoff_ms = removal_holdoff_ms_;
   // Traffic stops even when the evidence commit fails — the verified
   // notice is authoritative. The commit status returns to the firmware;
   // the tombstone cleanup + commit_cleaned ride maintenance (PR5).
@@ -3446,7 +3448,7 @@ Status SecurityCoordinator::land_removal(const RemovalNotice& notice,
   destroy_workspace();  // Removed holds no workspace side
   for (auto& slot : staged_) slot = StagedFrame{};
   removal_holdoff_armed_ = true;
-  removal_holdoff_at_ = now + kRemovalHoldoffMs;
+  removal_holdoff_at_ = now + removal_holdoff_ms_;
   mode_ = CoordinatorMode::Removed;
   sat_inc(counters_.removals);
   CoordinatorAction report{};
@@ -3512,6 +3514,33 @@ void SecurityCoordinator::stop_traffic(const bool clear_resume) noexcept {
 }
 
 // --- P6 lifecycle connection points --------------------------------------------------------
+
+Status SecurityCoordinator::request_join(const MonotonicMs now) noexcept {
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  if (mode_ == CoordinatorMode::Member) return start_recovery_join(now);
+  if (mode_ != CoordinatorMode::ZeroTouch) {
+    return Status::error(StatusCode::InvalidState, "JOIN_NOT_AVAILABLE");
+  }
+  return joiner().retry_now(now);
+}
+
+Status SecurityCoordinator::apply_join_policy(const JoinerConfig& policy,
+                                              const std::uint32_t holdoff_ms) noexcept {
+  if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  JoinerConfig next = deps_.joiner_config;
+  next.requested_role = policy.requested_role;
+  next.avoid_not_here_ms = policy.avoid_not_here_ms;
+  next.avoid_blocked_ms = policy.avoid_blocked_ms;
+  next.retry_max_ms = policy.retry_max_ms;
+  next.start_jitter_ms = policy.start_jitter_ms;
+  if (mode_ == CoordinatorMode::ZeroTouch) {
+    const Status applied = joiner().apply_policy(next);
+    if (!applied) return applied;
+  }
+  deps_.joiner_config = next;
+  removal_holdoff_ms_ = holdoff_ms;
+  return Status::success();
+}
 
 Status SecurityCoordinator::start_recovery_join(const MonotonicMs now) noexcept {
   if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");

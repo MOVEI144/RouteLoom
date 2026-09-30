@@ -569,6 +569,52 @@ void test_proxy_policy_store() {
   CHECK(reboot.load(0x5173, stored, found).ok() && !found);
 }
 
+// RLJP1 (#193): the range check guards each field at its bounds; a stored
+// policy reads back after a reboot; a power cut keeps the old or the new
+// record; a corrupt record is an error, never adopted.
+void test_join_policy_store() {
+  const auto roles = static_cast<std::uint8_t>(kMemberRoleEndpoint | kMemberRoleRelay);
+  JoinPolicy policy{};
+  CHECK(join_policy_check(policy, roles).ok());  // the defaults are in range
+  const auto rejects = [&](void (*mutate)(JoinPolicy&)) {
+    JoinPolicy bad{};
+    mutate(bad);
+    return !join_policy_check(bad, roles).ok();
+  };
+  CHECK(rejects([](JoinPolicy& p) { p.avoid_not_here_s = 299; }));
+  CHECK(rejects([](JoinPolicy& p) { p.avoid_blocked_s = 604801; }));
+  CHECK(rejects([](JoinPolicy& p) { p.removal_holdoff_s = 59; }));
+  CHECK(rejects([](JoinPolicy& p) { p.retry_max_s = 3601; }));
+  CHECK(rejects([](JoinPolicy& p) { p.isolation_notice_s = 299; }));
+  CHECK(rejects([](JoinPolicy& p) { p.start_jitter_ms = 60001; }));
+  CHECK(rejects([](JoinPolicy& p) { p.role = static_cast<std::uint8_t>(kMemberRoleGateway); }));
+  policy.removal_holdoff_s = 60;
+  policy.isolation_notice_s = 300;
+  policy.start_jitter_ms = 60000;
+  policy.role = static_cast<std::uint8_t>(kMemberRoleEndpoint);
+  CHECK(join_policy_check(policy, roles).ok());
+
+  FakeNvs nvs;
+  JoinPolicyStore store(nvs);
+  JoinPolicy loaded{};
+  std::uint32_t revision = 9;
+  CHECK(store.load(loaded, revision).ok() && revision == 0 && loaded == JoinPolicy{});
+  CHECK(store.commit(policy, 1).ok());
+  JoinPolicy next = policy;
+  next.removal_holdoff_s = 120;
+  nvs.cut_call = nvs.write_calls;
+  CHECK(!store.commit(next, 2).ok());
+  JoinPolicyStore reboot(nvs);
+  CHECK(reboot.load(loaded, revision).ok() && revision == 1 && loaded == policy);
+  nvs.cut_call = nvs.write_calls;
+  nvs.cut_lands = true;
+  CHECK(!reboot.commit(next, 2).ok());
+  CHECK(reboot.load(loaded, revision).ok() && revision == 2 && loaded == next);
+  nvs.disarm();
+  nvs.blobs[kJoinPolicyKey][21] ^= 0x01;
+  CHECK(!reboot.load(loaded, revision).ok() && revision == 0 && loaded == JoinPolicy{});
+}
+
 int main() {
   test_read_contract();
   test_record_storage_mapping();
@@ -580,6 +626,7 @@ int main() {
   test_resume_cache_over_nvs();
   test_ram_footprint();
   test_proxy_policy_store();
+  test_join_policy_store();
   if (failures != 0) {
     std::fprintf(stderr, "%d sdkv1 blob storage check(s) failed\n", failures);
     return 1;

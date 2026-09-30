@@ -308,6 +308,14 @@ class JoinCandidates {
                      std::uint32_t site_hint) noexcept;
   std::uint32_t preferred_hint(std::uint32_t org_hint) const noexcept;
 
+  // --- policy ---
+  // Hold lengths after an authenticated DenyNotHere / DenyBlocked
+  // (JoinPolicy); an existing hold keeps the length it was given.
+  void set_avoid(std::uint32_t not_here_ms, std::uint32_t blocked_ms) noexcept {
+    avoid_not_here_ms_ = not_here_ms;
+    avoid_blocked_ms_ = blocked_ms;
+  }
+
   // --- accessors ---
   // First occupied record carrying `key` (or nullptr). The mutable overload
   // hands a record to suppress_proxy without a cast.
@@ -350,6 +358,8 @@ class JoinCandidates {
   std::uint64_t preferred_site_id_{0};
   std::uint32_t preferred_org_hint_{0};
   std::uint32_t preferred_site_hint_{0};
+  std::uint32_t avoid_not_here_ms_{static_cast<std::uint32_t>(kJoinAvoidNotHereMs)};
+  std::uint32_t avoid_blocked_ms_{static_cast<std::uint32_t>(kJoinAvoidBlockedMs)};
   JoinCandidatesStats stats_{};
 };
 

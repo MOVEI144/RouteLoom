@@ -18,6 +18,8 @@
 //            p0             RLPP1 proxy policy    (blob = 60 B, single key)
 //   rlrevo   r0 / r1        RRS1 storage record   (blob ≤ 672 B, slot 672 B)
 //   rlres2   s00…s15        RLP2 slots, node      (blob = 96 B)
+//   rlmaint  x0 / x1        RLX1 lifecycle journal
+//            j0             RLJP1 join policy     (blob = 40 B, single key)
 //            s000…s159      RLP2 slots, gateway   (3 digits once count > 100)
 // (The pre-P4 `rlres` RLP1 namespace is never opened anymore; stale
 // blobs from older images are purged once at open.)
@@ -87,6 +89,7 @@ inline constexpr char kLocalRevocationKey1[] = "v1";
 inline constexpr char kLifecycleKey0[] = "x0";
 inline constexpr char kLifecycleKey1[] = "x1";
 inline constexpr char kProxyPolicyKey[] = "p0";
+inline constexpr char kJoinPolicyKey[] = "j0";
 
 // Resume-cache slot counts (05 §3.2 / §5.1): a node keeps 16 slots, a
 // gateway 160. Key names are fixed per slot so NVS usage never grows with
@@ -192,6 +195,22 @@ class ProxyPolicyStore {
   Status load(std::uint64_t site_id, ProxyPolicyRecord& out, bool& found) noexcept;
   Status commit(const ProxyPolicyRecord& record) noexcept;
   Status erase() noexcept;
+
+ private:
+  BlobNamespace& blobs_;
+};
+
+// The device's JoinPolicy (RLJP1, #193) beside the lifecycle journal, which
+// a leave or removal clears key by key, so the policy stays. One key,
+// replaced atomically and read back before commit() reports success.
+// Missing reads as the default policy at revision 0; a corrupt record is an
+// error and the caller keeps the defaults.
+class JoinPolicyStore {
+ public:
+  explicit JoinPolicyStore(BlobNamespace& blobs) noexcept : blobs_(blobs) {}
+
+  Status load(JoinPolicy& out, std::uint32_t& revision) noexcept;
+  Status commit(const JoinPolicy& policy, std::uint32_t revision) noexcept;
 
  private:
   BlobNamespace& blobs_;
