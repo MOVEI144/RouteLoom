@@ -1529,7 +1529,12 @@ Status SecurityCoordinator::pump_link_tx(const MonotonicMs now) noexcept {
       break;
     }
   }
-  if (leg == nullptr) return Status::error(StatusCode::NotFound, "no link tx leg");
+  if (leg == nullptr) {
+    // The owning exchange was superseded or expired: free the single slot,
+    // or every later chunked link message is refused behind it.
+    slot.reset();
+    return Status::error(StatusCode::NotFound, "no link tx leg");
+  }
   const std::uint16_t pending = slot.pending_mask();
   for (std::size_t i = 0; i < slot.chunk_total(); ++i) {
     if ((pending & static_cast<std::uint16_t>(1U << i)) == 0) continue;
