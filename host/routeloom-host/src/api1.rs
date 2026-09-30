@@ -9400,7 +9400,7 @@ mod tests {
         );
 
         // Dispatch: an offer needs a fresh gateway report and a release an
-        // offered plan (BUSY until then); status queues the read the next
+        // offered plan with fresh READY evidence; status queues the read the
         // offer builds on. Admin grants only.
         let offer = group_line("site.channel_plan.offer", "{\"new_channel\":1}");
         assert_error_schema(&handle(offer.as_bytes(), &allowed), "BUSY");
@@ -9413,7 +9413,7 @@ mod tests {
             "INVALID_ARGUMENT",
         );
         let release = group_line("site.channel_plan.release", "{}");
-        assert_error_schema(&handle(release.as_bytes(), &allowed), "BUSY");
+        assert_error_schema(&handle(release.as_bytes(), &allowed), "NOT_READY");
         let read_acl = Acl::parse(&format!(
             "{{\"principals\":{{\"501\":{{\"networks\":{{\"{:016x}\":[\"MEMBERSHIP_READ\"]}}}}}}}}",
             testkit::NETWORK_LOW

@@ -357,3 +357,46 @@ fn mesh_m02_diamond_reroute_and_flap() {
         "at least 98% delivered: {delivered}/240"
     );
 }
+
+const PHASE_BOUND: u8 = 4;
+
+/// M06-R (#167): on forced G—B—A with G and A running, only the relay B
+/// reboots, three times. Its two live neighbours answer its start
+/// discovery one at a time (the OFFER slot spread), yet B binds both
+/// within 6 s of the reset and delivery resumes both ways within 10 s.
+#[test]
+fn mesh_m06_relay_reset_binds_both_neighbours() {
+    let Some(mut world) = MeshWorld::start("m06-relay", Switch::forced_multihop()) else {
+        return; // no C++ peers: skip (ignore-equivalent)
+    };
+    world.pump_until(9000, all_ready);
+    assert!(all_ready(&world.snaps), "converged: {:?}", world.snaps);
+    let bound = |phase: u8| phase == PHASE_BOUND || phase == PHASE_REACHABLE;
+    for cycle in 0..3 {
+        run_for(&mut world, 20_000);
+        let reboots = world.peers[2].reboots;
+        world.peers[2].power_cut();
+        world.step(STEP_MS);
+        assert_eq!(
+            world.peers[2].reboots,
+            reboots + 1,
+            "cycle {cycle}: B rebooted"
+        );
+        let start = world.now;
+        world.pump_until((6_000 / STEP_MS) as u32, |snaps| {
+            bound(snaps[2].phases[0]) && bound(snaps[2].phases[1])
+        });
+        let took = world.now - start;
+        assert!(
+            bound(world.snaps[2].phases[0]) && bound(world.snaps[2].phases[1]),
+            "cycle {cycle}: B binds G and A within 6 s of the reset (took {took} ms): {:?}",
+            world.snaps[2]
+        );
+        let left = 10_000 - (world.now - start);
+        assert!(
+            resume_both_ways(&mut world, left),
+            "cycle {cycle}: delivery resumed both ways within 10 s: {:?}",
+            world.snaps
+        );
+    }
+}

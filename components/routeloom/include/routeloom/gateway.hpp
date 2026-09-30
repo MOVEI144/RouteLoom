@@ -189,6 +189,7 @@ struct GatewayRoleConfig {
   std::uint64_t gateway_boot{0};   // nonzero boot incarnation, persisted
   std::uint32_t capabilities{0};   // kGatewayCapHostReceive requires host_sink
   GatewayHostSink* host_sink{nullptr};  // P3 bridge implements; scope2 needs it
+  bool sdk_ram_host_reader{false};  // the bridge has no app mailbox reader
 };
 
 // Distinct diagnostic counters (03 §3.7): normal Node DATA, gateway SDK
@@ -281,6 +282,12 @@ class GatewayDelivery final : public GatewayServiceSink {
   bool mailbox_take(MessageKey& key,
                     std::array<std::uint8_t, kGatewayPayloadMaxBytes>& payload,
                     std::size_t& payload_size) noexcept;
+  // A bridge may hand a scope-1 entry to its host. The entry stays readable
+  // until storage ACK or the mailbox hold expires; a lost USB session can
+  // resend it within that hold.
+  bool mailbox_peek(MessageKey& key, RequestDigest& digest,
+                    endpoint::EncodedServicePayload& submit) const noexcept;
+  bool mailbox_ack(const MessageKey& key, bool stored) noexcept;
 
   // Host ingress ACK from the bridge (P3): `stored` = ReceiveLog evidence
   // (outcome OK). On it the pending record completes and its Receipt is
@@ -441,6 +448,7 @@ class GatewayDelivery final : public GatewayServiceSink {
 
   struct Role {
     bool enabled{false};
+    bool sdk_ram_host_reader{false};
     std::uint64_t gateway_boot{0};
     std::uint32_t capabilities{0};
     GatewayHostSink* host_sink{nullptr};

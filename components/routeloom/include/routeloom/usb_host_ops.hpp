@@ -41,7 +41,7 @@ constexpr std::uint32_t kCapHostOpsV1 = 1u << 2;
 
 // scope-gateway-config P3 (docs/design/scope-gateway-config/05-wire-api.md
 // §5.6): the device serves the Gateway HostOps subcommands 0x10-0x13 —
-// host endpoint registration, scope-2 ReceiveLog ingress + ACK, and
+// host endpoint registration, gateway ReceiveLog ingress + ACK, and
 // unregister. Advertised separately from host_ops_v1 so a bridge build can
 // expose the dispatch window without the gateway host lane.
 constexpr std::uint32_t kCapGatewayEndpointV1 = 1u << 3;
@@ -133,7 +133,7 @@ enum class HostOpsSub : std::uint8_t {
   RxAssuranceEnable = 0x08,  // H→G request (empty): enable extended ingress
                              // -> 0x08 reply (result u8)
   HostRegister = 0x10,      // H→G request: register/renew the host endpoint
-  GatewayIngress = 0x11,    // G→H request: scope-2 payload for ReceiveLog
+  GatewayIngress = 0x11,    // G→H request: scope-1/2 payload for ReceiveLog
   GatewayIngressAck = 0x12, // H→G response: storage outcome for 0x11
   HostUnregister = 0x13,    // H→G request: drop the current registration
   ConfigQuery = 0x20,       // H→G request: status query -> async 0x22 reply
@@ -1286,7 +1286,8 @@ Status decode_site_state_report(ByteView inner, SiteStateReport& out) noexcept;
 // 0x68 CHANNEL_PLAN (H→G): action:u8, reserved:u8=0, then by action
 //   1 STATUS:  nothing
 //   2 OFFER:   blob_len:u16 (1..384), plan blob, commit_signature[64]
-//   3 RELEASE: plan_hash[32] (the offered plan whose commit to release)
+//   3 RELEASE: plan_hash[32], required_count:u8, required_node[required_count]:u64
+//      (strictly increasing; the host's site member set for this plan)
 // 0x69 CHANNEL_PLAN_REPORT (G→H, under the 0x68 request id), payload 96 B:
 //   result:u16 (ConfigOpsResult), detail:u8 (StatusCode of the offer or
 //   release, 0 for status), phase:u8 (ParticipantPhase), active_channel:u8,
@@ -1297,6 +1298,7 @@ Status decode_site_state_report(ByteView inner, SiteStateReport& out) noexcept;
 constexpr std::size_t kChannelPlanOfferFixed = 4 + 64;
 constexpr std::size_t kChannelPlanRequestMax = kChannelPlanOfferFixed + 384;
 constexpr std::size_t kChannelPlanReportPayload = 96;
+constexpr std::size_t kChannelPlanRequiredMax = 8;
 
 enum class ChannelPlanAction : std::uint8_t {
   Status = 1,
@@ -1309,6 +1311,8 @@ struct ChannelPlanRequest {
   ByteView blob{};                 // Offer; borrows `inner` on decode
   ByteView commit_signature{};     // Offer, 64 B
   std::array<std::uint8_t, 32> plan_hash{};  // Release
+  std::array<NodeId, kChannelPlanRequiredMax> required{};  // Release
+  std::uint8_t required_count{0};
 };
 
 struct ChannelPlanReport {

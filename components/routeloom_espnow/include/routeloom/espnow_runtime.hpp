@@ -637,10 +637,9 @@ class EspNowRuntime final : public RadioPort,
   static constexpr std::size_t kQuarantineCapacity = 4;
   std::array<RawTx, kQuarantineCapacity> quarantined_tx_{};
   std::size_t quarantined_count_{0};
-  // Raw-lane quarantine self-recovery (02 §2.3/X-02): the node's
-  // reserved-lane watchdog is the only in-band recover() caller and it
-  // needs an in-flight DATA send — a discovery-only node would otherwise
-  // hold a quarantined MAC forever. An entry dwelling this many
+  // TX quarantine self-recovery (02 §2.3/X-02): a node that only runs
+  // discovery would otherwise hold a quarantined or fenced MAC forever.
+  // An entry dwelling this many
   // callback-watchdog windows proves the callback is lost (not merely
   // late), so poll_once drives recover() itself.
   static constexpr std::uint32_t kQuarantineRecoverWindows = 4;

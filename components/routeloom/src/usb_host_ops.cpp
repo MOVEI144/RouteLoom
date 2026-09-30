@@ -2638,7 +2638,17 @@ Status encode_channel_plan(const ChannelPlanRequest& request, const MutableByteV
       payload = kChannelPlanOfferFixed + request.blob.size;
       break;
     case ChannelPlanAction::Release:
-      payload = 2 + request.plan_hash.size();
+      if (request.required_count > request.required.size()) {
+        return Status::error(StatusCode::InvalidArgument, "channel plan required count");
+      }
+      for (std::size_t i = 0; i < request.required_count; ++i) {
+        if (request.required[i] == kInvalidNodeId || request.required[i] == 0 ||
+            (i != 0 && request.required[i - 1] >= request.required[i])) {
+          return Status::error(StatusCode::InvalidArgument, "channel plan required set");
+        }
+      }
+      payload = 2 + request.plan_hash.size() + 1 +
+                static_cast<std::size_t>(request.required_count) * 8;
       break;
     default:
       return Status::error(StatusCode::InvalidArgument, "channel plan action");
@@ -2655,6 +2665,10 @@ Status encode_channel_plan(const ChannelPlanRequest& request, const MutableByteV
   }
   if (status && request.action == ChannelPlanAction::Release) {
     status = writer.write_bytes(ByteView{request.plan_hash.data(), request.plan_hash.size()});
+    if (status) status = writer.write_u8(request.required_count);
+    for (std::size_t i = 0; status && i < request.required_count; ++i) {
+      status = writer.write_u64(request.required[i]);
+    }
   }
   if (!status) return status;
   written = writer.size();
@@ -2687,10 +2701,24 @@ Status decode_channel_plan(const ByteView inner, ChannelPlanRequest& out) noexce
       break;
     }
     case ChannelPlanAction::Release:
-      if (payload.size != 2 + request.plan_hash.size()) {
+      if (payload.size < 2 + request.plan_hash.size() + 1) {
         return Status::error(StatusCode::ProtocolError, "CHANNEL_PLAN");
       }
       std::memcpy(request.plan_hash.data(), payload.data + 2, request.plan_hash.size());
+      request.required_count = payload.data[2 + request.plan_hash.size()];
+      if (request.required_count > request.required.size() ||
+          payload.size != 2 + request.plan_hash.size() + 1 +
+                              static_cast<std::size_t>(request.required_count) * 8) {
+        return Status::error(StatusCode::ProtocolError, "CHANNEL_PLAN");
+      }
+      for (std::size_t i = 0; i < request.required_count; ++i) {
+        ByteReader reader(ByteView{payload.data + 2 + request.plan_hash.size() + 1 + i * 8, 8});
+        if (!reader.read_u64(request.required[i]) || request.required[i] == 0 ||
+            request.required[i] == kInvalidNodeId ||
+            (i != 0 && request.required[i - 1] >= request.required[i])) {
+          return Status::error(StatusCode::ProtocolError, "CHANNEL_PLAN");
+        }
+      }
       break;
     default:
       return Status::error(StatusCode::ProtocolError, "CHANNEL_PLAN");

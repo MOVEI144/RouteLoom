@@ -130,7 +130,7 @@ USB FrameKind HostOps=19、既存schema1/sub1〜5は不変。実装済みcapabil
 
 USB result/outcomeは0 OK、1 BUSY、2 STALE、3 DENIED、4 UNSUPPORTED、5 INVALID、6 STORAGE、7 INDETERMINATE。IngressAck 0はReceiveLogへ実格納済みの場合だけ。receipt/digest/messagekeyの照合前に信用しない。
 
-HostRegisterのprincipalは認証session由来。同じHost boot＋同じUSB sessionでのrenewは同token、sessionが変われば新token。GatewayIngressは受理時にpending8枠の一件を占有し、IngressAckまたは5秒のACK期限で解放する。queue時点でのcredit予約はなく、USB frameは双方向とも既存のper-frame creditを送受信時に消費する。pending満杯なら新しいSubmitをCAPACITYで拒否する。HostはReceiveLogへの実格納（duplicate/conflictを区別）後にのみACKを返す。DATA/ACKとcounter順序を既存Owner/writerで直列化する。
+HostRegisterのprincipalは認証session由来。同じHost boot＋同じUSB sessionでのrenewは同token、sessionが変われば新token。GatewayIngressは受理時にpending8枠の一件を占有し、IngressAckまたは5秒のACK期限で解放する。scope1をUSB gatewayが受領した場合も同じ0x11でhostへ渡すが、先に返したService Receiptの根拠であるmailboxはhostの格納ACKまたは既存の60秒の保持期限まで残し、USB session断後も期限内に再送する。queue時点でのcredit予約はなく、USB frameは双方向とも既存のper-frame creditを送受信時に消費する。pending満杯なら新しいSubmitをCAPACITYで拒否する。HostはReceiveLogへの実格納（duplicate/conflictを区別）後にのみACKを返す。DATA/ACKとcounter順序を既存Owner/writerで直列化する。
 
 ## 5.7 Host canonical/API
 
