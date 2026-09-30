@@ -1021,6 +1021,12 @@ void EspNowRuntime::poll_once() noexcept {
         node_.on_radio_tx_result(event.token, event.success, now);
       }
     } else {
+#if CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY
+      ++hil_rx_frames_;
+      if (event.channel_valid && event.channel != channel_runner_.committed_channel()) {
+        ++hil_rx_other_channel_;
+      }
+#endif
       RadioRxMetadataV2 meta{};
       meta.received_us = event.observed_us;
       meta.binding_generation = event.binding;
@@ -1224,6 +1230,12 @@ void EspNowRuntime::poll_bootstrap(const MonotonicMs now) noexcept {
     BootstrapEvent rx{};
     for (std::size_t i = 0; i < kBootstrapQueueCapacity &&
                             xQueueReceive(bootstrap_queue_, &rx, 0) == pdTRUE; ++i) {
+#if CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY
+      ++hil_rx_frames_;
+      if (rx.channel != 0 && rx.channel != channel_runner_.committed_channel()) {
+        ++hil_rx_other_channel_;
+      }
+#endif
       if (bootstrap_sink_ != nullptr) {
 #if CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
         trace_rld1("rx", ByteView{rx.data.data(), rx.length});
@@ -2690,13 +2702,6 @@ void EspNowRuntime::enqueue_rx(
       }
     }
     if (matches) return;
-  }
-#endif
-#if CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY
-  ++hil_rx_frames_;
-  if (info->rx_ctrl != nullptr &&
-      info->rx_ctrl->channel != channel_runner_.committed_channel()) {
-    ++hil_rx_other_channel_;
   }
 #endif
   // Carrier classification precedes the peer table: RLD1 is recognized once

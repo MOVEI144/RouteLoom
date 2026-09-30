@@ -690,7 +690,8 @@ class EspNowRuntime final : public RadioPort,
   std::uint32_t telemetry_event_drops_{0};
 #if CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY
   // Bench-only radio evidence (HIL RADIO line): driver send refusals and
-  // frames heard on a channel other than the committed one.
+  // queued frames processed on a channel other than the committed one.
+  // Updated only by the Owner, never from the Wi-Fi RX callback.
   std::uint32_t hil_send_errors_{0};
   std::int32_t hil_last_send_error_{0};
   std::uint32_t hil_rx_frames_{0};
