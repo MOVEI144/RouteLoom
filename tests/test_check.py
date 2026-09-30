@@ -362,6 +362,25 @@ class Budget(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("legacy_psk_load", err)
 
+    def test_member_image_refuses_development_key(self):
+        data = json.loads(self.cells.read_text())
+        data["cells"][0]["expect"] = ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"]
+        self.cells.write_text(json.dumps(data))
+        key_hex = re.search(
+            r'config ROUTELOOM_DEVELOPMENT_KEY_HEX\s+string[^\n]*\n\s+default "([0-9a-fA-F]+)"',
+            (ROOT / "components/routeloom_device/Kconfig").read_text()).group(1)
+        image = self.dir / "a" / "routeloom_bench_node.bin"
+        self.assertEqual(self.size("a")[0], 0)
+        for key in (bytes.fromhex(key_hex), key_hex.encode(), key_hex.upper().encode()):
+            image.write_bytes(bytes(100) + key + bytes(1000 - 100 - len(key)))
+            code, _, err = self.size("a")
+            self.assertEqual(code, 1)
+            self.assertIn("development key", err)
+        # The explicit development profile still admits its quick-start key.
+        data["cells"][0]["expect"] = ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"]
+        self.cells.write_text(json.dumps(data))
+        self.assertEqual(self.size("a")[0], 0)
+
     def test_symbols_absent_requires_a_symbol_table(self):
         data = json.loads(self.cells.read_text())
         data["symbols_absent"] = [r"^legacy_psk_"]

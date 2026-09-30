@@ -522,6 +522,21 @@ def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
         return [f"missing {p}" for p in missing]
     errors = []
     app_bin = files["bin"].stat().st_size
+    if "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y" in (
+            cell.get("overlay", []) + cell.get("expect", [])):
+        # Inspect the linked image, including constants; the quick-start
+        # key can survive even when no development symbol is referenced.
+        kconfig = (ROOT / "components/routeloom_device/Kconfig").read_text(encoding="utf-8")
+        key = re.search(
+            r'config ROUTELOOM_DEVELOPMENT_KEY_HEX\s+string[^\n]*\n\s+default "([0-9a-fA-F]+)"',
+            kconfig)
+        if key is None:
+            errors.append("missing development key definition for image inspection")
+        else:
+            image = files["bin"].read_bytes()
+            key_hex = key.group(1)
+            if bytes.fromhex(key_hex) in image or key_hex.lower().encode() in image.lower():
+                errors.append("MemberEdhoc image contains the quick-start development key")
     if app_bin > budget["app_bin_max"] + APP_BIN_DRIFT:
         errors.append(f"app.bin {app_bin} B > budget {budget['app_bin_max']} B "
                       f"(+{APP_BIN_DRIFT} B drift)")

@@ -1538,6 +1538,10 @@ int main(int argc, char** argv) {
   }
   status = device.begin(config, now);
   if (!status) boot_failed(status);
+  if (!idf_stub::log_contains(setup.devram ? "security profile: Development"
+                                         : "security profile: Candidate")) {
+    fatal("boot security profile is not visible");
+  }
   EspNowSecurityOwner& owner = DeviceTestAccess::owner(device);
   Sdkv1Stores& stores = DeviceTestAccess::stores(device);
   EspNowRuntime& runtime = DeviceTestAccess::runtime(device);

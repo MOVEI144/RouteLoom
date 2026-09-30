@@ -261,6 +261,8 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   tag_ = config.log_tag;
   role_ = config.role;
   security_ = config.security;
+  ESP_LOGI(tag_, "security profile: %s",
+           security_ == DeviceSecurity::DevRam ? "Development" : "Candidate");
   // A channel plan is rooted in the adopted site's SAK: DevRam has no Site
   // Authority and keeps its fixed (SitePackage/Kconfig) channel.
   if (config.channel_plan != 0 && config.security != DeviceSecurity::Member) {
