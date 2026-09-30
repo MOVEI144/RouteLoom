@@ -253,6 +253,7 @@ class Device {
 #if ROUTELOOM_DEVICE_MIGRATION
   Status begin_channel_plan(const DeviceConfig& config) noexcept;
   void poll_channel_plan(MonotonicMs now_ms) noexcept;
+  void search_stranded(DeviceChannelPlan& plan, MonotonicMs now_ms) noexcept;
 #endif
 #if defined(ESP_PLATFORM)
   static void task_entry(void* self) noexcept;
