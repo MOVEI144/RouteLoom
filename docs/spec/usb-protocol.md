@@ -50,7 +50,13 @@ zero-credit時のqueryは500ms以上の間隔で最大3回、応答が無けれ�
 
 ## 5. 操作identityと結果
 
-USB request IDはsession内一意、Message IDは論理配送の寿命、host idempotency identityは `(principal, network, operation_class, key)`。同identity・同canonical payload hashは既存結果、同identity・異hashはCONFLICT。
+USB request IDはsession内一意、Message IDは論理配送の寿命、legacy DataToMeshのidempotency identityは `(HostLink session incarnation, principal, network, operation_class, key)`。同identity・同canonical payload hashは既存結果、同identity・異hashはCONFLICT。
+
+旧式の`DataToMesh`（key付き送信）は、gatewayが16件の記録を持つ。同じidentityの再送は、未終端なら`Accepted`＋`IDEMPOTENT_REPLAY`、終端済みなら保存した終端状態（拒否ならそのError code）＋`IDEMPOTENT_REPLAY`を返す。未報告のrequestがある再送は同じ16枠から通知枠を予約し、元requestと再送requestの両方へ終端を返す。予約できなければ受理前に`NoCapacity`＋`IDEMPOTENCY_FULL`。表が満杯になると、報告済みの終端記録（またはそのsessionが既に無い終端記録）のうち終端時刻が最も古いものを回収する。未終端記録は時間経過でも回収しない。
+
+回収したkeyまで、現HostLink sessionのfloorを単調に上げる。hostは新規keyをsession内で単調に割り当てる。記録が残っていればfloor以下でも保存した結果を返し、記録が無ければfloor以下の全keyを`Conflict`＋`RESULT_EXPIRED`（終端済みで詳細が失われた）として拒否し、再実行しない。floorとkeyの名前空間は認証されたincarnationに束縛する。再接続後の別sessionでは新しい名前空間となり、旧sessionのsealed frameは認証経路で拒否する。旧keyを新sessionへ載せ替えて再送してはならない（sessionをまたぐ耐久送信はHostOps `SUBMIT`／dispatch windowを使う）。daemonのlegacy SENDはsessionをまたいで再送しない。
+
+受理した送信の終端はTX queueに入るまで記録に保持する。CONTROL queueに入らない`RESULT_EXPIRED`／`CONFLICT`／`IDEMPOTENCY_FULL`もRX credit 1窓分だけ保持し、その拒否応答が進むまで追加grantを出さない。RX grantはCONTROL queueが空の時に1件へ合流する。USB接続とcreditが進む条件で、連続送信は既定deadline 5 s＋grace 1 s以内に終端する。切断・credit停止はhostの既存timeoutで`indeterminate`となる。HostOps `SUBMIT`は別の表で、`RETIRE`で回収する。
 
 COMMAND_ACCEPTEDは機器受付だけ。管理確定、PC永続保存、アプリ適用は別event。再接続で信用先が変わったら旧認可を引き継がない。
 
@@ -132,9 +138,9 @@ MemberEdhoc専用（DevRamはSite Authorityが無く固定channel、[channel移�
 
 | sub | 向き | payload |
 |---|---|---|
-| `0x68` CHANNEL_PLAN | H→G | `action:u8`（1 STATUS／2 OFFER／3 RELEASE）、`reserved:u8=0`。OFFERは続けて`blob_len:u16`（1〜384）、plan blob、`commit_signature[64]`。RELEASEは`plan_hash[32]` |
+| `0x68` CHANNEL_PLAN | H→G | `action:u8`（1 STATUS／2 OFFER／3 RELEASE）、`reserved:u8=0`。OFFERは続けて`blob_len:u16`（1〜384）、plan blob、`commit_signature[64]`。RELEASEは`plan_hash[32]`、`required_count:u8`（0〜8）、昇順・重複なしの`required_node:u64`をcount件 |
 | `0x69` CHANNEL_PLAN_REPORT | G→H（同request id） | 96 B：`result:u16`（ConfigOpsResult空間）、`detail:u8`（機器のStatusCode）、`phase:u8`（gateway参加者のParticipantPhase）、`active_channel:u8`、`ready:u8`（提示中のplanにREADYを返したmember数）、`flags:u8`（bit0 commit解放済み）、`reserved:u8=0`、`active_epoch:u32`、`cooldown_ms:u32`（plan間cooldownの残り）、`gateway_now_ms:u64`（planの時刻の領域）、`ledger_sequence:u64`、`ledger_state[32]`、`offered_plan[32]`（無ければ0） |
 
-gatewayは採用済みsiteのSAK（`SiteCommitVerifier`）で署名を検証してから台帳（`rlmauth`）へcommitし、planを配る。USB sessionはhostを認証するだけで、planの正しさは保証しない。偽の署名・署名なしは`Denied`（detail＝AuthenticationFailed）で、何も配らない。commitの証拠はRELEASEまで保持し、gatewayはOFFER時に認証済みの直接peerを固定して、その全員のREADYまでRELEASEを拒否する。解放後もそのpeerの結果を待ち、全員の結果または期限後に成否を確定する。hostはreportの`ready`を確認してから解放する。site全体のrequired集合や切替時に不在だったmemberの復旧は未実装。hostはSTATUSのreport（台帳の先頭、現在のchannelとepoch、gatewayの時計）から次のplanを組み立てるので、5 sより古いreportでは提示しない。回復用のsigned snapshotは配らない（snapshotはcommit証拠そのもので、READYの関門を越えてしまう）。daemon側はAPI1 `site.channel_plan.status/offer/release`（[Host §11](host.md)）。
+gatewayは採用済みsiteのSAK（`SiteCommitVerifier`）で署名を検証してから台帳（`rlmauth`）へcommitし、planを配る。USB sessionはhostを認証するだけで、planの正しさは保証しない。偽の署名・署名なしは`Denied`（detail＝AuthenticationFailed）で、何も配らない。commitの証拠はRELEASEまで保持し、gatewayはOFFER時に認証済みの直接peerを固定して、その全員のREADYまでRELEASEを拒否する。さらにRELEASEの必須member全員について、現plan hashのREADYを確認する。欠けていればBusy（detail＝WouldBlock）で拒否する。解放後もそのpeerの結果を待ち、全員の結果または期限後に成否を確定する。hostはreportの`ready`を確認し、siteのmember ID集合を渡してから解放する。RELEASEのpayloadは2.0.0-devの途中で`plan_hash[32]`だけの34 Bから変わったので、hostとgateway firmwareは組で更新する。組が合わないRELEASEはどちらの向きでもgatewayがProtocolErrorで拒否し（hostの要求は応答なしで期限切れ）、commitは解放しない。hostはSTATUSのreport（台帳の先頭、現在のchannelとepoch、gatewayの時計）から次のplanを組み立てるので、5 sより古いreportでは提示しない。回復用のsigned snapshotは配らない（snapshotはcommit証拠そのもので、READYの関門を越えてしまう）。daemon側はAPI1 `site.channel_plan.status/offer/release`（[Host §11](host.md)）。
 
 [Host](host.md)／[Wire](wire-protocol.md)／[電源断](crash-time-resources.md)

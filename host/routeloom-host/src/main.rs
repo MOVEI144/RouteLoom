@@ -47,6 +47,9 @@ use zeroize::Zeroizing;
 /// observes on the USB stream; mesh truth it cannot see stays `unknown`.
 const MAX_EVENTS: usize = 256;
 const MAX_DELIVERIES: usize = 512;
+// Legacy SEND uses SendOptions' 5 s mesh lifetime. Leave 10 s for USB
+// admission and the terminal event; missing evidence ends as uncertainty.
+const LEGACY_DELIVERY_TIMEOUT_MS: u64 = 15_000;
 const MAX_NODES: usize = 256;
 const MAX_OUTBOUND: usize = 64;
 /// Concurrent control-socket clients. Each connection owns a thread and a
@@ -648,6 +651,7 @@ struct Delivery {
     msg_session: Option<u64>,
     msg_seq: Option<u64>,
     updated_ms: u64,
+    deadline_mono_ms: u64,
 }
 
 /// One ring-buffer entry. `seq`/`kind` are stored alongside `json` (which
@@ -1121,12 +1125,22 @@ struct DeliveryPatch {
     msg_seq: Option<u64>,
 }
 
+fn legacy_delivery_terminal(state: &str) -> bool {
+    matches!(
+        state,
+        "delivered" | "failed" | "expired" | "cancelled-before-tx" | "indeterminate" | "rejected"
+    )
+}
+
 fn apply_delivery_patch(
     delivery: &mut Delivery,
     new_state: &str,
     patch: DeliveryPatch,
     updated_ms: u64,
 ) {
+    if legacy_delivery_terminal(&delivery.state) && !legacy_delivery_terminal(new_state) {
+        return;
+    }
     delivery.state = new_state.to_string();
     if patch.reason.is_some() {
         delivery.reason = patch.reason;
@@ -1182,6 +1196,7 @@ fn delivery_update(
         msg_session: patch.msg_session,
         msg_seq: patch.msg_seq,
         updated_ms,
+        deadline_mono_ms: mono_ms().saturating_add(LEGACY_DELIVERY_TIMEOUT_MS),
     });
 }
 
@@ -1521,10 +1536,14 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                     .iter()
                     .any(|d| d.request == request);
                 if request != 0 && tracked {
+                    // RESULT_EXPIRED: the key already ended and the device
+                    // reclaimed its record. It was not executed again and is
+                    // neither a success nor a failure of this request.
+                    let expired = reason.as_deref() == Some("RESULT_EXPIRED");
                     delivery_update(
                         state,
                         request,
-                        "failed",
+                        if expired { "indeterminate" } else { "failed" },
                         DeliveryPatch {
                             reason: reason.clone(),
                             ..DeliveryPatch::default()
@@ -1910,6 +1929,22 @@ fn nodes_json(state: &State) -> String {
 }
 
 fn deliveries_json(state: &State) -> String {
+    expire_legacy_deliveries(state, mono_ms(), now_ms());
+    deliveries_json_at(state)
+}
+
+fn expire_legacy_deliveries(state: &State, now_mono: u64, now_wall: u64) {
+    let mut deliveries = state.deliveries.lock().expect("deliveries poisoned");
+    for delivery in deliveries.iter_mut() {
+        if now_mono >= delivery.deadline_mono_ms && !legacy_delivery_terminal(&delivery.state) {
+            delivery.state = "indeterminate".to_string();
+            delivery.reason = Some("DELIVERY_EVENT_TIMEOUT".to_string());
+            delivery.updated_ms = now_wall;
+        }
+    }
+}
+
+fn deliveries_json_at(state: &State) -> String {
     let deliveries = state.deliveries.lock().expect("deliveries poisoned");
     let mut out = String::from("{\"deliveries\":[");
     for (index, delivery) in deliveries.iter().enumerate() {
@@ -2669,10 +2704,15 @@ fn serve_client(
                                 deny.scope, deny.retry_after_ms
                             )
                         } else {
-                        // Body: idempotency_key(8) || destination(8) ||
-                        // payload. The key is a daemon-unique identity the
-                        // device may persist across sessions; the CLI does
-                        // not resubmit, so a fresh key per SEND suffices.
+                        // Serialize key allocation and enqueue across clients:
+                        // the session floor requires monotonic keys in wire order.
+                        // The queue operation is nonblocking; release the session
+                        // lock before updating delivery state or writing to IPC.
+                        let send_guard = device_session.lock().map_err(|_| {
+                            io::Error::other("device session poisoned")
+                        })?;
+                        // Body: idempotency_key(8) || destination(8) || payload.
+                        // Legacy SEND never resubmits across HostLink sessions.
                         let mut body = next_idem_key
                             .fetch_add(1, Ordering::Relaxed)
                             .to_be_bytes()
@@ -2684,13 +2724,15 @@ fn serve_client(
                         // instead of blocking this client thread while the
                         // adapter is disconnected. The writer seals the body
                         // under the session key before writing.
-                        match outbound.try_send(Outbound::Seal(Frame {
+                        let queued = outbound.try_send(Outbound::Seal(Frame {
                             kind: FrameKind::DataToMesh,
                             flags: 0,
                             session: active_session.expect("authenticated above"),
                             request,
                             body,
-                        })) {
+                        }));
+                        drop(send_guard);
+                        match queued {
                             Ok(()) => {
                                 delivery_update(
                                     &state,
@@ -4147,6 +4189,56 @@ mod tests {
     }
 
     #[test]
+    fn missing_delivery_event_concludes_after_the_legacy_send_deadline() {
+        let state = State::default();
+        delivery_update(
+            &state,
+            9,
+            "queued",
+            DeliveryPatch {
+                destination: Some(5),
+                ..DeliveryPatch::default()
+            },
+            100,
+        );
+        let deadline = state
+            .deliveries
+            .lock()
+            .expect("deliveries poisoned")
+            .front()
+            .expect("queued send")
+            .deadline_mono_ms;
+        expire_legacy_deliveries(&state, deadline - 1, 200);
+        let pending = deliveries_json_at(&state);
+        assert!(pending.contains("\"state\":\"queued\""));
+        expire_legacy_deliveries(&state, deadline, 201);
+        let expired = deliveries_json_at(&state);
+        assert!(expired.contains("\"state\":\"indeterminate\""));
+        assert!(expired.contains("DELIVERY_EVENT_TIMEOUT"));
+        expire_legacy_deliveries(&state, deadline + 1, 202);
+        assert!(!deliveries_json_at(&state).contains("\"state\":\"queued\""));
+        assert!(delivery_update_tracked(
+            &state,
+            9,
+            "sent",
+            DeliveryPatch::default(),
+            203,
+        ));
+        assert!(deliveries_json_at(&state).contains("\"state\":\"indeterminate\""));
+        assert!(delivery_update_tracked(
+            &state,
+            9,
+            "delivered",
+            DeliveryPatch {
+                reason: Some("END_RECEIVED".to_string()),
+                ..DeliveryPatch::default()
+            },
+            204,
+        ));
+        assert!(deliveries_json_at(&state).contains("\"state\":\"delivered\""));
+    }
+
+    #[test]
     fn delivery_event_for_submit_request_attaches_to_operation() {
         use crate::send_store::{PrepareOutcome, SubmitOutcome};
         let state = State::default();
@@ -4270,6 +4362,24 @@ mod tests {
         let json = deliveries_json(&state);
         assert!(json.contains("\"state\":\"failed\""));
         assert!(json.contains("\"reason\":\"NACK\""));
+
+        // RESULT_EXPIRED: the key ended earlier and its record was
+        // reclaimed; neither delivered nor failed.
+        delivery_update(&state, 4, "sent", DeliveryPatch::default(), 300);
+        let mut body = 6_u16.to_be_bytes().to_vec();
+        body.extend_from_slice(&4_u64.to_be_bytes());
+        body.extend_from_slice(&routeloom_protocol::manifest::REASON_RESULT_EXPIRED.to_be_bytes());
+        body.push(0);
+        record_frame(
+            &state,
+            &frame(FrameKind::Error, 0, 4, body.clone()),
+            &body,
+            400,
+        );
+        let json = deliveries_json(&state);
+        assert!(json.contains(
+            "\"request\":4,\"destination\":0,\"state\":\"indeterminate\",\"reason\":\"RESULT_EXPIRED\""
+        ));
     }
 
     #[test]

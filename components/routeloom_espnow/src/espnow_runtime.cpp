@@ -1110,11 +1110,9 @@ void EspNowRuntime::poll_once() noexcept {
     portEXIT_CRITICAL(&callback_lock_);
     observer_.on_diagnostic("OP_TX_QUARANTINED", peer, nullptr);
   }
-  // Raw-lane quarantine self-recovery (02 §2.3/X-02): entries release only
-  // via the owed callback or recover()->rebuild_driver(). The node's
-  // reserved-lane watchdog is the sole in-band recover() caller and it
-  // needs an in-flight DATA send — a node that only runs discovery would
-  // hold a quarantined MAC forever, every later send returning WouldBlock.
+  // TX quarantine self-recovery (02 §2.3/X-02): entries release only
+  // via the owed callback or recover()->rebuild_driver(). A fenced reserved
+  // send also needs this path when a channel switch loses its callback.
   // After kQuarantineRecoverWindows watchdog windows of dwell the runtime
   // recovers itself; the trigger defers while a serialized channel
   // operation owns the radio (rebuild_driver() must not tear down an
@@ -1124,18 +1122,20 @@ void EspNowRuntime::poll_once() noexcept {
     NodeId recover_peer = kInvalidNodeId;
     bool due = false;
     portENTER_CRITICAL(&callback_lock_);
-    if (quarantined_count_ != 0 && now >= quarantine_recover_next_ms_) {
-      std::size_t oldest = 0;
-      for (std::size_t i = 1; i < quarantined_count_; ++i) {
-        if (quarantined_tx_[i].sent_ms < quarantined_tx_[oldest].sent_ms) {
-          oldest = i;
+    if (now >= quarantine_recover_next_ms_ &&
+        (quarantined_count_ != 0 || fenced_outstanding_)) {
+      MonotonicMs oldest_ms = fenced_outstanding_ ? fenced_pending_.sent_ms : now;
+      recover_peer = fenced_outstanding_ ? fenced_pending_.node : kInvalidNodeId;
+      for (std::size_t i = 0; i < quarantined_count_; ++i) {
+        if (quarantined_tx_[i].sent_ms < oldest_ms) {
+          oldest_ms = quarantined_tx_[i].sent_ms;
+          recover_peer = quarantined_tx_[i].node;
         }
       }
-      if (now - quarantined_tx_[oldest].sent_ms >=
+      if (now - oldest_ms >=
           static_cast<MonotonicMs>(config_.node.callback_watchdog_ms) *
               kQuarantineRecoverWindows) {
         due = true;
-        recover_peer = quarantined_tx_[oldest].node;
       }
     }
     portEXIT_CRITICAL(&callback_lock_);

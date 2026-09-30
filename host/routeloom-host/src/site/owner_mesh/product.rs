@@ -367,6 +367,17 @@ fn mesh_p03_explicit_gateway_delivers_only_to_named_gateway() {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     converge(&mut world, "p03 gateway");
+    world.usb_host.register_gateway();
+    for _ in 0..100 {
+        if world.usb_host.gateway_token.is_some() {
+            break;
+        }
+        world.step(25);
+    }
+    assert!(
+        world.usb_host.gateway_token.is_some(),
+        "host registered as mailbox reader"
+    );
     // The application may first request the gateway facade from an inbound
     // observer callback. Attachment must recover on the next Owner call.
     world.peers[2].app_send(NODE_A, b"attach-gateway");
@@ -410,6 +421,37 @@ fn mesh_p03_explicit_gateway_delivers_only_to_named_gateway() {
         "no substitute delivery"
     );
     assert_eq!(world.snaps[1].gw_receipts, 5, "no extra receipt");
+
+    // The USB bridge hands each SDK_RAM payload to its host, which
+    // frees the mailbox slot. Twenty sends (3.5 s apart, inside the 20/min
+    // acceptance rate) are all received, none refused CAPACITY, and the
+    // host got every payload.
+    let received = world.usb_host.gateway_payloads.len();
+    for round in 6..=20u32 {
+        let started = world.now;
+        world.peers[1].gateway_send(testkit::GATEWAY, b"p03-gateway");
+        world.step(25);
+        world.pump_until(400, |snaps| snaps[1].gw_send == GATEWAY_RECEIVED);
+        assert_eq!(
+            world.snaps[1].gw_send, GATEWAY_RECEIVED,
+            "send {round} received: A {:?}",
+            world.snaps[1]
+        );
+        while world.now - started < 3_500 {
+            world.step(25);
+        }
+    }
+    assert_eq!(world.snaps[0].gw_mailbox_stored, 20, "gateway mailbox");
+    assert_eq!(
+        world.usb_host.gateway_payloads.len(),
+        received + 15,
+        "the host stored every payload"
+    );
+    assert!(world
+        .usb_host
+        .gateway_payloads
+        .iter()
+        .all(|p| p == b"p03-gateway"));
 }
 
 // --- Manual channel plan (P03 channel plan, V2-08) ---------------------------
@@ -480,6 +522,14 @@ fn plan_switch(world: &mut MeshWorld, new_channel: u8, epoch: u32) {
         .with(|a| a.channel_plan_offer(new_channel, 30_000, now))
         .0
         .expect("plan offered");
+    // The previous plan's report never stands in for this one.
+    assert!(
+        service
+            .with(|a| a.channel_plan_release(world.now))
+            .0
+            .is_err(),
+        "no release before the gateway reported this plan"
+    );
     let (result, detail, report) = plan_settle(world);
     assert_eq!(
         (result, detail),
@@ -488,6 +538,12 @@ fn plan_switch(world: &mut MeshWorld, new_channel: u8, epoch: u32) {
     );
     assert_eq!(report.offered_plan, signed.plan_hash, "the offered plan");
     let members = (world.peers.len() - 1) as u8;
+    assert!(report.ready < members, "READY is still partial: {report:?}");
+    let refused = service
+        .with(|a| a.channel_plan_release(world.now))
+        .0
+        .expect_err("a partial READY is not released");
+    assert!(refused.starts_with("NOT_READY"), "{refused}");
     let mut ready = report.ready;
     for _ in 0..20 {
         if ready >= members {
@@ -497,6 +553,33 @@ fn plan_switch(world: &mut MeshWorld, new_channel: u8, epoch: u32) {
         ready = plan_status(world).ready;
     }
     assert_eq!(ready, members, "every member answered READY");
+    // A direct HostOps caller cannot substitute the READY count for the
+    // required member identities, even after every visible peer answered.
+    let mut required = vec![NODE_A, NODE_B, 0xCAFE];
+    required.sort_unstable();
+    let body = routeloom_protocol::host_ops::encode_channel_plan(&ChannelPlanRequest::Release {
+        plan_hash: signed.plan_hash,
+        required,
+    })
+    .expect("direct release");
+    let request = world.usb_host.queue_data(FrameKind::HostOps, body);
+    world.usb_host.watch = Some(request);
+    world.usb_host.watched = None;
+    for _ in 0..500 {
+        world.step(PLAN_STEP_MS);
+        if world.usb_host.watched.is_some() {
+            break;
+        }
+    }
+    let rejected = world
+        .usb_host
+        .watched
+        .take()
+        .expect("gateway answered direct release");
+    let rejected = routeloom_protocol::host_ops::decode_channel_plan_report(&rejected)
+        .expect("channel plan report");
+    assert_eq!(rejected.result, 1, "missing required member is NOT_READY");
+    assert!(!rejected.released, "commit remains held");
     service
         .with(|a| a.channel_plan_release(world.now))
         .0

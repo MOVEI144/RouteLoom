@@ -181,6 +181,7 @@ pub const REASON_RX_ASSURANCE_MALFORMED: u16 = 1077;
 pub const REASON_REGISTER_MALFORMED: u16 = 1078;
 pub const REASON_UNREGISTER_MALFORMED: u16 = 1079;
 pub const REASON_ACK_MALFORMED: u16 = 1080;
+pub const REASON_RESULT_EXPIRED: u16 = 1081;
 
 /// (id, API1 string) for every reason code; the string is `api1` when set, else the name.
 pub const REASON_API1: &[(u16, &str)] = &[
@@ -294,4 +295,5 @@ pub const REASON_API1: &[(u16, &str)] = &[
     (1078, "REGISTER_MALFORMED"),
     (1079, "UNREGISTER_MALFORMED"),
     (1080, "ACK_MALFORMED"),
+    (1081, "RESULT_EXPIRED"),
 ];

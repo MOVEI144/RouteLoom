@@ -39,12 +39,21 @@ pub(super) struct UsbHost {
     pub(super) join_downs_sent: u64,
     pub(super) other_host_ops: u64,
     pub(super) data_frames: u64,
+    pub(super) gateway_payloads: Vec<Vec<u8>>,
+    pub(super) gateway_registering: bool,
+    pub(super) gateway_register_request: Option<u64>,
+    pub(super) gateway_register_ms: u64,
+    pub(super) gateway_token: Option<[u8; 16]>,
     pub(super) diagnostics: u64,
     /// Device Error frames as (code, reason_id): sealed ones once opened,
     /// pre-auth ones (session 0) straight off the wire.
     pub(super) errors: Vec<(u16, u16)>,
     /// DeliveryEvents as (state, reason_id).
     pub(super) deliveries: Vec<(u8, u16)>,
+    /// Sealed DeliveryEvents and Errors per USB request, in arrival
+    /// order: (request, delivery state or `None` for an Error, reason_id,
+    /// sim-time of arrival).
+    pub(super) outcomes: Vec<(u64, Option<u8>, u16, u64)>,
     /// Sim-time of the last inbound wire bytes — the silent-peer
     /// watchdog clock (mirrors `adapter_writer_loop`'s last_rx).
     pub(super) last_rx_ms: u64,
@@ -87,9 +96,15 @@ impl UsbHost {
             join_downs_sent: 0,
             other_host_ops: 0,
             data_frames: 0,
+            gateway_payloads: Vec::new(),
+            gateway_registering: false,
+            gateway_register_request: None,
+            gateway_register_ms: 0,
+            gateway_token: None,
             diagnostics: 0,
             errors: Vec::new(),
             deliveries: Vec::new(),
+            outcomes: Vec::new(),
             last_rx_ms: 0,
             last_begin_ms: 0,
             last_tx_ms: 0,
@@ -122,6 +137,10 @@ impl UsbHost {
             join_note: None,
         });
         request
+    }
+
+    pub(super) fn register_gateway(&mut self) {
+        self.gateway_registering = true;
     }
 
     pub(super) fn queue_join_down(
@@ -274,19 +293,70 @@ impl UsbHost {
                 self.session_losses += 1;
             }
             let Some(inner) = inbound.inner else { continue };
+            let request_at = |at: usize| {
+                inner
+                    .get(at..at + 8)
+                    .map(|b| u64::from_be_bytes(b.try_into().expect("8 bytes")))
+            };
             if kind == FrameKind::Error {
                 if let (Some(code), Some(reason)) = (reason_id(&inner, 0), reason_id(&inner, 10)) {
                     self.errors.push((code, reason));
+                    if let Some(request) = request_at(2) {
+                        self.outcomes.push((request, None, reason, now));
+                    }
                 }
             }
             if let (FrameKind::DeliveryEvent, Some(&state), Some(reason)) =
                 (kind, inner.get(20), reason_id(&inner, 21))
             {
                 self.deliveries.push((state, reason));
+                if let Some(request) = request_at(0) {
+                    self.outcomes.push((request, Some(state), reason, now));
+                }
             }
             match kind {
                 FrameKind::HostOps => {
-                    if self.watch == Some(request) {
+                    if self.gateway_register_request == Some(request) {
+                        self.gateway_register_request = None;
+                        let response =
+                            routeloom_protocol::host_ops::decode_host_register_response(&inner)
+                                .expect("gateway register response");
+                        assert_eq!(response.result, 0, "gateway registration");
+                        self.gateway_token = Some(response.token);
+                    } else if inner.get(1)
+                        == Some(&routeloom_protocol::host_ops::SUB_GATEWAY_INGRESS)
+                    {
+                        let ingress = routeloom_protocol::host_ops::decode_gateway_ingress(&inner)
+                            .expect("gateway ingress");
+                        let mut canonical = ingress.submit_prefix.to_vec();
+                        canonical.extend_from_slice(&ingress.payload);
+                        assert_eq!(crate::canonical::sha256(&canonical), ingress.request_digest);
+                        assert_eq!(ingress.submit_prefix[2], 1, "SDK_RAM scope");
+                        let token = self
+                            .gateway_token
+                            .expect("gateway registration before ingress");
+                        self.gateway_payloads.push(ingress.payload);
+                        let body = routeloom_protocol::host_ops::encode_gateway_ingress_ack(
+                            &routeloom_protocol::host_ops::GatewayIngressAck {
+                                token,
+                                ref_origin: ingress.ref_origin,
+                                ref_session: ingress.ref_session,
+                                ref_sequence: ingress.ref_sequence,
+                                request_digest: ingress.request_digest,
+                                outcome: 0,
+                            },
+                        );
+                        self.pending.push(PendingFrame {
+                            frame: Frame {
+                                kind: FrameKind::HostOps,
+                                flags: 0,
+                                session: 0,
+                                request,
+                                body,
+                            },
+                            join_note: None,
+                        });
+                    } else if self.watch == Some(request) {
                         self.watch = None;
                         self.watched = Some(inner.to_vec());
                     } else if crate::site::channel_plan::channel_plan_sub(&inner).is_some() {
@@ -311,6 +381,26 @@ impl UsbHost {
                 FrameKind::Diagnostic => self.diagnostics += 1,
                 _ => {}
             }
+        }
+        if self.gateway_registering
+            && self.session.phase == SessionPhase::Active
+            && self.gateway_register_request.is_none()
+            && (self.gateway_token.is_none()
+                || now.saturating_sub(self.gateway_register_ms) >= 10_000)
+        {
+            let network = self.hello_network.expect("gateway network");
+            let request = self.queue_data(
+                FrameKind::HostOps,
+                routeloom_protocol::host_ops::encode_host_register(
+                    &routeloom_protocol::host_ops::HostRegisterRequest {
+                        network,
+                        host_boot: 0x99,
+                        lease_ms: 15_000,
+                    },
+                ),
+            );
+            self.gateway_register_request = Some(request);
+            self.gateway_register_ms = now;
         }
         // Authority downs ride sealed HostOps frames; credit-short sends
         // stay queued for the next step (the device grants on consume).
@@ -353,23 +443,20 @@ impl UsbHost {
                 let _ = service.with(|a| a.channel_plan.note_sent(request, action, now));
             }
         }
-        let mut kept = Vec::new();
-        for mut pending in self.pending.drain(..) {
-            if self.session.protect(&mut pending.frame).is_ok() {
-                if let Some((adapter, key, terminal)) = pending.join_note {
-                    adapter.note_sent(pending.frame.request, key, terminal);
-                }
-                out.extend_from_slice(&encode_frame(&pending.frame).expect("pending encodes"));
-            } else {
-                kept.push(pending);
+        // `protect` consumes credit in wire order: the first refused frame
+        // and everything behind it keep their places for the next pump.
+        let mut sent = 0;
+        for pending in &mut self.pending {
+            if self.session.protect(&mut pending.frame).is_err() {
                 break;
             }
+            if let Some((adapter, key, terminal)) = pending.join_note.take() {
+                adapter.note_sent(pending.frame.request, key, terminal);
+            }
+            out.extend_from_slice(&encode_frame(&pending.frame).expect("pending encodes"));
+            sent += 1;
         }
-        // `protect` consumes credit in wire order: anything after the
-        // first refused frame keeps its place behind it.
-        let drained: Vec<PendingFrame> = self.pending.drain(..).collect();
-        kept.extend(drained);
-        self.pending = kept;
+        self.pending.drain(..sent);
         // An idle Active session gets a sealed KeepAlive on
         // KEEPALIVE_INTERVAL — the device's liveness accounting and the
         // lane's wire-quiet evidence stay honest (production

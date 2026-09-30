@@ -434,10 +434,11 @@ Status GatewayDelivery::enable_gateway(const GatewayRoleConfig& config) noexcept
   if (config.gateway_boot == 0) {
     return Status::error(StatusCode::InvalidArgument, "gateway boot must be nonzero");
   }
-  if ((config.capabilities & kGatewayCapHostReceive) != 0 &&
+  if (((config.capabilities & kGatewayCapHostReceive) != 0 ||
+       config.sdk_ram_host_reader) &&
       config.host_sink == nullptr) {
     return Status::error(StatusCode::InvalidArgument,
-                         "HOST_RECEIVE capability requires a host sink");
+                         "gateway host reader requires a host sink");
   }
   // A boot CHANGE re-issues every token from scratch; a same-boot re-enable
   // keeps issued records so stored evidence stays resendable (03 §3.4).
@@ -450,6 +451,7 @@ Status GatewayDelivery::enable_gateway(const GatewayRoleConfig& config) noexcept
   role_.gateway_boot = config.gateway_boot;
   role_.capabilities = config.capabilities;
   role_.host_sink = config.host_sink;
+  role_.sdk_ram_host_reader = config.sdk_ram_host_reader;
   return Status::success();
 }
 
@@ -529,6 +531,10 @@ void GatewayDelivery::handle_query(const NodeId peer,
                      ByteView{binding.principal_digest.data(), 32},
                      ByteView{query.expected_host_digest.data(), 32});
   }
+  const bool sdk_ram_reader_ready =
+      query.scope != endpoint::GatewayScope::GatewaySdkRam ||
+      !role_.sdk_ram_host_reader ||
+      (role_.host_sink != nullptr && role_.host_sink->host_ready(binding));
 
   // Replies address the logical ORIGIN, not the previous hop — over a
   // multi-hop path routing picks the next hop from the destination.
@@ -559,7 +565,8 @@ void GatewayDelivery::handle_query(const NodeId peer,
     }
   };
 
-  if (query.scope == endpoint::GatewayScope::HostReceiveRam && !host_bound) {
+  if ((query.scope == endpoint::GatewayScope::HostReceiveRam && !host_bound) ||
+      (query.scope == endpoint::GatewayScope::GatewaySdkRam && !sdk_ram_reader_ready)) {
     // Explicit refusal instead of an unverifiable descriptor (G02-style):
     // the Reject references the Query's own MessageKey for correlation.
     ++stats_.submits_host_unavailable;
@@ -717,6 +724,14 @@ void GatewayDelivery::handle_submit(const NodeId peer,
     ++stats_.submits_stale_token;
     reject_new(endpoint::ServiceReason::TokenStale);
     return;
+  }
+  if (submit.scope == endpoint::GatewayScope::GatewaySdkRam && role_.sdk_ram_host_reader) {
+    HostBinding reader{};
+    if (role_.host_sink == nullptr || !role_.host_sink->host_ready(reader)) {
+      ++stats_.submits_host_unavailable;
+      reject_new(endpoint::ServiceReason::HostUnavailable);
+      return;
+    }
   }
   HostBinding binding{};
   if (submit.scope == endpoint::GatewayScope::HostReceiveRam) {
@@ -1284,6 +1299,42 @@ bool GatewayDelivery::mailbox_take(
   entry->mailbox_held = false;
   release_pending(entry);   // drained — the dedup record still holds the
   return true;              // outcome evidence for late duplicates
+}
+
+bool GatewayDelivery::mailbox_peek(
+    MessageKey& key, RequestDigest& digest,
+    endpoint::EncodedServicePayload& submit) const noexcept {
+  const PendingRecord* entry = pending_.find(
+      [](const PendingRecord& pending) { return pending.mailbox_held; });
+  if (entry == nullptr) return false;
+  const DedupRecord* record = receipts_.find(
+      [&](const DedupRecord& candidate) { return candidate.key == entry->key; });
+  if (record == nullptr) return false;
+  endpoint::ServiceSubmit value{};
+  value.scope = endpoint::GatewayScope::GatewaySdkRam;
+  value.token = record->token;
+  value.gateway_boot = record->gateway_boot;
+  value.payload_size = static_cast<std::uint16_t>(entry->payload_size);
+  if (entry->payload_size > 0) {
+    std::memcpy(value.payload.data(), entry->payload.data(), entry->payload_size);
+  }
+  if (!endpoint::service_submit_encode(value, submit)) return false;
+  key = entry->key;
+  digest = record->request_digest;
+  return true;
+}
+
+bool GatewayDelivery::mailbox_ack(const MessageKey& key, const bool stored) noexcept {
+  PendingRecord* entry = pending_.find(
+      [&](const PendingRecord& pending) {
+        return pending.mailbox_held && pending.key == key;
+      });
+  if (entry == nullptr) return false;
+  if (stored) {
+    entry->mailbox_held = false;
+    release_pending(entry);
+  }
+  return true;
 }
 
 }  // namespace routeloom

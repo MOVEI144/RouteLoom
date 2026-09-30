@@ -1596,7 +1596,13 @@ int main(int argc, char** argv) {
         gw_tx.sent = false;
         gw_tx.send_state = 0;
         gw_tx.reason = 0;
-        if (gw_tx.endpoint_valid && gw_tx.gateway == gateway_id) break;
+        // Reuse the endpoint while its lease still covers a send's lifetime.
+        GatewayEndpointInfo info{};
+        if (gw_tx.endpoint_valid && gw_tx.gateway == gateway_id &&
+            delivery->endpoint_info(gw_tx.endpoint, info) && info.state == EndpointState::Ready &&
+            info.lease_deadline_ms > now + 5000) {
+          break;
+        }
         if (gw_tx.endpoint_valid) delivery->endpoint_release(gw_tx.endpoint);
         gw_tx.gateway = gateway_id;
         const Status resolved =

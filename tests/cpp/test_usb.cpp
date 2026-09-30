@@ -536,157 +536,74 @@ void test_session_material_clears_on_destruction() {
 }
 
 void test_idempotency() {
-  IdempotencyTable table;
-  const std::array<std::uint8_t, 4> principal{{'h', 'o', 's', 't'}};
-  const std::array<std::uint8_t, 2> a{{1, 2}}, b{{1, 3}};
+  const SessionTag hash{};
+  constexpr std::uint64_t s1 = 0x51, s2 = 0x52;
   IdempotencyRecord* record = nullptr;
-  CHECK(table.submit(ByteView{principal.data(), principal.size()}, 7, 16, 42,
-                     payload_hash(ByteView{a.data(), a.size()}), 1000,
-                     record) == IdempotencyResult::Accepted);
-  CHECK(record != nullptr);
-  CHECK(table.submit(ByteView{principal.data(), principal.size()}, 7, 16, 42,
-                     payload_hash(ByteView{a.data(), a.size()}), 2000,
-                     record) == IdempotencyResult::Existing);
-  CHECK(table.submit(ByteView{principal.data(), principal.size()}, 7, 16, 42,
-                     payload_hash(ByteView{b.data(), b.size()}), 2000,
-                     record) == IdempotencyResult::Conflict);
-  // Different scope members are different identities.
-  CHECK(table.submit(ByteView{principal.data(), principal.size()}, 8, 16, 42,
-                     payload_hash(ByteView{a.data(), a.size()}), 2000,
-                     record) == IdempotencyResult::Accepted);
-
-  // Capacity behaviour on a fresh table: a full table of UNEXPIRED records
-  // rejects new operations (spec backpressure) — it never evicts a live
-  // result, which would silently re-execute a resubmitted key.
-  IdempotencyTable full;
-  const MonotonicMs t0 = 5000;
-  for (std::uint64_t key = 0; key < IdempotencyTable::kCapacity; ++key) {
-    const std::array<std::uint8_t, 1> tag{{static_cast<std::uint8_t>(key)}};
-    CHECK(full.submit(ByteView{principal.data(), principal.size()}, 7, 16,
-                      key, payload_hash(ByteView{tag.data(), tag.size()}), t0,
-                      record) == IdempotencyResult::Accepted);
-  }
-  const std::array<std::uint8_t, 1> tag0{{0}}, tag1{{1}}, tag16{{16}};
-  CHECK(full.submit(ByteView{principal.data(), principal.size()}, 7, 16, 16,
-                    payload_hash(ByteView{tag16.data(), tag16.size()}), t0 + 1,
-                    record) == IdempotencyResult::NoCapacity);
-  // Replay still works when the table is full, and refreshes retention.
-  CHECK(full.submit(ByteView{principal.data(), principal.size()}, 7, 16, 0,
-                    payload_hash(ByteView{tag0.data(), tag0.size()}), t0 + 1,
-                    record) == IdempotencyResult::Existing);
-  // Past the retention window expired entries become evictable — the table
-  // un-wedges without breaking at-most-once inside the window.
-  const MonotonicMs t1 = t0 + IdempotencyTable::kRetentionMs + 1;
-  CHECK(full.submit(ByteView{principal.data(), principal.size()}, 7, 16, 16,
-                    payload_hash(ByteView{tag16.data(), tag16.size()}), t1,
-                    record) == IdempotencyResult::Accepted);
-  // The evicted key is forgotten: resubmission is a fresh operation rather
-  // than a replay (per-principal epoch / IDEMPOTENCY_WINDOW_EXPIRED remains
-  // host-side future work per docs/spec/host.md).
-  CHECK(full.submit(ByteView{principal.data(), principal.size()}, 7, 16, 1,
-                    payload_hash(ByteView{tag1.data(), tag1.size()}), t1,
-                    record) == IdempotencyResult::Accepted);
-
-  // Settled eviction (issue #167): a full table of unexpired records whose
-  // deliveries reached a terminal state evicts the oldest settled record
-  // once its replay hold passed; in-flight records are never evicted.
-  IdempotencyTable settled;
-  const MonotonicMs s0 = 9000;
-  std::array<IdempotencyRecord*, IdempotencyTable::kCapacity> rows{};
-  for (std::uint64_t key = 0; key < IdempotencyTable::kCapacity; ++key) {
-    const std::array<std::uint8_t, 1> tag{{static_cast<std::uint8_t>(key)}};
-    CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16,
-                         key, payload_hash(ByteView{tag.data(), tag.size()}),
-                         s0 + static_cast<MonotonicMs>(key), rows[key]) ==
-          IdempotencyResult::Accepted);
-    rows[key]->accepted = true;
-    rows[key]->message_session = 77;
-    rows[key]->message_sequence = 100 + key;
-  }
-  const std::array<std::uint8_t, 1> tag_new{{99}};
-  // Nothing settled: full.
-  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 99,
-                       payload_hash(ByteView{tag_new.data(), tag_new.size()}),
-                       s0 + IdempotencyTable::kSettledHoldMs + 100,
-                       record) == IdempotencyResult::NoCapacity);
-  // Two deliveries end (keys 3 and 1); an unknown id settles nothing.
-  settled.settle(77, 103);
-  settled.settle(77, 101);
-  settled.settle(78, 101);
-  settled.settle(77, 999);
-  CHECK(rows[3]->settled && rows[1]->settled && !rows[0]->settled);
-  // Inside the replay hold the settled records still refuse eviction.
-  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 99,
-                       payload_hash(ByteView{tag_new.data(), tag_new.size()}),
-                       s0 + 1 + IdempotencyTable::kSettledHoldMs - 1,
-                       record) == IdempotencyResult::NoCapacity);
-  // Past the hold the OLDEST settled record (key 1) goes first, then key 3;
-  // the fourteen unsettled records stay and the table refuses again.
-  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 99,
-                       payload_hash(ByteView{tag_new.data(), tag_new.size()}),
-                       s0 + 3 + IdempotencyTable::kSettledHoldMs,
-                       record) == IdempotencyResult::Accepted);
-  CHECK(record == rows[1] && !record->settled && record->key == 99);
-  const std::array<std::uint8_t, 1> tag_1{{1}};
-  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 1,
-                       payload_hash(ByteView{tag_1.data(), tag_1.size()}),
-                       s0 + 3 + IdempotencyTable::kSettledHoldMs,
-                       record) == IdempotencyResult::WindowExpired);
-  const std::array<std::uint8_t, 1> tag_98{{98}};
-  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 98,
-                       payload_hash(ByteView{tag_98.data(), tag_98.size()}),
-                       s0 + 3 + IdempotencyTable::kSettledHoldMs,
-                       record) == IdempotencyResult::Accepted);
-  CHECK(record == rows[3]);
-  const std::array<std::uint8_t, 1> tag_97{{97}};
-  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 97,
-                       payload_hash(ByteView{tag_97.data(), tag_97.size()}),
-                       s0 + 3 + IdempotencyTable::kSettledHoldMs,
-                       record) == IdempotencyResult::NoCapacity);
-  // A refused admission is settled by the bridge as well; the table treats
-  // the flag uniformly (the record is evictable after the hold).
-  rows[5]->accepted = false;
-  rows[5]->settled = true;
-  CHECK(settled.submit(ByteView{principal.data(), principal.size()}, 7, 16, 97,
-                       payload_hash(ByteView{tag_97.data(), tag_97.size()}),
-                       s0 + 5 + IdempotencyTable::kSettledHoldMs,
-                       record) == IdempotencyResult::Accepted);
-  CHECK(record == rows[5]);
-
-  // The finite tombstone set fails closed at capacity and becomes reusable
-  // only after its oldest identity passes the retention window.
-  IdempotencyTable bounded;
-  constexpr MonotonicMs base = 100000;
-  const auto tag_for = [](const std::uint64_t key) {
-    return std::array<std::uint8_t, 2>{{static_cast<std::uint8_t>(key >> 8),
-                                        static_cast<std::uint8_t>(key)}};
+  const auto submit = [&](IdempotencyTable& table, std::uint64_t key,
+                          std::uint64_t session, MonotonicMs now) {
+    return table.submit(key, hash, session, now, record);
   };
-  for (std::uint64_t key = 0;
-       key < IdempotencyTable::kCapacity + IdempotencyTable::kTombstoneCapacity; ++key) {
-    const auto tag = tag_for(key);
-    CHECK(bounded.submit(ByteView{principal.data(), principal.size()}, 7, 16, key,
-                         payload_hash(ByteView{tag.data(), tag.size()}),
-                         base + key * 6000, record) == IdempotencyResult::Accepted);
-    CHECK(record != nullptr);
-    record->settled = true;
+  IdempotencyTable full;
+  std::array<IdempotencyRecord*, IdempotencyTable::kCapacity> rows{};
+  for (std::uint64_t key = 0; key < rows.size(); ++key) {
+    CHECK(submit(full, 100 + key, s1, 5000 + key) == IdempotencyResult::Accepted);
+    rows[key] = record;
+    record->accepted = true;
+    record->message_session = 77;
+    record->message_sequence = key;
   }
-  const std::uint64_t exhausted_key =
-      IdempotencyTable::kCapacity + IdempotencyTable::kTombstoneCapacity;
-  const auto exhausted_tag = tag_for(exhausted_key);
-  const MonotonicMs exhausted_at = base + exhausted_key * 6000;
-  CHECK(bounded.submit(ByteView{principal.data(), principal.size()}, 7, 16,
-                       exhausted_key,
-                       payload_hash(ByteView{exhausted_tag.data(), exhausted_tag.size()}),
-                       exhausted_at, record) == IdempotencyResult::NoCapacity);
-  CHECK(record == nullptr);
-  CHECK(bounded.submit(ByteView{principal.data(), principal.size()}, 7, 16, 0,
-                       payload_hash(ByteView{tag0.data(), tag0.size()}),
-                       exhausted_at, record) == IdempotencyResult::WindowExpired);
-  CHECK(bounded.submit(ByteView{principal.data(), principal.size()}, 7, 16,
-                       exhausted_key,
-                       payload_hash(ByteView{exhausted_tag.data(), exhausted_tag.size()}),
-                       base + IdempotencyTable::kRetentionMs + 1,
-                       record) == IdempotencyResult::Accepted);
+  CHECK(submit(full, 200, s1, 6000) == IdempotencyResult::NoCapacity);
+  CHECK(submit(full, 200, s1, 24ULL * 3600 * 1000 + 6000) ==
+        IdempotencyResult::NoCapacity);
+  CHECK(full.find_message(77, 3) == rows[3] && full.find_message(78, 3) == nullptr);
+  rows[3]->settled = true;
+  rows[1]->settled = true;
+  CHECK(full.next_unreported(s1) == rows[1] && full.next_unreported(s2) == nullptr);
+  CHECK(submit(full, 200, s1, 6001) == IdempotencyResult::NoCapacity);
+  rows[3]->reported = true;
+  rows[1]->reported = true;
+  // Replaying the oldest outcome must not make a newer terminal the victim.
+  CHECK(submit(full, 101, s1, 6002) == IdempotencyResult::Existing);
+  CHECK(submit(full, 200, s1, 6003) == IdempotencyResult::Accepted);
+  CHECK(record == rows[1]);
+  CHECK(submit(full, 101, s1, 6004) == IdempotencyResult::ResultExpired);
+  CHECK(submit(full, 99, s1, 6004) == IdempotencyResult::ResultExpired);
+  CHECK(submit(full, 100, s1, 6004) == IdempotencyResult::Existing);
+  SessionTag other{};
+  other[0] = 1;
+  CHECK(full.submit(100, other, s1, 6004, record) ==
+        IdempotencyResult::Conflict);
+
+  // Retry reservations use the same bound and never steal an owed request.
+  CHECK(submit(full, 100, s1, 6004) == IdempotencyResult::Existing);
+  record->request = 40;
+  CHECK(full.repeat(record, 41));
+  CHECK(record->request == 41 && rows[0]->request == 40);
+  CHECK(!full.repeat(record, 42));
+  CHECK(record->request == 41 && full.size() == IdempotencyTable::kCapacity);
+  record->settled = true;
+  record->reported = true;
+
+  // A new HostLink incarnation has an independent floor and key space.
+  CHECK(submit(full, 101, s2, 6005) == IdempotencyResult::Accepted);
+  CHECK(record->usb_session == s2);
+  CHECK(submit(full, 300, s2, 6006) == IdempotencyResult::NoCapacity);
+
+  // Sustained traffic reclaims terminals without losing its floor. Each
+  // new incarnation may start its monotonic keys at a fresh random base.
+  IdempotencyTable stream;
+  MonotonicMs now = 10000;
+  for (std::uint64_t session = 1; session <= 6; ++session) {
+    for (std::uint64_t key = 1000; key < 2100; ++key) {
+      CHECK(submit(stream, key, session, ++now) == IdempotencyResult::Accepted);
+      record->settled = true;
+      record->reported = true;
+    }
+    CHECK(stream.size() == IdempotencyTable::kCapacity);
+    CHECK(submit(stream, 999, session, ++now) == IdempotencyResult::ResultExpired);
+    CHECK(submit(stream, 1000, session, ++now) == IdempotencyResult::ResultExpired);
+    CHECK(submit(stream, 2099, session, ++now) == IdempotencyResult::Existing);
+  }
 }
 
 // -------------------------------------------------------- loopback bridge
@@ -1275,6 +1192,48 @@ void test_bridge_idempotent_send() {
     }
   }
   CHECK(conflict);
+}
+
+// Every legal frame in one RX credit window receives its explicit refusal,
+// even when all eight replies contend for the four CONTROL slots.
+void test_bridge_expired_burst() {
+  World world;
+  HostDriver host;
+  MonotonicMs now = 0;
+  CHECK(host_handshake(world, host, now, 0x3388, 40) != 0);
+  world.bridge.set_mesh(nullptr);
+  std::array<std::uint8_t, 17> body{};
+  write_u64(body.data() + 8, 2);
+  for (std::uint64_t key = 100; key < 117; ++key) {
+    write_u64(body.data(), key);
+    world.feed(host.sealed(FrameKind::DataToMesh, key,
+                          ByteView{body.data(), body.size()}), now);
+    now += 1000;
+    world.drain(now);
+  }
+  world.device_sink.frames.clear();
+  write_u64(body.data(), 100);
+  for (std::uint64_t request = 200; request < 208; ++request) {
+    world.feed(host.sealed(FrameKind::DataToMesh, request,
+                          ByteView{body.data(), body.size()}), now);
+  }
+  for (int i = 0; i < 20; ++i) {
+    now += 100;
+    world.drain(now);
+  }
+  std::array<unsigned, 8> replies{};
+  for (const auto& frame : world.device_sink.frames) {
+    if (frame.frame.kind != FrameKind::Error) continue;
+    std::uint64_t counter = 0;
+    ByteView inner{};
+    CHECK_OK(open_body(host.proof.key_d2h, kDirDeviceToHost, frame.frame, counter, inner));
+    if (inner.size < 13) continue;
+    const auto request = read_u64(inner.data + 2);
+    if (request < 200 || request >= 208) continue;
+    CHECK(read_u16(inner.data + 10) == ROUTELOOM_REASON_RESULT_EXPIRED);
+    ++replies[request - 200];
+  }
+  for (const auto replies_for_request : replies) CHECK(replies_for_request == 1);
 }
 
 void test_bridge_partial_write() {
@@ -3385,6 +3344,7 @@ int main() {
   test_bridge_partial_grant_keeps_stall_ladder();
   test_bridge_set_device_nonce();
   test_bridge_idempotent_send();
+  test_bridge_expired_burst();
   test_bridge_partial_write();
   test_bridge_diagnostic_loss_accounting();
   test_bridge_diagnostics();

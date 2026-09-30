@@ -119,14 +119,10 @@ Status open_body(const SessionKey& key, std::uint8_t direction, const UsbFrame& 
 // Idempotency payload identity: SHA-256 of the canonical request, first 16 B.
 SessionTag payload_hash(ByteView canonical_request) noexcept;
 
-// Fixed-capacity idempotency record set scoped by
-// (principal, network, operation_class, key). Same identity + same payload
-// hash returns the stored result; same identity + different hash conflicts.
+// Legacy DataToMesh records scoped by authenticated HostLink incarnation
+// and key. The incarnation already binds the principal and network.
+// Same identity and payload hash replays; different hash conflicts.
 struct IdempotencyRecord {
-  std::array<std::uint8_t, kMaxPrincipalSize> principal{};
-  std::uint8_t principal_len{0};
-  NetworkId network{0};
-  std::uint8_t operation_class{0};
   std::uint64_t key{0};
   SessionTag hash{};
   // Stored outcome to replay on identical resubmission.
@@ -134,56 +130,59 @@ struct IdempotencyRecord {
   std::uint16_t error_code{0};
   std::uint32_t message_session{0};
   std::uint64_t message_sequence{0};
-  // Last identity touch; drives retention expiry and the settled hold.
-  MonotonicMs last_use_ms{0};
-  // The stored result is final and already reported to the host: admission
-  // refused, or the mesh delivery reached a terminal state. Settled records
-  // are the only unexpired ones a full table may evict.
+  // Terminal time; orders reclamation without extending it on replay.
+  MonotonicMs settled_ms{0};
+  // HostLink session and USB request the terminal outcome is owed to (the
+  // submission of this identity; request ids are session-scoped).
+  std::uint64_t usb_session{0};
+  std::uint64_t request{0};
+  // Terminal outcome: admission refused (`error_code`), or the mesh
+  // delivery reached `final_state`; the reason is an id plus the static
+  // text it came from (nullptr for id-only reasons).
   bool settled{false};
+  DeliveryState final_state{DeliveryState::Empty};
+  std::uint16_t reason_id{0};
+  const char* reason_detail{nullptr};
+  // The terminal outcome reached the TX queue of `usb_session`. A settled
+  // record is reclaimable once reported or once its session is gone.
+  bool reported{false};
+  bool replay{false};
 };
 
 enum class IdempotencyResult : std::uint8_t {
-  Accepted, Existing, Conflict, WindowExpired, NoCapacity
+  Accepted, Existing, Conflict, ResultExpired, NoCapacity
 };
 
 class IdempotencyTable {
  public:
   static constexpr std::size_t kCapacity = 16;
-  // A full table may evict settled records only after leaving an identity
-  // tombstone. A retry of an evicted identity fails closed instead of
-  // executing the mesh operation again. In-flight records stay replayable;
-  // a full tombstone set returns NoCapacity until its 24h retention expires.
-  // Longer send streams require a durable idempotency design above this
-  // bounded gateway cache (docs/spec/host.md §8).
-  static constexpr MonotonicMs kRetentionMs = 24ULL * 3600ULL * 1000ULL;
-  // A settled record stays replayable this long after its last use before
-  // a full table may evict it: a host retry of a just-finished request
-  // still replays instead of re-executing.
-  static constexpr MonotonicMs kSettledHoldMs = 5000;
-  static constexpr std::size_t kTombstoneCapacity = 96;
+  // Only terminal, reported records are reclaimed. Keys are monotonic in
+  // the authenticated HostLink session: absent keys at/below its floor
+  // never execute. A new incarnation starts a new key space; old sealed
+  // frames are rejected by UsbBridge before they reach this table.
+  IdempotencyResult submit(std::uint64_t key,
+                           const SessionTag& hash, std::uint64_t usb_session,
+                           MonotonicMs now_ms, IdempotencyRecord*& record) noexcept;
 
-  // Finds or creates the record for this identity. On Existing/Conflict,
-  // `record` points at the stored entry. On Accepted the caller must fill the
-  // result fields; records persist across sessions (host identity scope).
-  IdempotencyResult submit(ByteView principal, NetworkId network,
-                           std::uint8_t operation_class, std::uint64_t key,
-                           const SessionTag& hash, MonotonicMs now_ms,
-                           IdempotencyRecord*& record) noexcept;
-
+  // Each outstanding USB request reserves one of the same 16 records.
+  // Refuses before changing the original request if all slots are owed.
+  bool repeat(IdempotencyRecord*& record, std::uint64_t request) noexcept;
   std::size_t size() const noexcept;
-  // Marks the accepted record carrying this mesh message id as settled
-  // (its delivery reached a terminal state). Unknown ids are ignored.
-  void settle(std::uint32_t message_session, std::uint64_t message_sequence) noexcept;
+  // The accepted record carrying this mesh message id, or nullptr.
+  IdempotencyRecord* find_message(std::uint32_t message_session,
+                                  std::uint64_t message_sequence,
+                                  bool unsettled_only = false) noexcept;
+  // Settled records whose outcome is still owed to `usb_session`, oldest
+  // first through `record`; nullptr when none remain.
+  IdempotencyRecord* next_unreported(std::uint64_t usb_session) noexcept;
 
  private:
-  struct Tombstone {
-    std::uint64_t identity_hash{0};
-    MonotonicMs last_use_ms{0};
-  };
+  std::size_t reclaim_slot(std::uint64_t usb_session) noexcept;
   std::array<IdempotencyRecord, kCapacity> records_{};
   std::array<bool, kCapacity> used_{};
-  std::array<Tombstone, kTombstoneCapacity> tombstones_{};
-  std::size_t tombstone_count_{0};
+  std::uint64_t floor_session_{0};
+  std::uint64_t floor_{0};
+  bool has_floor_{false};
 };
 
 }  // namespace routeloom::usb
