@@ -78,9 +78,10 @@
 //                              (Success) `delay_ms` after it arrived
 //   G <on u8>                  from inside Device callbacks, try send and
 //                              leave and count the Busy answers (F05)
-//   X <holdoff_s u32le><expected u32le>
+//   X <holdoff_s u32le><expected u32le>[<isolation_notice_s u32le>]
 //                              Device::set_join_policy with that removal
-//                              holdoff; reply x <status u8><revision u32>
+//                              holdoff (and isolation notice); reply
+//                              x <status u8><revision u32>
 //
 // C++ -> Rust, emitted after each T in this order:
 //
@@ -1722,7 +1723,7 @@ int main(int argc, char** argv) {
         events.probe = payload[1] != 0;
         break;
       case 'X': {
-        if (length != 9) fatal("bad X");
+        if (length != 9 && length != 13) fatal("bad X");
         const auto u32_at = [&](std::size_t at) {
           return static_cast<std::uint32_t>(payload[at] | (payload[at + 1] << 8) |
                                             (payload[at + 2] << 16) |
@@ -1730,6 +1731,7 @@ int main(int argc, char** argv) {
         };
         JoinPolicy policy{};
         policy.removal_holdoff_s = u32_at(1);
+        if (length == 13) policy.isolation_notice_s = u32_at(9);
         std::uint32_t revision = 0;
         status = device.set_join_policy(policy, u32_at(5), revision);
         Bytes reply{'x', static_cast<std::uint8_t>(status.code)};

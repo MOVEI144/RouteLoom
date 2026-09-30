@@ -877,7 +877,12 @@ void Device::update_connectivity(const MonotonicMs now_ms) noexcept {
   if (runtime_ == nullptr) return;
   Connectivity state = Connectivity::Unknown;
   std::uint16_t reason = ROUTELOOM_REASON_NOT_MEMBER;
-  if (stage_ != MembershipStage::Member) {
+  // A member re-verifying its retained site is still a member here.
+  const bool member = stage_ == MembershipStage::Member ||
+                      ((stage_ == MembershipStage::Joining ||
+                        stage_ == MembershipStage::PendingAuthority) &&
+                       stores_->site().has_site());
+  if (!member) {
     contact_valid_ = false;
   } else if (role_ == profile::Role::Gateway) {
     state = Connectivity::Reachable;

@@ -96,6 +96,11 @@ fn mesh_m04_long_isolation_recovers_without_reset() {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     converge_gated(&mut world, 1, "m04");
+    // JoinPolicy: a 5 min isolation is reported once (and never leaves).
+    assert_eq!(
+        world.peers[1].set_join_policy_with(600, 0, Some(300)),
+        (0, 1)
+    );
     deliver_each(&mut world, 1, 0, 1, b"m04-before");
     assert_eq!(world.snaps[1].connectivity, CONNECTIVITY_REACHABLE);
     let events = world.snaps[1].connectivity_events;
@@ -123,6 +128,12 @@ fn mesh_m04_long_isolation_recovers_without_reset() {
         "Degraded then Isolated, once each"
     );
     run_for(&mut world, 15 * 60_000 - 130_000);
+    assert_eq!(
+        world.snaps[1].connectivity_events,
+        events + 3,
+        "one isolation notice after 5 min Isolated"
+    );
+    assert!(world.snaps[1].has_site, "the notice never leaves");
     assert_eq!(
         world.snaps[1].mode, MODE_ZERO_TOUCH,
         "the heal lands inside A's retained-site refresh"

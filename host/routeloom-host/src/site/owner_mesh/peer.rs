@@ -1182,9 +1182,22 @@ impl MeshPeer {
     /// Device::set_join_policy with `holdoff_s` as the removal holdoff:
     /// the status code and the stored revision.
     pub(super) fn set_join_policy(&mut self, holdoff_s: u32, expected: u32) -> (u8, u32) {
+        self.set_join_policy_with(holdoff_s, expected, None)
+    }
+
+    /// As `set_join_policy`, with an isolation notice (seconds).
+    pub(super) fn set_join_policy_with(
+        &mut self,
+        holdoff_s: u32,
+        expected: u32,
+        isolation_notice_s: Option<u32>,
+    ) -> (u8, u32) {
         let mut command = vec![b'X'];
         command.extend_from_slice(&holdoff_s.to_le_bytes());
         command.extend_from_slice(&expected.to_le_bytes());
+        if let Some(notice) = isolation_notice_s {
+            command.extend_from_slice(&notice.to_le_bytes());
+        }
         self.send(&command);
         let reply = self.recv().expect("policy reply");
         assert_eq!(reply.len(), 6);
