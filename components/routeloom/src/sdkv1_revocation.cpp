@@ -1530,7 +1530,8 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
         emit_action(LifecycleActionTag::AdoptNetwork, LifecycleActionReason::None);
         return Status::success();
       }
-      if (record.mode == LifecycleMode::UnassignedReady) {
+      if (record.mode == LifecycleMode::UnassignedReady ||
+          record.mode == LifecycleMode::LeftReady) {
         const SiteStoreHealth health = site_.health();
         if (!identity_.has_identity() || identity_.quarantined() || identity_.uncertain() ||
             identity_.identity().node_id != config_.self || record.self != config_.self ||
@@ -1871,8 +1872,11 @@ bool MembershipLifecycle::never_assigned() const noexcept {
 }
 
 bool MembershipLifecycle::reassigned_after_removal() const noexcept {
-  if (journal_ == nullptr || !journal_->has_record() ||
-      journal_->record().mode != LifecycleMode::UnassignedReady || !site_.has_site()) return false;
+  if (journal_ == nullptr || !journal_->has_record() || !site_.has_site() ||
+      (journal_->record().mode != LifecycleMode::UnassignedReady &&
+       journal_->record().mode != LifecycleMode::LeftReady)) {
+    return false;
+  }
   const SiteStoreHealth health = site_.health();
   if (!health.initialized || health.quarantined || health.uncertain ||
       health.unsupported_mask != 0 || health.read_error_mask != 0 ||
@@ -1880,6 +1884,8 @@ bool MembershipLifecycle::reassigned_after_removal() const noexcept {
   const LifecycleRecord& previous = journal_->record();
   const SiteRecord& current = site_.site();
   if (previous.self != config_.self) return false;
+  // A local leave sets no watermark: any site, the left one included.
+  if (previous.mode == LifecycleMode::LeftReady) return true;
   if (current.site_id != previous.site_id) return true;
   return current.assignment_generation > previous.generation &&
          static_cast<std::uint32_t>(current.network) ==
@@ -2006,8 +2012,8 @@ Status MembershipLifecycle::on_local_leave(MonotonicMs now_ms) noexcept {
     return Status::error(StatusCode::InvalidState, "LEAVE_NOT_MEMBER");
   }
   // A cutover or an RRS1 apply finishes first; the caller retries.
-  if (phase_ != LifecyclePhase::Active && phase_ != LifecyclePhase::SelfRevoked &&
-      phase_ != LifecyclePhase::Recovering) {
+  if (phase_ != LifecyclePhase::Active && phase_ != LifecyclePhase::BootGate &&
+      phase_ != LifecyclePhase::SelfRevoked && phase_ != LifecyclePhase::Recovering) {
     return Status::error(StatusCode::Busy, "LEAVE_BUSY");
   }
   if (!adopted_.site_ok || !site_.has_site()) {
@@ -2087,10 +2093,9 @@ Status MembershipLifecycle::removal_poll(MonotonicMs now_ms) noexcept {
           !health.uncertain && health.unsupported_mask == 0 &&
           health.read_error_mask == 0 && !health.active_load_failed &&
           revocations_.clean_empty()) {
-        // A local leave holds nothing off and keeps no watermark: the
-        // journal goes back to factory-empty and the device restarts
-        // unassigned now.
-        result = leave ? journal_->clear() : journal_->holdoff();
+        // A local leave holds nothing off and keeps no watermark
+        // (LeftReady): the device restarts unassigned now.
+        result = leave ? journal_->left_ready() : journal_->holdoff();
       } else if (result) {
         result = Status::error(StatusCode::IntegrityError, "removal postcondition");
       }

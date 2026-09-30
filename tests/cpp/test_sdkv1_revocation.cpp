@@ -3279,6 +3279,11 @@ void test_local_leave() {
   encoded.bytes[11] = 1;  // a schema-1 LocalLeave is not a record
   CHECK(!lifecycle_record_decode(encoded.view(), decoded));
   CHECK(!f.dispatch(LifecycleInput::LocalLeave(), 101));  // already leaving
+  {
+    LifecycleStore cold{f.journal_storage};  // the intent is on flash
+    CHECK_OK(cold.initialize());
+    CHECK(cold.has_record() && cold.record().mode == LifecycleMode::LocalLeave);
+  }
 
   CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 200));  // power cut: resumes
   CHECK(f.snap().phase == LifecyclePhase::Removing);
@@ -3288,11 +3293,19 @@ void test_local_leave() {
   CHECK(f.snap().phase == LifecyclePhase::UnassignedReady);
   CHECK(f.runtime.runtime_erased && f.runtime.trust_erased);
   CHECK(!f.site.has_site() && !f.revocations.has_set() && f.identity.has_identity());
-  CHECK(!f.journal.has_record());
+  CHECK(f.journal.record().mode == LifecycleMode::LeftReady);
   LifecycleAction action{};
   CHECK_OK(f.lifecycle.take_action(action));
   CHECK(action.tag == LifecycleActionTag::RestartUnassigned &&
         action.reason == LifecycleActionReason::LocalLeave);
+  // After the restart it may rejoin the site it left at the same
+  // generation: no watermark, no holdoff.
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 300));
+  CHECK(f.snap().phase == LifecyclePhase::UnassignedReady);
+  CHECK_OK(f.site.commit(site_for(kNode, 2)));
+  CHECK_OK(f.dispatch(LifecycleInput::MemberReady(f.site.commit_seq(), 0), 301));
+  CHECK(f.snap().phase != LifecyclePhase::StorageBlocked &&
+        f.snap().phase != LifecyclePhase::UnassignedReady);
 
   for (std::size_t byte = 0; byte <= kLifecycleSlotBytes; byte += 97) {
     FaultyRecordStorage storage{kLifecycleSlotBytes};
