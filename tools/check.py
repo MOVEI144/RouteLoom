@@ -393,7 +393,7 @@ def firmware_steps(cell: dict, project_dir: str | Path | None = None,
     if cell["overlay"]:
         steps.append(Step(["append", "sdkconfig", *cell["overlay"]], cwd=app_dir))
     steps += [
-        Step(["assert-sdkconfig", cell["id"]], cwd=app_dir),
+        Step(["assert-security-mode", cell["id"]], cwd=app_dir),
         Step(["idf.py", "build"], cwd=app_dir, env=env),
         Step(["assert-sdkconfig", cell["id"]], cwd=app_dir),
         Step(["idf.py", "size"], cwd=app_dir, env=env, stdout="build/size-report.txt"),
@@ -450,16 +450,20 @@ def sdkconfig_errors(data: dict, cell: dict, text: str) -> list[str]:
         if symbol in named:
             continue
         errors += [f"unexpected `{symbol}={v}`" for v in values if f"{symbol}={v}" in lines]
-    supported_modes = {"CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y",
-                       "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"}
-    errors += [f"unsupported security mode `{line}`" for line in lines
-               if line.startswith("CONFIG_ROUTELOOM_SECURITY_MODE_")
-               and line.endswith("=y") and line not in supported_modes]
+    errors += security_mode_errors(text)
     if (cell.get("target") == "esp32c3" and "CONFIG_ROUTELOOM_CONFIG=y" in lines
             and ("CONFIG_ROUTELOOM_RESOURCE_PROFILE_ENDPOINT=y" not in lines
                  or "CONFIG_ROUTELOOM_ROLE_ENDPOINT=y" not in lines)):
         errors.append("ESP32-C3 remote config needs endpoint resource profile and role")
     return errors
+
+
+def security_mode_errors(text: str) -> list[str]:
+    supported = {"CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y",
+                 "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"}
+    return [f"unsupported security mode `{line}`" for line in set(text.splitlines())
+            if line.startswith("CONFIG_ROUTELOOM_SECURITY_MODE_")
+            and line.endswith("=y") and line not in supported]
 
 
 def elf_symbols(path: Path) -> list[str]:
@@ -566,6 +570,12 @@ def run(steps: list[Step], dry_run: bool, data: dict | None = None) -> int:
         if step.argv[0] == "append":
             with (cwd / step.argv[1]).open("a", encoding="utf-8") as out:
                 out.write("".join(line + "\n" for line in step.argv[2:]))
+            continue
+        if step.argv[0] == "assert-security-mode":
+            errors = security_mode_errors((cwd / "sdkconfig").read_text(encoding="utf-8"))
+            if errors:
+                print(f"{step.argv[1]}: sdkconfig: " + "; ".join(errors), file=sys.stderr)
+                return 1
             continue
         if step.argv[0] == "assert-sdkconfig":
             errors = sdkconfig_errors(data, find_cell(data, step.argv[1]),

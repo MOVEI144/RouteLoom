@@ -164,11 +164,37 @@ class CellList(unittest.TestCase):
 class Sdkconfig(unittest.TestCase):
     DATA = {"forbid_unless_named": {"CONFIG_A": ["y"], "CONFIG_M": ["1", "2"]}}
 
+    def test_project_rejects_retired_mode_before_idf_rewrites_sdkconfig(self):
+        guard = ROOT / "components/routeloom_device/retired_mode_guard.cmake"
+        for project in ("firmware/reference_node", "firmware/bridge_node",
+                        "firmware/bench_node", "examples/espnow_node"):
+            lines = (ROOT / project / "CMakeLists.txt").read_text(encoding="utf-8")
+            self.assertLess(lines.index("retired_mode_guard.cmake"),
+                            lines.index("project.cmake"), project)
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "sdkconfig"
+            token = "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY" + "_FIXTURE=y\n"
+            config.write_text(token, encoding="utf-8")
+            args = ["cmake", f"-DSDKCONFIG={config}", "-P", str(guard)]
+            rejected = subprocess.run(args, capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("retired RouteLoom security mode", rejected.stderr)
+            config.write_text("CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\n", encoding="utf-8")
+            accepted = subprocess.run(args, capture_output=True, text=True)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            defaults = Path(tmp) / "sdkconfig.defaults"
+            defaults.write_text(token, encoding="utf-8")
+            rejected_defaults = subprocess.run(args, cwd=tmp, capture_output=True, text=True)
+            self.assertNotEqual(rejected_defaults.returncode, 0)
+
     def test_cell_refuses_retired_selection_before_compiling(self):
         cell = {"id": "test", "app": "reference_node", "target": "esp32c3", "overlay": []}
         steps = [step.argv for step in check.firmware_steps(cell)]
-        self.assertLess(steps.index(["assert-sdkconfig", "test"]),
+        self.assertLess(steps.index(["assert-security-mode", "test"]),
                         steps.index(["idf.py", "build"]))
+        switching = ("CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y\n"
+                     "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y\n")
+        self.assertEqual(check.security_mode_errors(switching), [])
 
     def test_overlay_expect_and_forbidden_values(self):
         cell = {"overlay": ["CONFIG_A=y"], "expect": ["CONFIG_P=5000"]}

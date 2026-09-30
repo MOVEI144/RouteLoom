@@ -7,22 +7,6 @@ target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
 # ESP-IDF public headers use GNU extensions. Keep actionable project warnings
 # strict without promoting extensions in those headers to errors.
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
-if(NOT CMAKE_BUILD_EARLY_EXPANSION)
-  # IDF keeps unknown assignments in sdkconfig. Refuse a retired explicit
-  # selection before its old value silently becomes the new default.
-  string(CONCAT retired_mode "CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY" "_FIXTURE=y")
-  if(SDKCONFIG)
-    set(config_path "${SDKCONFIG}")
-  else()
-    set(config_path "${PROJECT_SOURCE_DIR}/sdkconfig")
-  endif()
-  if(EXISTS "${config_path}")
-    file(STRINGS "${config_path}" retired_selected REGEX "^${retired_mode}$")
-    if(retired_selected)
-      message(FATAL_ERROR "The retired RouteLoom security mode was explicitly selected")
-    endif()
-  endif()
-endif()
 # The remote-config journal takes about 42 KB of static RAM. On ESP32-C3 only
 # the endpoint resource profile keeps the boot heap floor that esp_wifi_init
 # needs (docs/design/sdk-v1/ram-budget.md §5, issue #166); a relay or gateway
