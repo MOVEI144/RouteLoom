@@ -486,6 +486,46 @@ void test_resume_chunked_opening() {
   CHECK(world.proxy.state() == JoinProxy::State::Idle);
 }
 
+// #176: a closed site policy stops OFFERs to devices that do not prefer
+// this site — also for a DISCOVER already waiting for its OFFER slot — while
+// a device holding this site's membership (preferred hint) still gets one.
+void test_closed_policy_offers_only_to_this_site() {
+  current = "closed_policy (#176)";
+  {
+    World world;
+    CHECK(world.proxy.set_zero_touch_open(false).ok());
+    CHECK(!world.connect());
+    CHECK(world.proxy.stats().offers_tx == 0 && world.proxy.stats().offers_suppressed >= 1);
+  }
+  {
+    World world;
+    ZtDiscoverBody body{};
+    body.org_hint = kOrgHint;
+    CHECK(world.links[0]->discover(body, world.now));
+    world.pump();
+    CHECK(world.proxy.set_zero_touch_open(false).ok());  // closes within the slot
+    world.advance(400);
+    CHECK(world.observers[0]->offers.empty() && world.proxy.stats().offers_tx == 0);
+  }
+  {
+    World world;
+    CHECK(world.proxy.set_zero_touch_open(false).ok());
+    ZtDiscoverBody body{};
+    body.org_hint = kOrgHint;
+    body.preferred_site_hint = kSiteHint;
+    CHECK(world.links[0]->discover(body, world.now));
+    world.pump();
+    world.advance(400);
+    CHECK(!world.observers[0]->offers.empty() && world.proxy.stats().offers_tx == 1);
+  }
+  {
+    World world;
+    CHECK(world.proxy.set_zero_touch_open(false).ok());
+    CHECK(world.proxy.set_zero_touch_open(true).ok());
+    CHECK(world.connect());
+  }
+}
+
 void test_unreachable_and_busy() {
   current = "unreachable_and_busy (V1-J10)";
   {
@@ -2057,6 +2097,7 @@ int main() {
   test_loss_and_reorder();
   test_resume_chunked_opening();
   test_unreachable_and_busy();
+  test_closed_policy_offers_only_to_this_site();
   test_flood();
   test_rate_limit();
   test_timeouts();

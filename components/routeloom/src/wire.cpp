@@ -43,9 +43,12 @@ bool known_frame_type(const std::uint8_t value) noexcept {
     case FrameType::ControlObject:
     case FrameType::ObjectChunk:
     case FrameType::ObjectAck:
+    case FrameType::AppObjectStart:
+    case FrameType::AppObjectChunk:
+    case FrameType::AppObjectAck:
       return true;
   }
-  return false;
+  return is_extension_type(static_cast<FrameType>(value));
 }
 
 Status write_header(const Header& header, MutableByteView output) noexcept {
@@ -60,13 +63,13 @@ Status write_header(const Header& header, MutableByteView output) noexcept {
 #define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
   RL_WRITE(writer.write_u16(kMagic));
   RL_WRITE(writer.write_u8(kMajor));
-  RL_WRITE(writer.write_u8(kMinor));
+  RL_WRITE(writer.write_u8(header.minor));
   RL_WRITE(writer.write_u8(static_cast<std::uint8_t>(header.type)));
   RL_WRITE(writer.write_u8(header.flags));
   RL_WRITE(writer.write_u8(static_cast<std::uint8_t>(header.delivery)));
   RL_WRITE(writer.write_u8(header.delivery_round));
   RL_WRITE(writer.write_u8(header.hop_remaining));
-  RL_WRITE(writer.write_u8(0));
+  RL_WRITE(writer.write_u8(header.traffic));
   RL_WRITE(writer.write_u16(header.payload_length));
   RL_WRITE(writer.write_u32(static_cast<std::uint32_t>(header.network)));
   RL_WRITE(writer.write_u64(header.origin));
@@ -95,23 +98,22 @@ Status read_header(ByteView encoded, Header& header) noexcept {
   ByteReader reader(ByteView{encoded.data, kHeaderSize});
   std::uint16_t magic = 0;
   std::uint8_t major = 0;
-  std::uint8_t minor = 0;
   std::uint8_t type = 0;
   std::uint8_t delivery = 0;
-  std::uint8_t reserved = 0;
+  std::uint16_t payload_length = 0;
   std::uint32_t network = 0;
   Status status;
 #define RL_READ(expr) do { status = (expr); if (!status) return status; } while (false)
   RL_READ(reader.read_u16(magic));
   RL_READ(reader.read_u8(major));
-  RL_READ(reader.read_u8(minor));
+  RL_READ(reader.read_u8(header.minor));
   RL_READ(reader.read_u8(type));
   RL_READ(reader.read_u8(header.flags));
   RL_READ(reader.read_u8(delivery));
   RL_READ(reader.read_u8(header.delivery_round));
   RL_READ(reader.read_u8(header.hop_remaining));
-  RL_READ(reader.read_u8(reserved));
-  RL_READ(reader.read_u16(header.payload_length));
+  RL_READ(reader.read_u8(header.traffic));
+  RL_READ(reader.read_u16(payload_length));
   RL_READ(reader.read_u32(network));
   RL_READ(reader.read_u64(header.origin));
   RL_READ(reader.read_u64(header.destination));
@@ -126,9 +128,14 @@ Status read_header(ByteView encoded, Header& header) noexcept {
   RL_READ(reader.read_u48(header.link_counter));
   RL_READ(reader.read_u48(header.end_counter));
 #undef RL_READ
-  if (magic != kMagic || major != kMajor || minor > kMinor || reserved != 0) {
+  // Any minor of major 2 is accepted (forward-compatible additions only).
+  if (magic != kMagic || major != kMajor) {
     return Status::error(StatusCode::ProtocolError, "unsupported wire header");
   }
+  if (payload_length > kMaxApplicationPayload) {
+    return Status::error(StatusCode::ProtocolError, "payload exceeds v1 limit");
+  }
+  header.payload_length = static_cast<std::uint8_t>(payload_length);
   if (!known_frame_type(type)) {
     return Status::error(StatusCode::ProtocolError, "unknown frame type");
   }
@@ -154,7 +161,7 @@ Status make_end_aad(const Header& header,
   Status status;
 #define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
   RL_WRITE(writer.write_u8(kMajor));
-  RL_WRITE(writer.write_u8(kMinor));
+  RL_WRITE(writer.write_u8(header.minor));
   RL_WRITE(writer.write_u8(static_cast<std::uint8_t>(header.type)));
   RL_WRITE(writer.write_u8(header.flags));
   RL_WRITE(writer.write_u8(static_cast<std::uint8_t>(header.delivery)));
@@ -303,7 +310,7 @@ Status encode_new(const PlainFrame& input,
   }
 
   Header header = input.header;
-  header.payload_length = static_cast<std::uint16_t>(input.payload_size);
+  header.payload_length = static_cast<std::uint8_t>(input.payload_size);
   auto status = validate_header(header);
   if (!status) return status;
 
@@ -394,7 +401,7 @@ Status seal_end(const PlainFrame& input,
     return Status::error(StatusCode::InvalidArgument, "application payload too large");
   }
   Header header = input.header;
-  header.payload_length = static_cast<std::uint16_t>(input.payload_size);
+  header.payload_length = static_cast<std::uint8_t>(input.payload_size);
   if ((header.flags & kFlagEndProtected) == 0) {
     return Status::error(StatusCode::InvalidArgument, "frame is not End protected");
   }
@@ -583,7 +590,7 @@ Status seal_group(const PlainFrame& input, const NodeId local_node,
     return Status::error(StatusCode::InvalidArgument, "application payload too large");
   }
   Header header = input.header;
-  header.payload_length = static_cast<std::uint16_t>(input.payload_size);
+  header.payload_length = static_cast<std::uint8_t>(input.payload_size);
   // Shaped like a frame `local_node` just received: forward() re-wraps the
   // link layer per child and spends the extra hop, so children see exactly
   // input.header.hop_remaining.

@@ -65,6 +65,8 @@ struct SealedRecordFormat {
   // `context` is the typed store's decode target (reused as workspace so
   // no record-sized object lands on the stack).
   Status (*semantic)(ByteView record, void* context) noexcept{nullptr};
+  // Newest schema this build reads; schemas 1..schema_max are readable.
+  std::uint32_t schema_max{kRecordSchema};
 };
 
 class SealedSlotPair {

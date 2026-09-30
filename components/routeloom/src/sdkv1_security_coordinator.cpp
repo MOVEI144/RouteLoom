@@ -161,9 +161,10 @@ bool SecurityCoordinator::SessionProviderMux::accepts_group_epoch(const std::uin
   return group().accepts_group_epoch(g);
 }
 
-bool SecurityCoordinator::SessionProviderMux::revoked_group_sender(const NodeId sender) const
+bool SecurityCoordinator::SessionProviderMux::revoked_group_sender(
+    const NodeId sender, const std::uint32_t gk_epoch) const
     noexcept {
-  return group().revoked_group_sender(sender);
+  return group().revoked_group_sender(sender, gk_epoch);
 }
 
 bool SecurityCoordinator::SessionProviderMux::group_promotion_pending() const noexcept {
@@ -2457,6 +2458,15 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
 
 // --- Authority channel (G-SEC P5) ----------------------------------------------------------------
 
+void SecurityCoordinator::set_proxy_policy(const std::uint64_t site_id,
+                                           const bool zero_touch_open) noexcept {
+  proxy_closed_site_id_ = zero_touch_open ? 0 : site_id;
+  if (mode_ == CoordinatorMode::Member && member_valid_ && deps_.site != nullptr &&
+      deps_.site->has_site() && deps_.site->site().site_id == site_id) {
+    (void)member().proxy.set_zero_touch_open(zero_touch_open);
+  }
+}
+
 Status SecurityCoordinator::send_authority_typed(const std::uint8_t type,
                                                  const ByteView body,
                                                  const MonotonicMs now) noexcept {
@@ -2799,8 +2809,9 @@ void SecurityCoordinator::on_event(const AuthorityEvent& event) noexcept {
       break;
     case AuthorityEvent::Kind::Passthrough:
       sat_inc(counters_.authority_passthrough);
-      if (deps_.authority_sink != nullptr && event.envelope_type >= 5 &&
-          event.envelope_type <= 7) {
+      if (deps_.authority_sink != nullptr &&
+          ((event.envelope_type >= 5 && event.envelope_type <= 7) ||
+           event.envelope_type == kAuthorityTypeProxyPolicy)) {
         deps_.authority_sink->on_verified_authority(event.envelope_type, event.passthrough);
       }
       break;
@@ -3152,6 +3163,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   member().proxy.set_membership(MembershipState::Member, now);
   member().proxy.set_policy(profile::kJoinProxy &&
                             (site.role & (kMemberRoleRelay | kMemberRoleGateway)) != 0);
+  member().proxy.set_zero_touch_open(proxy_closed_site_id_ != site.site_id);
   member().gateway_active = profile::kGateway && (site.role & kMemberRoleGateway) != 0;
   if (member().gateway_active) {
     member().proxy.set_authority(true, 0, now);
@@ -3550,9 +3562,13 @@ Status SecurityCoordinator::wipe_site_trust() noexcept {
 
 Status SecurityCoordinator::revoke_member_sessions(const RevocationSet& set,
                                                    const std::uint32_t site_epoch,
-                                                   const MonotonicMs now) noexcept {
+                                                   const MonotonicMs now,
+                                                   std::uint32_t* retired_old,
+                                                   std::uint32_t* retired_links) noexcept {
   (void)site_epoch;
   (void)now;
+  if (retired_old != nullptr) *retired_old = 0;
+  if (retired_links != nullptr) *retired_links = 0;
   if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
   if (mode_ != CoordinatorMode::Member) return Status::success();
   // The set must be the adopted one: the lifecycle commits before
@@ -3568,6 +3584,22 @@ Status SecurityCoordinator::revoke_member_sessions(const RevocationSet& set,
   for (std::size_t i = 0; i < set.count; ++i) {
     const NodeId peer = set.entries[i].node_id;
     if (peer == kInvalidNodeId || peer == kBroadcastNodeId) continue;
+    if (set.entries[i].readmit_gk_epoch != 0) {
+      bool retired_link = false;
+      bool retired_end = false;
+      const Status status = bank_.retire_below_generation(
+          peer, set.entries[i].min_generation, retired_link, retired_end);
+      if (!status) return status;
+      if (retired_old != nullptr && (retired_link || retired_end)) {
+        *retired_old |= std::uint32_t{1} << i;
+      }
+      if (retired_links != nullptr && retired_link) *retired_links |= std::uint32_t{1} << i;
+      if (deps_.discovery != nullptr) {
+        if (retired_link) (void)deps_.discovery->revoke_peer(peer);
+        (void)deps_.discovery->forget_peer(peer);
+      }
+      continue;
+    }
     (void)bank_.retire_all(peer);
     if (deps_.discovery != nullptr) (void)deps_.discovery->revoke_peer(peer);
   }

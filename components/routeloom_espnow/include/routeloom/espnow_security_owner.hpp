@@ -331,6 +331,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   void feed_lifecycle_inputs(MonotonicMs now_ms) noexcept;
   void sync_lifecycle_peers(MonotonicMs now_ms) noexcept;
   void drain_authority_tx(MonotonicMs now_ms) noexcept;
+  void apply_proxy_policy(ByteView tail) noexcept;
   void drain_peer_tx() noexcept;
   void drain_lifecycle_actions(MonotonicMs now_ms) noexcept;
   void on_lifecycle_recovery(const sdkv1::LifecycleAction& action, MonotonicMs now_ms) noexcept;

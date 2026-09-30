@@ -29,7 +29,7 @@ remaining deadline、hop、前回送信者などは中継で変わり得る。en
 
 ## 4. フレーム種類
 
-DISCOVER/OFFER、BOOTSTRAP_AUTH/CHUNK/REPLY、MEMBERSHIP_QUERY/RESULT、NEIGHBOR_PROBE/NEIGHBOR_RESULT、ROUTE_UPDATE/ROUTE_WITHDRAW/ROUTE_REQUEST/SEQNO_REQUEST、DATA、GROUP_DATA/GROUP_REPORT、HOP_ACCEPT/BUSY、END_RECEIPT、APP_RESULT、SERVICE、CONTROL/CONTROL_OBJECT、OBJECT_CHUNK/OBJECT_ACK、TIME_SYNC、CHANNEL_NOTICE、DIAGNOSTICの意味を区別する。完全な識別子と凍結済みnumeric type IDはsemantics.jsonの`frame_numeric_ids`を参照（Wire v2でもv1から不変）。未知typeは復号を拒否する。
+DISCOVER/OFFER、BOOTSTRAP_AUTH/CHUNK/REPLY、MEMBERSHIP_QUERY/RESULT、NEIGHBOR_PROBE/NEIGHBOR_RESULT、ROUTE_UPDATE/ROUTE_WITHDRAW/ROUTE_REQUEST/SEQNO_REQUEST、DATA、GROUP_DATA/GROUP_REPORT、HOP_ACCEPT/BUSY、END_RECEIPT、APP_RESULT、SERVICE、CONTROL/CONTROL_OBJECT、OBJECT_CHUNK/OBJECT_ACK、TIME_SYNC、CHANNEL_NOTICE、DIAGNOSTICの意味を区別する。完全な識別子と凍結済みnumeric type IDはsemantics.jsonの`frame_numeric_ids`を参照（Wire v2でもv1から不変）。未知typeは復号を拒否する。ただし64〜95は端から端への拡張型で、§7の規則に従う（64〜66はAppObjectのAPP_OBJECT_START／CHUNK／ACKとして登録済み）。
 
 未所属ではDISCOVER/OFFERと、[参加状態別allowlist](identity-membership.md)に記載した当該transactionのbootstrapだけを許す。認証や承認を終える前のDATA／route／serviceは拒否する。bootstrapを発見と同義にしない。HOP_ACCEPTはそれ自体を再帰ACKしない。END_RECEIPTは新アプリmessageとしてreceiptを要求しない。
 
@@ -50,6 +50,14 @@ C/C++ packed structのmemcpyをwire ABIにしない。固定幅、network byte o
 ## 7. 互換性
 
 protocol majorが合わなければ参加拒否。minor featureは双方capabilityで交渉し、必須securityをdown-gradeしない。データMTUはpath制約として扱い、将来LoRa追加で大packetを黙って落とさない。
+
+**major 2の中の前方互換（v2.0で導入、`semantics.json`の`wire_forward_compat`）**：
+
+- 受信側はmajorが2ならminorの値に関係なく受ける。minorを上げて足す意味は、古い受信側が無視しても安全なものに限る。end AADはframe自身のminorを含み、中継はminorを書き換えずに転送する。
+- frame型64〜95は端から端への拡張型である。END_PROTECTEDが必須で、中継はbodyを解釈せずにrouted laneで転送する（重複排除はmessage ID、配送の等級はbyte 6）。対応していない終端はend認証の後、受理せずにTransitFailureの理由12 `UNSUPPORTED`（Phase 0）を返す。この範囲の外の未知の型は今までどおりdecodeで拒否する。
+- header byte 9は`traffic`である。bit 0〜1は中継のDRRに使う優先度の目安（0 Normal、1 Bulk、2 Urgent、3は予約でNormal扱い）、bit 2〜7は予約で受信側は無視し、中継はbyte全体をそのまま転送する。end AADには入れない（link AADだけで守る）。Managementはwireから与えない。originはDATAのpriorityから値を付ける。
+- flagsは厳格のまま（未知のbitは拒否）。end AADに入り、securityに関わるため。
+- 既存のgolden vector（minor 0、byte 9 = 0）はbyte一致のまま。`protocol/golden/valid/`の`data_minor_1_traffic`と`extension_type_90`が受理と中継の不変を、`invalid/`の`unknown_type_96`と`traffic_tampered`が範囲外の型とbyte 9の改竄を固定する。
 
 完全なgolden vectorには正常DATA128B、最短ACK、最大管理object、未知version、改ざん、再送round、別hopでの外側暗号、再起動を含める。
 

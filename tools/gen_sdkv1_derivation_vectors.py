@@ -419,8 +419,8 @@ def main() -> None:
         "bad_version", "only version 1 is defined")
     bad("envelope_type_zero", "authority_envelope", patch(env, 1, b"\x00"),
         "bad_type", "type 0 is unassigned")
-    bad("envelope_type_nine", "authority_envelope", patch(env, 1, b"\x09"),
-        "bad_type", "type 9 is unassigned")
+    bad("envelope_type_ten", "authority_envelope", patch(env, 1, b"\x0a"),
+        "bad_type", "type 10 is unassigned (9 is the ProxyPolicySet)")
     bad("envelope_zero_ctx", "authority_envelope", patch(env, 2, b"\x00" * 4),
         "zero_context_id", "ctx_id must be non-zero")
 

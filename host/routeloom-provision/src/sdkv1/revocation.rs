@@ -2,11 +2,13 @@
 //! `rlrevo` storage record, mirror of the C++ `revocation_*`.
 //!
 //! ```text
-//! payload:  0 u8 ver=1 | u8 flags=0 | u16 count (<=32)
+//! payload:  0 u8 ver=2 | u8 flags=0 | u16 count (<=32)
 //!           4 u64 site_id | 12 u64 network
 //!          20 u32 rs_epoch (>=1) | 24 u32 site_epoch_floor (<= network>>32)
-//!          28 entries x 16: node_id u64 | min_generation u32 (>=1) |
-//!                           reason u8 (1..4) | reserved 3   (ascending node_id)
+//!          28 entries x 17: node_id u64 | min_generation u32 (>=1) |
+//!                           reason u8 (1..4) | readmit_gk_epoch u32
+//!                           (ascending node_id; version 1 has 16-byte entries
+//!                           with three reserved zeros and reads as 0)
 //! object:  restricted ES256 Sign1, external AAD
 //!          "RouteLoom/revocation-set/v1" 0x00 || network u64
 //! record:  sealed head "RRS1" | u32 commit_seq | object (empty = cleared) | crc
@@ -20,19 +22,21 @@ use super::{
     cose_es256_verify, finish_record, id_valid, read_record, Reader, SEQUENCED_HEAD_SIZE,
 };
 
-pub const REVOCATION_VERSION: u8 = 1;
+pub const REVOCATION_VERSION: u8 = 2;
+pub const REVOCATION_VERSION_V1: u8 = 1;
 pub const REVOCATION_ENTRY_MAX: usize = 32;
 pub const REVOCATION_HEAD_SIZE: usize = 28;
-pub const REVOCATION_ENTRY_SIZE: usize = 16;
+pub const REVOCATION_ENTRY_SIZE: usize = 17;
+pub const REVOCATION_ENTRY_SIZE_V1: usize = 16;
 pub const REVOCATION_PAYLOAD_MAX: usize =
-    REVOCATION_HEAD_SIZE + REVOCATION_ENTRY_MAX * REVOCATION_ENTRY_SIZE; // 540
-pub const REVOCATION_OBJECT_MAX: usize = 7 + 3 + REVOCATION_PAYLOAD_MAX + 2 + 64; // 616
+    REVOCATION_HEAD_SIZE + REVOCATION_ENTRY_MAX * REVOCATION_ENTRY_SIZE; // 572
+pub const REVOCATION_OBJECT_MAX: usize = 7 + 3 + REVOCATION_PAYLOAD_MAX + 2 + 64; // 648
 pub const REVOCATION_DOMAIN: &[u8] = b"RouteLoom/revocation-set/v1";
 pub const REVOCATION_MAGIC: u32 = 0x5252_5331; // "RRS1"
 pub const REVOCATION_SEAL_COMMITTED: u32 = 0x2E5E_7C0D;
-pub const REVOCATION_SLOT_BYTES: usize = 640;
+pub const REVOCATION_SLOT_BYTES: usize = 672;
 pub const REVOCATION_RECORD_MIN: usize = SEQUENCED_HEAD_SIZE + 4;
-pub const REVOCATION_RECORD_MAX: usize = SEQUENCED_HEAD_SIZE + REVOCATION_OBJECT_MAX + 4; // 640
+pub const REVOCATION_RECORD_MAX: usize = SEQUENCED_HEAD_SIZE + REVOCATION_OBJECT_MAX + 4; // 672
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -60,6 +64,9 @@ pub struct RevocationEntry {
     pub node_id: u64,
     pub min_generation: u32,
     pub reason: RevocationReason,
+    /// #146: 0 = group frames of this NodeId stay refused; E = accepted
+    /// again from GK epoch E (the site's readmit rotation).
+    pub readmit_gk_epoch: u32,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -106,7 +113,7 @@ pub fn revocation_payload_encode(set: &RevocationSet) -> Result<Vec<u8>> {
         out.extend_from_slice(&entry.node_id.to_be_bytes());
         out.extend_from_slice(&entry.min_generation.to_be_bytes());
         out.push(entry.reason as u8);
-        out.extend_from_slice(&[0; 3]);
+        out.extend_from_slice(&entry.readmit_gk_epoch.to_be_bytes());
     }
     Ok(out)
 }
@@ -126,12 +133,19 @@ pub fn revocation_payload_decode(payload: &[u8]) -> Result<RevocationSet> {
         site_epoch_floor: reader.u32()?,
         entries: Vec::new(),
     };
-    if version != REVOCATION_VERSION {
+    if version != REVOCATION_VERSION && version != REVOCATION_VERSION_V1 {
         return err(Code::Unsupported, "rrs1 version");
     }
     if flags != 0
         || count > REVOCATION_ENTRY_MAX
-        || payload.len() != REVOCATION_HEAD_SIZE + count * REVOCATION_ENTRY_SIZE
+        || payload.len()
+            != REVOCATION_HEAD_SIZE
+                + count
+                    * if version == REVOCATION_VERSION_V1 {
+                        REVOCATION_ENTRY_SIZE_V1
+                    } else {
+                        REVOCATION_ENTRY_SIZE
+                    }
     {
         return err(Code::ProtocolError, "rrs1 payload shape");
     }
@@ -141,11 +155,17 @@ pub fn revocation_payload_decode(payload: &[u8]) -> Result<RevocationSet> {
         let Some(reason) = RevocationReason::from_u8(reader.u8()?) else {
             return err(Code::ProtocolError, "rrs1 entry");
         };
-        reader.zeros(3, "rrs1 entry reserved")?;
+        let readmit_gk_epoch = if version == REVOCATION_VERSION_V1 {
+            reader.zeros(3, "rrs1 entry reserved")?;
+            0
+        } else {
+            reader.u32()?
+        };
         set.entries.push(RevocationEntry {
             node_id,
             min_generation,
             reason,
+            readmit_gk_epoch,
         });
     }
     revocation_validate(&set).map_err(|e| Error::new(Code::ProtocolError, e.detail))?;

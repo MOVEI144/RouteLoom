@@ -537,6 +537,10 @@ class SecurityCoordinator final : public BootstrapSink,
   // so the unknown-ahead evidence must not accrue refresh strikes —
   // churning the workspace here is what strands the node mid-cutover.
   void set_cutover_intent(bool intent) noexcept { cutover_intent_ = intent; }
+  // The site's durable ProxyPolicySet (RLPP1, #176): applied to the member
+  // proxy now when it serves `site_id`, and at every adoption of that
+  // site before the proxy starts. Another site's proxy stays open.
+  void set_proxy_policy(std::uint64_t site_id, bool zero_touch_open) noexcept;
   // Wipes the member site trust held outside the stores (GK scope,
   // discovery membership) and verifies it is gone. Idempotent: safe to
   // re-assert after traffic already stopped.
@@ -545,11 +549,14 @@ class SecurityCoordinator final : public BootstrapSink,
   // in-flight handshakes, retires every bank session of a rejected
   // peer, revokes the Discovery binding. RLP1 is swept by the
   // lifecycle itself; RLP2 lookups already fence on the adopted set.
-  // No-op outside Member mode. Over-retires peers that re-authed
-  // under a newer generation since (they re-handshake through the
-  // limited reauth path) — never under-retires.
+  // A readmitted entry retires only sessions below its min_generation;
+  // `retired_old` marks entries whose old context needs queued sends
+  // cancelled; `retired_links` marks those needing route withdrawal.
+  // No-op outside Member mode.
   Status revoke_member_sessions(const RevocationSet& set, std::uint32_t site_epoch,
-                                MonotonicMs now) noexcept;
+                                MonotonicMs now,
+                                std::uint32_t* retired_old = nullptr,
+                                std::uint32_t* retired_links = nullptr) noexcept;
   // Attaches the authority transport port (once): the mesh endpoint on a
   // device, the direct USB port on a gateway. Until attached the channel
   // stages its carriers and retries on Tick; detaching is not supported
@@ -737,7 +744,7 @@ class SecurityCoordinator final : public BootstrapSink,
     ContextState context_state(SecurityScope scope, NodeId peer) const noexcept override;
     Status tx_group_link_epochs(std::uint32_t& boot, std::uint32_t& g) noexcept override;
     bool accepts_group_epoch(std::uint32_t g) const noexcept override;
-    bool revoked_group_sender(NodeId sender) const noexcept override;
+    bool revoked_group_sender(NodeId sender, std::uint32_t gk_epoch) const noexcept override;
     bool group_promotion_pending() const noexcept override;
     Status next_counter(const SecurityContext& context, std::uint64_t& counter) noexcept override;
     Status seal(const SecurityContext& context, std::uint64_t counter, ByteView aad,
@@ -1101,6 +1108,8 @@ class SecurityCoordinator final : public BootstrapSink,
   bool removal_holdoff_armed_{false};
   MonotonicMs removal_holdoff_at_{0};
   std::uint64_t removal_watermark_site_id_{0};
+  // The site whose stored ProxyPolicySet is closed (0: every proxy open).
+  std::uint64_t proxy_closed_site_id_{0};
   std::uint32_t removal_watermark_generation_{0};
   bool cutover_intent_{false};
   CoordinatorCounters counters_{};

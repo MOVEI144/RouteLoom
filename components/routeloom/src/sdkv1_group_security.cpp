@@ -23,16 +23,15 @@ GroupSecurityProvider::~GroupSecurityProvider() {
   secure_clear(staging_);
 }
 
-bool GroupSecurityProvider::revoked_group_sender(const NodeId sender) const noexcept {
+bool GroupSecurityProvider::revoked_group_sender(const NodeId sender,
+                                                 const std::uint32_t epoch) const noexcept {
   if (revocations_ == nullptr || !revocations_->has_set() ||
       !keys_.store_.has_site()) return false;
   const RevocationSet& set = revocations_->set();
   const SiteRecord& site = keys_.store_.site();
   if (set.site_id != site.site_id || set.network != site.network) return false;
-  for (std::size_t i = 0; i < set.count; ++i) {
-    if (set.entries[i].node_id == sender) return true;
-  }
-  return false;
+  return revocation_blocks_group_sender(
+      set, sender, epoch == kCurrentGroupEpoch ? keys_.current() : epoch);
 }
 
 Status GroupSecurityProvider::tx_epoch(const SecurityScope scope, const NodeId peer,
@@ -88,7 +87,7 @@ Status GroupSecurityProvider::material(const SecurityContext& c, keys::TrafficKe
   if (c.scope == SecurityScope::GroupLink && (c.sender_boot || c.group_id)) {
     return Status::error(StatusCode::AuthorizationFailed, "group link binding");
   }
-  if (transmit && revoked_group_sender(c.sender)) {
+  if (transmit && revoked_group_sender(c.sender, gk_epoch(c))) {
     return Status::error(StatusCode::AuthorizationFailed, "group sender revoked");
   }
   ScopeDigest prk{};
@@ -185,7 +184,8 @@ Status GroupSecurityProvider::next_counter(const SecurityContext& c,
   keys_.provider_in_call_ = true;
   // Count the mistaken re-allocation before material refuses the counter;
   // callers may inspect this even when no group frame reaches the radio.
-  if (c.sender == self_ && revoked_group_sender(self_) && revoked_tx_attempts_ != UINT32_MAX)
+  if (c.sender == self_ && revoked_group_sender(self_, gk_epoch(c)) &&
+      revoked_tx_attempts_ != UINT32_MAX)
     ++revoked_tx_attempts_;
   keys::TrafficKey material_key{};
   Status status = material(c, material_key, true);
@@ -280,7 +280,7 @@ Status GroupSecurityProvider::open(const SecurityContext& c, const std::uint64_t
       status = Status::error(StatusCode::AuthorizationFailed, "group tag invalid");
     }
   }
-  if (status && revoked_group_sender(c.sender)) {
+  if (status && revoked_group_sender(c.sender, gk_epoch(c))) {
     status = Status::error(StatusCode::AuthorizationFailed, "group sender revoked");
   }
   const bool next_group = status && gk_epoch(c) == keys_.store_.site().gk_epoch_next;

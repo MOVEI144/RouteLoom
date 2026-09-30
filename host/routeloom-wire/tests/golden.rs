@@ -60,6 +60,14 @@ fn find(bytes: &[u8], byte: u8, from: usize) -> Option<usize> {
         .map(|i| from + i)
 }
 
+/// Header bytes 3 (minor) and 9 (traffic) are listed only when nonzero.
+fn u8_or_zero(fields: &Fields, key: &str) -> u8 {
+    fields
+        .get(key)
+        .map(|value| value.parse().expect("bad integer"))
+        .unwrap_or(0)
+}
+
 fn u64_field(fields: &Fields, key: &str) -> u64 {
     fields
         .get(key)
@@ -98,6 +106,8 @@ fn header_from_fields(fields: &Fields) -> Header {
         delivery: DeliveryClass::try_from(u64_field(fields, "delivery") as u8).expect("delivery"),
         delivery_round: u64_field(fields, "delivery_round") as u8,
         hop_remaining: u64_field(fields, "hop_remaining") as u8,
+        minor: u8_or_zero(fields, "minor"),
+        traffic: u8_or_zero(fields, "traffic"),
         network: u64_field(fields, "network"),
         origin: u64_field(fields, "origin"),
         destination: u64_field(fields, "destination"),
@@ -116,7 +126,7 @@ fn header_from_fields(fields: &Fields) -> Header {
 }
 
 fn check_header(header: &Header, fields: &Fields) {
-    assert_eq!(header.frame_type as u8, u64_field(fields, "type") as u8);
+    assert_eq!(header.frame_type.id(), u64_field(fields, "type") as u8);
     assert_eq!(header.flags, u64_field(fields, "flags") as u8);
     assert_eq!(header.delivery as u8, u64_field(fields, "delivery") as u8);
     assert_eq!(
@@ -127,6 +137,8 @@ fn check_header(header: &Header, fields: &Fields) {
         header.hop_remaining,
         u64_field(fields, "hop_remaining") as u8
     );
+    assert_eq!(header.minor, u8_or_zero(fields, "minor"));
+    assert_eq!(header.traffic, u8_or_zero(fields, "traffic"));
     assert_eq!(header.network, u64_field(fields, "network"));
     assert_eq!(header.origin, u64_field(fields, "origin"));
     assert_eq!(header.destination, u64_field(fields, "destination"));

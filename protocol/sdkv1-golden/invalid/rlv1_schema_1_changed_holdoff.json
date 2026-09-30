@@ -1,0 +1,8 @@
+{
+  "codec": "rlv1",
+  "encoded_hex": "524c56310001006c0000000172564b310000000700a10000000012345173000000000042000000030a1b2c3d000000030000000b00000003010100001dcd5277e1bc1150aae860930ac7c9675c6e662084bb4f9e4c7947659360729400000029000023280000ea6075c31a2b",
+  "expect": "error",
+  "format": "routeloom-sdkv1-golden-v1",
+  "name": "rlv1_schema_1_changed_holdoff",
+  "note": "schema 1 requires its fixed 600000 ms holdoff"
+}

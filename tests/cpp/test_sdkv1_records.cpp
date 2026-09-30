@@ -247,7 +247,7 @@ void test_revocation_rules() {
   CHECK(!revocation_rejects(set, kNode, 1, kSiteEpoch));
   CHECK(revocation_rejects(set, kNode, 1, set.site_epoch_floor - 1));
 
-  // Full set: 32 entries, the 616-byte object bound and the 640-byte slot.
+  // Full set: 32 entries, the 648-byte object bound and the 672-byte slot.
   const RevocationSet full = revocation_set(1, 32);
   const auto full_object = revocation_object(full);
   CHECK(full_object.size == kRevocationObjectMax);

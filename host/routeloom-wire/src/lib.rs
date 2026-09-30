@@ -12,14 +12,14 @@
 //! ```text
 //! offset  size  field
 //! 0       2     magic 0x524C "RL"                 E
-//! 2       1     major version (= 1)               E
-//! 3       1     minor version (= 0)               E
+//! 2       1     major version (= 2)               E
+//! 3       1     minor version (sender's)          E
 //! 4       1     frame type                        E
 //! 5       1     flags                             E
 //! 6       1     delivery class                    E
 //! 7       1     delivery round                    H
 //! 8       1     hop remaining                     H
-//! 9       1     reserved, must be 0               -
+//! 9       1     traffic (bits 0-1 relay priority) - (link AAD only)
 //! 10      2     payload length                    E
 //! 12      4     network id (low 32 bits)          E
 //! 16      8     origin node id                    E
@@ -40,6 +40,12 @@
 //!
 //! Message ID = origin + session + sequence; delivery round, crypto counters
 //! and the boot session are distinct fields and must not be conflated.
+//!
+//! Forward compatibility inside major 2 (mirrors `wire.hpp`): any minor is
+//! accepted and carried into the end AAD as received; frame types 64..=95
+//! are end-to-end extension types ([`FrameType::Extension`] beyond the
+//! registered AppObject ids); byte 9 is the traffic hint, whose reserved
+//! bits are ignored; flags stay strict.
 
 use std::fmt;
 
@@ -58,6 +64,14 @@ pub const MINOR: u8 = 0;
 pub const HEADER_SIZE: usize = 88;
 /// `END_PROTECTED` flag; every other flag bit is reserved and must be zero.
 pub const FLAG_END_PROTECTED: u8 = 0x01;
+/// Byte 9 bits 0-1: the relay DRR priority hint. Bits 2-7 are reserved.
+pub const TRAFFIC_PRIORITY_MASK: u8 = 0x03;
+pub const TRAFFIC_NORMAL: u8 = 0;
+pub const TRAFFIC_BULK: u8 = 1;
+pub const TRAFFIC_URGENT: u8 = 2;
+/// End-to-end extension frame types: relays forward them unread.
+pub const EXTENSION_TYPE_FIRST: u8 = 64;
+pub const EXTENSION_TYPE_LAST: u8 = 95;
 pub const MAX_APPLICATION_PAYLOAD: usize = 128;
 pub const MAX_ESPNOW_BODY: usize = 250;
 pub const AEAD_TAG_SIZE: usize = 16;
@@ -75,39 +89,96 @@ const _: () = assert!(
 
 /// Frozen Wire v1 frame type IDs (protocol/semantics.json `frame_numeric_ids`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
 pub enum FrameType {
-    Discover = 1,
-    Offer = 2,
-    BootstrapAuth = 3,
-    MembershipResult = 4,
-    BootstrapChunk = 5,
-    BootstrapReply = 6,
-    MembershipQuery = 7,
-    Data = 16,
-    HopAccept = 17,
-    EndReceipt = 18,
-    AppResult = 19,
-    Busy = 20,
-    Service = 21,
-    Control = 22,
-    TimeSync = 23,
-    ChannelNotice = 24,
+    Discover,
+    Offer,
+    BootstrapAuth,
+    MembershipResult,
+    BootstrapChunk,
+    BootstrapReply,
+    MembershipQuery,
+    Data,
+    HopAccept,
+    EndReceipt,
+    AppResult,
+    Busy,
+    Service,
+    Control,
+    TimeSync,
+    ChannelNotice,
     /// Group delivery (docs/design/sdk-v1/group-delivery.md): end-protected
     /// under [`SecurityScope::Group`], forwarded along the gateway tree.
-    GroupData = 25,
+    GroupData,
     /// Link-only aggregated confirmation, child -> tree parent.
-    GroupReport = 26,
-    RouteUpdate = 32,
-    RouteWithdraw = 33,
-    SeqnoRequest = 34,
-    RouteRequest = 35,
-    NeighborProbe = 40,
-    NeighborResult = 41,
-    Diagnostic = 48,
-    ControlObject = 49,
-    ObjectChunk = 50,
-    ObjectAck = 51,
+    GroupReport,
+    RouteUpdate,
+    RouteWithdraw,
+    SeqnoRequest,
+    RouteRequest,
+    NeighborProbe,
+    NeighborResult,
+    Diagnostic,
+    ControlObject,
+    ObjectChunk,
+    ObjectAck,
+    /// AppObject (#179) extension types.
+    AppObjectStart,
+    AppObjectChunk,
+    AppObjectAck,
+    /// Any other id of the extension range 67..=95.
+    Extension(u8),
+}
+
+impl FrameType {
+    /// The wire id.
+    pub const fn id(self) -> u8 {
+        match self {
+            Self::Discover => 1,
+            Self::Offer => 2,
+            Self::BootstrapAuth => 3,
+            Self::MembershipResult => 4,
+            Self::BootstrapChunk => 5,
+            Self::BootstrapReply => 6,
+            Self::MembershipQuery => 7,
+            Self::Data => 16,
+            Self::HopAccept => 17,
+            Self::EndReceipt => 18,
+            Self::AppResult => 19,
+            Self::Busy => 20,
+            Self::Service => 21,
+            Self::Control => 22,
+            Self::TimeSync => 23,
+            Self::ChannelNotice => 24,
+            Self::GroupData => 25,
+            Self::GroupReport => 26,
+            Self::RouteUpdate => 32,
+            Self::RouteWithdraw => 33,
+            Self::SeqnoRequest => 34,
+            Self::RouteRequest => 35,
+            Self::NeighborProbe => 40,
+            Self::NeighborResult => 41,
+            Self::Diagnostic => 48,
+            Self::ControlObject => 49,
+            Self::ObjectChunk => 50,
+            Self::ObjectAck => 51,
+            Self::AppObjectStart => 64,
+            Self::AppObjectChunk => 65,
+            Self::AppObjectAck => 66,
+            Self::Extension(id) => id,
+        }
+    }
+
+    /// True for the end-to-end extension range 64..=95.
+    pub const fn is_extension(self) -> bool {
+        let id = self.id();
+        id >= EXTENSION_TYPE_FIRST && id <= EXTENSION_TYPE_LAST
+    }
+}
+
+impl From<FrameType> for u8 {
+    fn from(value: FrameType) -> Self {
+        value.id()
+    }
 }
 
 impl TryFrom<u8> for FrameType {
@@ -143,6 +214,10 @@ impl TryFrom<u8> for FrameType {
             49 => Self::ControlObject,
             50 => Self::ObjectChunk,
             51 => Self::ObjectAck,
+            64 => Self::AppObjectStart,
+            65 => Self::AppObjectChunk,
+            66 => Self::AppObjectAck,
+            67..=EXTENSION_TYPE_LAST => Self::Extension(value),
             _ => {
                 return Err(WireError::new(
                     ErrorCode::ProtocolError,
@@ -270,6 +345,10 @@ pub struct Header {
     pub delivery: DeliveryClass,
     pub delivery_round: u8,
     pub hop_remaining: u8,
+    /// The sender's minor; relays forward it and the end AAD carries it.
+    pub minor: u8,
+    /// Byte 9: relay priority hint (bits 0-1), reserved bits kept as read.
+    pub traffic: u8,
     pub payload_length: u16,
     /// v1 encodes the low 32 bits; upper bits must be zero.
     pub network: u64,
@@ -296,6 +375,8 @@ impl Default for Header {
             delivery: DeliveryClass::Reliable,
             delivery_round: 0,
             hop_remaining: DEFAULT_HOP_LIMIT,
+            minor: MINOR,
+            traffic: TRAFFIC_NORMAL,
             payload_length: 0,
             network: 0,
             origin: INVALID_NODE_ID,
@@ -393,13 +474,13 @@ fn write_header(header: &Header, output: &mut [u8; HEADER_SIZE]) -> Result<()> {
     }
     output[0..2].copy_from_slice(&MAGIC.to_be_bytes());
     output[2] = MAJOR;
-    output[3] = MINOR;
-    output[4] = header.frame_type as u8;
+    output[3] = header.minor;
+    output[4] = header.frame_type.id();
     output[5] = header.flags;
     output[6] = header.delivery as u8;
     output[7] = header.delivery_round;
     output[8] = header.hop_remaining;
-    output[9] = 0;
+    output[9] = header.traffic;
     output[10..12].copy_from_slice(&header.payload_length.to_be_bytes());
     output[12..16].copy_from_slice(&(header.network as u32).to_be_bytes());
     output[16..24].copy_from_slice(&header.origin.to_be_bytes());
@@ -428,10 +509,12 @@ fn read_header(encoded: &[u8], header: &mut Header) -> Result<()> {
     let frame_type = FrameType::try_from(fixed[4])?;
     let flags = fixed[5];
     let delivery = DeliveryClass::try_from(fixed[6])?;
-    let reserved = fixed[9];
-    if magic != MAGIC || major != MAJOR || minor > MINOR || reserved != 0 {
+    // Any minor of major 2 is accepted (forward-compatible additions only).
+    if magic != MAGIC || major != MAJOR {
         return err(ErrorCode::ProtocolError, "unsupported wire header");
     }
+    header.minor = minor;
+    header.traffic = fixed[9];
     header.frame_type = frame_type;
     header.flags = flags;
     header.delivery = delivery;
@@ -468,8 +551,8 @@ fn read_header(encoded: &[u8], header: &mut Header) -> Result<()> {
 fn end_aad(header: &Header) -> [u8; 53] {
     let mut aad = [0_u8; 53];
     aad[0] = MAJOR;
-    aad[1] = MINOR;
-    aad[2] = header.frame_type as u8;
+    aad[1] = header.minor;
+    aad[2] = header.frame_type.id();
     aad[3] = header.flags;
     aad[4] = header.delivery as u8;
     aad[5..9].copy_from_slice(&(header.network as u32).to_be_bytes());

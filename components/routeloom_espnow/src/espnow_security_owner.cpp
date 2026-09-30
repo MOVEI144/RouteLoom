@@ -149,19 +149,26 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::enforce_revocation(
   // authority down transfers cancel with them (no notice may extend a
   // revoked peer's mesh lifetime). The revoked device still learns
   // its removal over the ZT recovery path (04 §6.3).
-  if (owner.gateway_role() && owner.authority_live_) {
-    for (std::size_t i = 0; i < set.count; ++i) {
-      owner.gateway()->cancel_down_to(set.entries[i].node_id);
-    }
-  }
   // The P4 bank, pending handshakes and Discovery bindings retire before
   // any durable resume sweep. The route withdrawal also closes queued
   // sends to revoked peers. The RLP2 resume sweep itself belongs to the
   // lifecycle's Sweep step (the single sweep path) and runs next.
-  const Status sessions = owner.coordinator().revoke_member_sessions(set, site_epoch, now_ms);
+  std::uint32_t retired_old = 0;
+  std::uint32_t retired_links = 0;
+  const Status sessions = owner.coordinator().revoke_member_sessions(
+      set, site_epoch, now_ms, &retired_old, &retired_links);
   if (!sessions) return sessions;
+  if (owner.gateway_role() && owner.authority_live_) {
+    for (std::size_t i = 0; i < set.count; ++i) {
+      if (set.entries[i].readmit_gk_epoch != 0 &&
+          (retired_old & (std::uint32_t{1} << i)) == 0) continue;
+      owner.gateway()->cancel_down_to(set.entries[i].node_id);
+    }
+  }
   if (owner.runtime_ != nullptr) {
     for (std::size_t i = 0; i < set.count; ++i) {
+      if (set.entries[i].readmit_gk_epoch != 0 &&
+          (retired_links & (std::uint32_t{1} << i)) == 0) continue;
       owner.runtime_->node().revoke_routes(set.entries[i].node_id, now_ms);
     }
   }
@@ -207,14 +214,14 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::remove_member_runtime() noexce
 
 Status EspNowSecurityOwner::LifecycleRuntimePort::erase_site_trust() noexcept {
   EspNowSecurityOwner& owner = owner_;
-  if (!owner.coordinator_live_) {
+  if (!owner.coordinator_live_ || owner.stores_ == nullptr) {
     return Status::error(StatusCode::InvalidState, "trust erasure before wiring");
   }
-  // The site trust on this path is the RLS1 SiteCert verified against
-  // the RLI1 anchors (no separate derived blobs exist in production):
-  // RLS1 itself is erased by the lifecycle's Site step next, RLI1 stays
-  // (device-level per 04 §6.4), and this step wipes the RAM view (GK
-  // scope + discovery membership) and verifies it is gone.
+  const Status policy = owner.stores_->proxy_policy().erase();
+  if (!policy) return policy;
+  // RLS1 is erased by the lifecycle's Site step next, RLI1 stays
+  // (device-level per 04 §6.4), and this step wipes the site-bound
+  // intake policy and the RAM view (GK scope + discovery membership).
   return owner.coordinator().wipe_site_trust();
 }
 
@@ -674,6 +681,14 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
     const Status authority_status = coordinator().attach_authority_port(*endpoint());
     if (!authority_status) return authority_status;
   }
+  // The stored intake policy of this site applies before the proxy starts.
+  if (stores_->site().has_site()) {
+    const std::uint64_t site_id = stores_->site().site().site_id;
+    sdkv1::ProxyPolicyRecord policy{};
+    bool found = false;
+    const Status loaded = stores_->proxy_policy().load(site_id, policy, found);
+    coordinator().set_proxy_policy(site_id, loaded && (!found || policy.zero_touch_open));
+  }
   sdkv1::CoordinatorEvent event{};
   event.kind = sdkv1::CoordinatorEventKind::Boot;
   event.now = now_ms;
@@ -1041,7 +1056,8 @@ void EspNowSecurityOwner::sync_lifecycle_peers(const MonotonicMs now_ms) noexcep
 
 void EspNowSecurityOwner::on_verified_authority(const std::uint8_t type,
                                                 const ByteView plaintext) noexcept {
-  if (type < 5 || type > 7 || plaintext.data == nullptr ||
+  if (((type < 5 || type > 7) && type != sdkv1::kAuthorityTypeProxyPolicy) ||
+      plaintext.data == nullptr ||
       plaintext.size <= sdkv1::kAuthorityBodyHeadSize ||
       plaintext.size > authority_rx_staged_[0].body.size()) return;
   for (AuthorityRxStage& slot : authority_rx_staged_) {
@@ -1052,6 +1068,49 @@ void EspNowSecurityOwner::on_verified_authority(const std::uint8_t type,
     slot.used = true;
     return;
   }
+}
+
+// ProxyPolicySet (#176): durable before applied, applied before
+// acknowledged. The ACK always names the generation now stored, so the
+// site counts a proxy applied only for what survives a power cut.
+void EspNowSecurityOwner::apply_proxy_policy(const ByteView tail) noexcept {
+  sdkv1::ProxyPolicySet set{};
+  if (!sdkv1::proxy_policy_set_decode(tail, set)) return;  // malformed: no ACK
+  const std::uint64_t site_id = stores_->site().site().site_id;
+  sdkv1::ProxyPolicyStore store = stores_->proxy_policy();
+  sdkv1::ProxyPolicyRecord stored{};
+  bool has = false;
+  const Status loaded = store.load(site_id, stored, has);
+  bool write = false;
+  sdkv1::ProxyPolicyStatus status =
+      loaded ? sdkv1::proxy_policy_decide(has ? &stored : nullptr, set, write)
+             : sdkv1::ProxyPolicyStatus::StorageFailed;
+  if (!loaded) coordinator().set_proxy_policy(site_id, false);
+  if (write) {
+    sdkv1::ProxyPolicyRecord record{};
+    record.site_id = site_id;
+    record.generation = set.generation;
+    record.zero_touch_open = set.zero_touch_open;
+    record.content = set.content;
+    const Status committed = store.commit(record);
+    const Status readback = store.load(site_id, stored, has);
+    if (!readback) coordinator().set_proxy_policy(site_id, false);
+    if (!committed || !readback) status = sdkv1::ProxyPolicyStatus::StorageFailed;
+  }
+  if (status == sdkv1::ProxyPolicyStatus::Applied && has) {
+    coordinator().set_proxy_policy(site_id, stored.zero_touch_open);
+  }
+  std::array<std::uint8_t, sdkv1::kProxyPolicyAckSize> ack{};
+  if (!sdkv1::proxy_policy_ack_encode(status, has ? stored.generation : 0, ack)) return;
+  for (AuthorityTxStage& slot : authority_tx_staged_) {
+    if (slot.used) continue;
+    std::memcpy(slot.body.data(), ack.data(), ack.size());
+    slot.type = sdkv1::kAuthorityTypeProxyPolicy;
+    slot.size = ack.size();
+    slot.used = true;
+    return;
+  }
+  // A full queue drops the ACK: the site resends and gets it next time.
 }
 
 void EspNowSecurityOwner::drain_authority_tx(const MonotonicMs now_ms) noexcept {
@@ -1112,12 +1171,14 @@ void EspNowSecurityOwner::feed_lifecycle_inputs(const MonotonicMs now_ms) noexce
         stamp.peer = stores_->site().site().gateway_count != 0
                          ? stores_->site().site().gateways[0] : kInvalidNodeId;
         stamp.assignment_generation = head.generation;
-        (void)lifecycle().dispatch(
-            sdkv1::LifecycleInput::Authority(
-                stamp, slot.type,
-                ByteView{slot.body.data() + sdkv1::kAuthorityBodyHeadSize,
-                         slot.size - sdkv1::kAuthorityBodyHeadSize}),
-            now_ms);
+        const ByteView tail{slot.body.data() + sdkv1::kAuthorityBodyHeadSize,
+                            slot.size - sdkv1::kAuthorityBodyHeadSize};
+        if (slot.type == sdkv1::kAuthorityTypeProxyPolicy) {
+          apply_proxy_policy(tail);
+        } else {
+          (void)lifecycle().dispatch(sdkv1::LifecycleInput::Authority(stamp, slot.type, tail),
+                                     now_ms);
+        }
       }
       secure_clear(slot.body);
       slot = AuthorityRxStage{};

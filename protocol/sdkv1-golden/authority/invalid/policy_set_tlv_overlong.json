@@ -1,0 +1,8 @@
+{
+  "codec": "proxy_policy_set",
+  "encoded_hex": "010100000000000300410000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "name": "policy_set_tlv_overlong",
+  "note": "65 TLV bytes"
+}

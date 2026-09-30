@@ -9,6 +9,9 @@
 
 namespace routeloom {
 
+// GK epochs start at 1: 0 asks a provider for its current GK epoch.
+constexpr std::uint32_t kCurrentGroupEpoch = 0;
+
 // Largest crypto counter a context may issue: Wire v2 carries u48 counters
 // (2.8e14 frames per epoch). A context that reaches it must move to a new
 // epoch; counters are never wrapped under the same key.
@@ -102,8 +105,14 @@ class SecurityProvider {
   }
   virtual bool accepts_group_epoch(std::uint32_t /*g*/) const noexcept { return true; }
   // Group frames have no assignment generation. A production provider
-  // checks the applied site revocation set by sender identity for every GK.
-  virtual bool revoked_group_sender(NodeId /*sender*/) const noexcept { return false; }
+  // checks the applied site revocation set by sender identity: an entry
+  // refuses every GK epoch below its readmit epoch (all of them without
+  // one, #146). `gk_epoch` is the frame's GK epoch, or kCurrentGroupEpoch
+  // for "the provider's current GK" where no frame is at hand.
+  virtual bool revoked_group_sender(NodeId /*sender*/,
+                                    std::uint32_t /*gk_epoch*/) const noexcept {
+    return false;
+  }
   // True while a next-GK frame authenticated but its durable promote is
   // still outstanding: the node holds (not drops) the triggering frame
   // and retries it after the promote. Providers without GK state never

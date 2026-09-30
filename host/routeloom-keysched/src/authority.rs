@@ -27,6 +27,21 @@ pub const GROUP_KEY_UPDATE: usize = 56;
 pub const GROUP_KEY_ACK: usize = 56;
 pub const GROUP_KEY_ACTIVATE: usize = 56;
 pub const GROUP_KEY_PULL: usize = 28;
+/// Type 9 (#176) tails behind the body head.
+pub const PROXY_POLICY_SET_FIXED: usize = 10;
+pub const PROXY_POLICY_TLV_MAX: usize = 64;
+pub const PROXY_POLICY_ACK: usize = 8;
+pub const PROXY_POLICY_VERSION: u8 = 1;
+pub const PROXY_POLICY_SUB_SET: u8 = 1;
+pub const PROXY_POLICY_SUB_ACK: u8 = 2;
+/// Ack status: stored and applied.
+pub const PROXY_POLICY_APPLIED: u8 = 0;
+/// Ack status: older than the stored generation (kept the stored one).
+pub const PROXY_POLICY_STALE: u8 = 1;
+/// Ack status: same generation, other content (refused).
+pub const PROXY_POLICY_CONFLICT: u8 = 2;
+/// Ack status: the proxy could not store it (not applied).
+pub const PROXY_POLICY_STORAGE_FAILED: u8 = 3;
 
 pub const OVERLAP_REMOVAL_S: u16 = 10;
 pub const OVERLAP_NORMAL_S: u16 = 60;
@@ -483,6 +498,108 @@ impl GroupKeyPull {
             current: u32::from_be_bytes(input[16..20].try_into().expect("4 bytes")),
             next: u32::from_be_bytes(input[20..24].try_into().expect("4 bytes")),
             reason: PullReason::from_u8(input[24]).ok_or(BodyError::BadReason)?,
+        })
+    }
+}
+
+/// Type 9 ProxyPolicySet tail (#176, authority -> member proxy): ver=1 |
+/// sub=1 | flags (bit0 zero_touch_open) | reserved 0 | generation:u32 !=0
+/// | tlv_len:u16 | tlv (<= 64 B, reserved for the power-on join schedule:
+/// carried and digested by the proxy, never interpreted).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProxyPolicySet {
+    pub generation: u32,
+    pub zero_touch_open: bool,
+    pub tlv: Vec<u8>,
+}
+
+impl ProxyPolicySet {
+    pub fn encode(&self) -> Result<Vec<u8>, BodyError> {
+        if self.generation == 0 {
+            return Err(BodyError::ZeroGeneration);
+        }
+        if self.tlv.len() > PROXY_POLICY_TLV_MAX {
+            return Err(BodyError::Surplus);
+        }
+        let mut out = Vec::with_capacity(PROXY_POLICY_SET_FIXED + self.tlv.len());
+        out.extend_from_slice(&[
+            PROXY_POLICY_VERSION,
+            PROXY_POLICY_SUB_SET,
+            u8::from(self.zero_touch_open),
+            0,
+        ]);
+        out.extend_from_slice(&self.generation.to_be_bytes());
+        out.extend_from_slice(&(self.tlv.len() as u16).to_be_bytes());
+        out.extend_from_slice(&self.tlv);
+        Ok(out)
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, BodyError> {
+        if input.len() < PROXY_POLICY_SET_FIXED {
+            return Err(BodyError::Truncated);
+        }
+        if input[0] != PROXY_POLICY_VERSION {
+            return Err(BodyError::BadVersion);
+        }
+        if input[1] != PROXY_POLICY_SUB_SET {
+            return Err(BodyError::BadOp);
+        }
+        if input[2] & !1 != 0 || input[3] != 0 {
+            return Err(BodyError::ReservedNonZero);
+        }
+        let generation = u32::from_be_bytes(input[4..8].try_into().expect("4 bytes"));
+        if generation == 0 {
+            return Err(BodyError::ZeroGeneration);
+        }
+        let tlv_len = usize::from(u16::from_be_bytes([input[8], input[9]]));
+        if tlv_len > PROXY_POLICY_TLV_MAX || input.len() > PROXY_POLICY_SET_FIXED + tlv_len {
+            return Err(BodyError::Surplus);
+        }
+        check_len(input, PROXY_POLICY_SET_FIXED + tlv_len)?;
+        Ok(Self {
+            generation,
+            zero_touch_open: input[2] & 1 != 0,
+            tlv: input[PROXY_POLICY_SET_FIXED..].to_vec(),
+        })
+    }
+}
+
+/// Type 9 ProxyPolicyAck tail (member proxy -> authority): ver=1 | sub=2 |
+/// status | reserved 0 | generation:u32 — the generation durable and
+/// applied on the proxy after the Set it answers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProxyPolicyAck {
+    pub status: u8,
+    pub generation: u32,
+}
+
+impl ProxyPolicyAck {
+    pub fn encode(&self) -> [u8; PROXY_POLICY_ACK] {
+        let mut out = [0_u8; PROXY_POLICY_ACK];
+        out[0] = PROXY_POLICY_VERSION;
+        out[1] = PROXY_POLICY_SUB_ACK;
+        out[2] = self.status;
+        out[4..8].copy_from_slice(&self.generation.to_be_bytes());
+        out
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, BodyError> {
+        check_len(input, PROXY_POLICY_ACK)?;
+        if input[0] != PROXY_POLICY_VERSION {
+            return Err(BodyError::BadVersion);
+        }
+        if input[1] != PROXY_POLICY_SUB_ACK {
+            return Err(BodyError::BadOp);
+        }
+        if input[3] != 0 {
+            return Err(BodyError::ReservedNonZero);
+        }
+        if input[2] > PROXY_POLICY_STORAGE_FAILED {
+            return Err(BodyError::BadResult);
+        }
+        Ok(Self {
+            status: input[2],
+            generation: u32::from_be_bytes(input[4..8].try_into().expect("4 bytes")),
         })
     }
 }

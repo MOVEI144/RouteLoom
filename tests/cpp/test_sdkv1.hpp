@@ -306,7 +306,7 @@ inline RevocationSet revocation_set(const std::uint32_t rs_epoch, const std::uin
   set.site_epoch_floor = floor;
   for (std::uint8_t i = 0; i < count; ++i) {
     set.entries[i] = RevocationEntry{0x00A1000000000100ULL + i * 7U, 2U + i,
-                                     RevocationReason::Removed};
+                                     RevocationReason::Removed, 0};
   }
   set.count = count;
   return set;

@@ -1,12 +1,12 @@
 {
-  "chunk_hex": "010196dc77dd4ac7417cdf9c0b7c9f37b82519fabc4f29e131383358e05f3dae7bdf005a002d0ba0a09893cdb610ef3da3aef04c208a7afca4ec8ad17f9b45998bbde6fe80bcd0196391cdfda3be62a47e2d16",
+  "chunk_hex": "0101fd6b8a1f16b6223bb136f66ef9104d3d377420d218ec3629f2dd539fb4419f87005a002fd268b0acb9eada958f661ff5fb043e3cc595aad33ee78dafaca4890c0a3350df8eb2a0d2a92691bed01a666bd8d308",
   "codec": "rrs_kind6_chunk",
-  "data_hex": "0ba0a09893cdb610ef3da3aef04c208a7afca4ec8ad17f9b45998bbde6fe80bcd0196391cdfda3be62a47e2d16",
+  "data_hex": "d268b0acb9eada958f661ff5fb043e3cc595aad33ee78dafaca4890c0a3350df8eb2a0d2a92691bed01a666bd8d308",
   "expect": "ok",
   "format": "routeloom-sdkv1-revocation-golden-v1",
-  "length": 45,
+  "length": 47,
   "name": "kind6_chunk_small_1",
   "note": "slice 1 of the small object",
-  "object_sha256_hex": "96dc77dd4ac7417cdf9c0b7c9f37b82519fabc4f29e131383358e05f3dae7bdf",
+  "object_sha256_hex": "fd6b8a1f16b6223bb136f66ef9104d3d377420d218ec3629f2dd539fb4419f87",
   "offset": 90
 }

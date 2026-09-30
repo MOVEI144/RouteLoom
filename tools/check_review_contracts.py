@@ -99,6 +99,9 @@ EXPECTED_FRAME_IDS = {
     "CONTROL_OBJECT": 49,
     "OBJECT_CHUNK": 50,
     "OBJECT_ACK": 51,
+    "APP_OBJECT_START": 64,
+    "APP_OBJECT_CHUNK": 65,
+    "APP_OBJECT_ACK": 66,
 }
 
 
@@ -106,6 +109,7 @@ EXPECTED_FRAME_IDS = {
 END_AAD_SOURCE_NAMES = {
     "kMajor": "version_major",
     "kMinor": "version_minor",
+    "header.minor": "version_minor",
     "header.type": "type",
     "header.flags": "flags",
     "header.delivery": "delivery_contract",

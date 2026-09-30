@@ -29,7 +29,8 @@
 #define ROUTELOOM_STORE_CREDENTIAL 1  /* RLC1 device credential (device) */
 #define ROUTELOOM_STORE_SDKV1_FORMAT 1  /* SDK v1 sealed records RLI1/RLS1/RRS1/RLV1 format */
 #define ROUTELOOM_STORE_SDKV1_SCHEMA 1  /* SDK v1 sealed records schema */
-#define ROUTELOOM_RRS1_OBJECT_VERSION 1  /* RRS1 signed revocation object */
+#define ROUTELOOM_RRS1_OBJECT_VERSION 2  /* RRS1 signed revocation object */
+#define ROUTELOOM_STORE_RLV1_SCHEMA 2  /* RLV1 local removal record schema */
 #define ROUTELOOM_STORE_RLP1_FORMAT 1  /* RLP1 resume slot */
 #define ROUTELOOM_STORE_RLP2_FORMAT 1  /* RLP2 resume slot */
 #define ROUTELOOM_STORE_MIGRATION_ACTIVE 1  /* Migration active record */

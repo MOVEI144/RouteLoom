@@ -305,8 +305,9 @@ bool RtcWriteAheadProvider::accepts_group_epoch(const std::uint32_t g) const noe
   return inner_.accepts_group_epoch(g);
 }
 
-bool RtcWriteAheadProvider::revoked_group_sender(const NodeId sender) const noexcept {
-  return inner_.revoked_group_sender(sender);
+bool RtcWriteAheadProvider::revoked_group_sender(const NodeId sender,
+                                                 const std::uint32_t gk_epoch) const noexcept {
+  return inner_.revoked_group_sender(sender, gk_epoch);
 }
 
 Status RtcWriteAheadProvider::next_counter(const SecurityContext& context,
