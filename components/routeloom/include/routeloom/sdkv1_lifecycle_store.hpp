@@ -19,9 +19,12 @@ constexpr std::uint32_t kLifecycleSeal = 0x4C583101U;
 constexpr std::size_t kLifecyclePayloadMax = 1521;
 constexpr std::size_t kLifecycleSlotBytes = 88 + kLifecyclePayloadMax;
 
+// LocalLeave (record schema 2, the other modes keep schema 1): the
+// device's own leave intent. It needs no signed proof, carries no payload
+// and is cleared, not held off, once erasure completes.
 enum class LifecycleMode : std::uint8_t {
   Idle = 0, Removing = 1, Holdoff = 2, UnassignedReady = 3,
-  Prepared = 4, Switching = 5, Recovering = 6,
+  Prepared = 4, Switching = 5, Recovering = 6, LocalLeave = 7,
 };
 
 struct LifecycleRecord {
@@ -50,6 +53,8 @@ class LifecycleStore final {
   Status initialize() noexcept;
   // Only a verified Notice, bound to the current RLS1, may create intent.
   Status begin_removal(const LifecycleRecord& record) noexcept;
+  // The device's own leave: from no record, Idle or UnassignedReady only.
+  Status begin_leave(const LifecycleRecord& record) noexcept;
   // Caller has verified the CA/SAK chain and the complete binding before
   // staging. Neither call changes the active RLS1 by itself.
   Status prepare(const LifecycleRecord& record) noexcept;

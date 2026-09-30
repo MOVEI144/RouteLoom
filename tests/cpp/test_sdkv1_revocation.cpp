@@ -3256,6 +3256,57 @@ void test_zt_adopt_cuts_prepared_stage() {
 
 }  // namespace
 
+// Device leave (#191): the LocalLeave intent (RLX1 schema 2, no proof) is
+// durable before anything is erased; a cut while writing it leaves either
+// no intent and the membership, or the intent. A reboot mid-erasure resumes
+// it. The site, RRS1 and resume state go, the identity stays, the journal
+// ends empty (no holdoff, no watermark) and the device restarts unassigned.
+void test_local_leave() {
+  NodeFixture f{};
+  CHECK(!f.dispatch(LifecycleInput::LocalLeave(), 1));  // not adopted yet
+  CHECK(f.provision(2, 14));
+  CHECK(f.snap().phase == LifecyclePhase::Active);
+  CHECK_OK(f.dispatch(LifecycleInput::LocalLeave(), 100));
+  CHECK(f.snap().phase == LifecyclePhase::Removing);
+  const LifecycleRecord intent = f.journal.record();
+  CHECK(intent.mode == LifecycleMode::LocalLeave && intent.payload.size == 0 &&
+        intent.site_id == kSiteId && intent.generation == 2 && intent.rs_floor >= 14);
+  ByteBuffer<kLifecycleSlotBytes> encoded{};
+  CHECK_OK(lifecycle_record_encode(intent, kLifecycleSeal, 1, encoded));
+  CHECK(encoded.bytes[8] == 0 && encoded.bytes[11] == 2);  // schema 2
+  LifecycleRecord decoded{};
+  CHECK_OK(lifecycle_record_decode(encoded.view(), decoded));
+  encoded.bytes[11] = 1;  // a schema-1 LocalLeave is not a record
+  CHECK(!lifecycle_record_decode(encoded.view(), decoded));
+  CHECK(!f.dispatch(LifecycleInput::LocalLeave(), 101));  // already leaving
+
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 200));  // power cut: resumes
+  CHECK(f.snap().phase == LifecyclePhase::Removing);
+  for (int i = 0; i < 24 && f.snap().phase == LifecyclePhase::Removing; ++i) {
+    CHECK_OK(f.dispatch(LifecycleInput::Poll(), 201 + i));
+  }
+  CHECK(f.snap().phase == LifecyclePhase::UnassignedReady);
+  CHECK(f.runtime.runtime_erased && f.runtime.trust_erased);
+  CHECK(!f.site.has_site() && !f.revocations.has_set() && f.identity.has_identity());
+  CHECK(!f.journal.has_record());
+  LifecycleAction action{};
+  CHECK_OK(f.lifecycle.take_action(action));
+  CHECK(action.tag == LifecycleActionTag::RestartUnassigned &&
+        action.reason == LifecycleActionReason::LocalLeave);
+
+  for (std::size_t byte = 0; byte <= kLifecycleSlotBytes; byte += 97) {
+    FaultyRecordStorage storage{kLifecycleSlotBytes};
+    LifecycleStore store{storage};
+    CHECK_OK(store.initialize());
+    storage.cut_call = 0;
+    storage.cut_bytes = byte;
+    CHECK(!store.begin_leave(intent));
+    LifecycleStore cold{storage};
+    (void)cold.initialize();
+    CHECK(!cold.has_record() || cold.record().mode == LifecycleMode::LocalLeave);
+  }
+}
+
 int main() {
   test_lifecycle_journal_retains_recovery_history();
   test_lifecycle_port_bundle_lifetime();
@@ -3270,6 +3321,7 @@ int main() {
   test_boot_unassigned_ready_does_not_reemit_reboot();
   test_adopt_network_disposition();
   test_removal_journal_powercuts();
+  test_local_leave();
   test_signed_prepare_stages_without_switching();
   test_zt_adopt_cuts_prepared_stage();
   test_commit_stored_receipt_drain_and_routestate();
