@@ -505,6 +505,12 @@ pub(super) struct MeshSnap {
     pub(super) applied_refused: u32,
     /// The stored JoinPolicy revision (0 before any).
     pub(super) policy_revision: u32,
+    /// `--c-app` (P05-C): boundary checks run and failed, posted jobs that
+    /// ran, messages the C application received (all 0 without it).
+    pub(super) c_checks: u32,
+    pub(super) c_check_failures: u32,
+    pub(super) c_posted_runs: u32,
+    pub(super) c_messages: u32,
 }
 
 #[allow(dead_code)]
@@ -690,6 +696,10 @@ pub(super) fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.applied_completed = get_u32(payload, &mut pos);
     snap.applied_refused = get_u32(payload, &mut pos);
     snap.policy_revision = get_u32(payload, &mut pos);
+    snap.c_checks = get_u32(payload, &mut pos);
+    snap.c_check_failures = get_u32(payload, &mut pos);
+    snap.c_posted_runs = get_u32(payload, &mut pos);
+    snap.c_messages = get_u32(payload, &mut pos);
     assert_eq!(pos, payload.len(), "G fully consumed");
     snap
 }

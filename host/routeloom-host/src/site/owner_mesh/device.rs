@@ -1,7 +1,8 @@
 //! Device API rows (V2-14) over the real Owners and Site Authority: leave
 //! and rejoin (J04), power cuts around the leave intent (F01-L), calls
-//! from inside Device callbacks (F05-R), latest-value sends (M09-D) and
-//! deferred APPLIED tickets (P05-O) — tests/e2e/scenarios.json.
+//! from inside Device callbacks (F05-R), latest-value sends (M09-D),
+//! deferred APPLIED tickets (P05-O) and the Device C API (P05-C) —
+//! tests/e2e/scenarios.json.
 
 use super::mesh::deliver_each;
 use super::*;
@@ -422,6 +423,121 @@ fn mesh_p05_deferred_applied_ticket() {
             .is_some_and(|t| t.state == DELIVERY_INDETERMINATE),
         "the origin never reports the late one applied: {late:?}"
     );
+}
+
+/// P05-C: the Device C API from C (owner_mesh_c_app.c on A and B). Short
+/// and unknown-version structs are refused. A sends 20/20 to G with
+/// rl_dev_send and receives in on_message. B's APPLIED request to A, which
+/// A completes from C 2 s later, applies once only after the completion, 20
+/// times; calls from the APPLIED callback are Busy; a completion after the
+/// deadline is refused. rl_dev_leave restarts A unassigned (LEFT),
+/// rl_dev_request_join brings it back (JOINED), and a job posted from the
+/// membership callback runs on a later Owner pass.
+#[test]
+fn mesh_p05_c_device_api() {
+    let Some(mut world) = MeshWorld::start_with_args("p05-c", Switch::direct(), &[], &["--c-app"])
+    else {
+        return; // no C++ peers: skip (ignore-equivalent)
+    };
+    converge(&mut world, "p05-c");
+    let (a, b) = (world.index_of(NODE_A), world.index_of(NODE_B));
+    for i in [a, b] {
+        let s = &world.snaps[i];
+        assert!(
+            s.c_checks >= 5 && s.c_check_failures == 0,
+            "C boundary checks on {i}: {} of {} failed",
+            s.c_check_failures,
+            s.c_checks
+        );
+    }
+    deliver_each(&mut world, a, 0, 20, b"p05-c");
+    let messages = world.snaps[a].c_messages;
+    deliver_each(&mut world, 0, a, 1, b"p05-c-down");
+    assert_eq!(world.snaps[a].c_messages, messages + 1, "C on_message");
+
+    world.peers[a].defer_applied(2_000);
+    let lease = world.peers[a].applied_lease();
+    for round in 0..20_u32 {
+        let completed = world.snaps[a].applied_completed;
+        let last = world.snaps[b]
+            .app_tx
+            .iter()
+            .map(|t| t.seq)
+            .max()
+            .unwrap_or(0);
+        world.peers[b].applied_send(NODE_A, &lease, &round.to_le_bytes());
+        until(&mut world, 1_900, |_| false);
+        let pending = world.snaps[b].app_tx.iter().find(|t| t.seq > last).cloned();
+        assert!(
+            pending
+                .as_ref()
+                .is_some_and(|t| t.state != DELIVERY_DELIVERED),
+            "round {round}: not applied before the completion: {pending:?}"
+        );
+        until(&mut world, 3_000, |w| {
+            w.snaps[b]
+                .app_tx
+                .iter()
+                .any(|t| t.seq > last && t.state == DELIVERY_DELIVERED)
+        });
+        let done = world.snaps[b].app_tx.iter().find(|t| t.seq > last).cloned();
+        assert!(
+            done.as_ref()
+                .is_some_and(|t| t.state == DELIVERY_DELIVERED && t.reason == "APP_APPLIED"),
+            "round {round}: applied once completed: {done:?}"
+        );
+        assert_eq!(world.snaps[a].applied_completed, completed + 1);
+    }
+    let s = &world.snaps[a];
+    assert!(
+        s.reentry_calls >= 40 && s.reentry_calls == s.reentry_busy,
+        "calls from the C APPLIED callback are Busy: {} of {}",
+        s.reentry_busy,
+        s.reentry_calls
+    );
+    world.peers[a].defer_applied(12_000);
+    let last = world.snaps[b]
+        .app_tx
+        .iter()
+        .map(|t| t.seq)
+        .max()
+        .unwrap_or(0);
+    world.peers[b].applied_send(NODE_A, &lease, b"late");
+    until(&mut world, 16_000, |_| false);
+    assert_eq!(
+        world.snaps[a].applied_refused, 1,
+        "the late completion is refused"
+    );
+    let late = world.snaps[b].app_tx.iter().find(|t| t.seq > last).cloned();
+    assert!(
+        late.as_ref()
+            .is_some_and(|t| t.state == DELIVERY_INDETERMINATE),
+        "the origin never reports the late one applied: {late:?}"
+    );
+
+    let reboots = world.peers[a].reboots;
+    let (status, op) = world.peers[a]
+        .device_op(true, world.now)
+        .expect("rl_dev_leave answered");
+    assert!(
+        status == STATUS_OK && op != 0,
+        "rl_dev_leave accepted: {status}"
+    );
+    until(&mut world, 5_000, |w| w.peers[a].reboots > reboots);
+    world.step(25);
+    let s = &world.snaps[a];
+    assert!(
+        world.peers[a].reboots > reboots && !s.has_site && s.stage == STAGE_JOINING,
+        "left and restarted unassigned: {s:?}"
+    );
+    assert!(s.op_last == op && s.op_result == reasons::REASON_LEFT);
+    rejoin(&mut world, a);
+    until(&mut world, 100, |_| false);
+    assert!(
+        world.snaps[a].c_posted_runs >= 1,
+        "the job posted from on_membership ran"
+    );
+    deliver_each(&mut world, a, 0, 5, b"p05-c-back");
 }
 
 /// JoinPolicy (J06-P): range and compare-and-set on A, the stored revision

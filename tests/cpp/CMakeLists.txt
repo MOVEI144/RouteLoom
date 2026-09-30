@@ -647,9 +647,10 @@ add_test(NAME routeloom_sdkv1_dev_route_tests COMMAND routeloom_sdkv1_dev_route_
 # Multi-node mesh peer (D04, issue #168): one real Owner + runtime + USB
 # node per process, driven by the Rust test
 # (host/routeloom-host/src/site/owner_mesh/), never by ctest.
-add_executable(routeloom_owner_mesh_peer owner_mesh_peer.cpp
+add_executable(routeloom_owner_mesh_peer owner_mesh_peer.cpp owner_mesh_c_app.c
     espnow_idf_stubs/idf_stubs.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device_c.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device_config.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device_migration.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_migration.cpp
@@ -665,6 +666,9 @@ add_executable(routeloom_owner_mesh_peer owner_mesh_peer.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_legacy_purge.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_security_floor.cpp)
 target_link_libraries(routeloom_owner_mesh_peer PRIVATE routeloom_core)
+# owner_mesh_c_app.c is the --c-app application: C11 on the Device C API.
+set_target_properties(routeloom_owner_mesh_peer PROPERTIES
+    C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 # The peer carries Device's remote-config target and channel plan (a
 # firmware image selects them with CONFIG_ROUTELOOM_CONFIG and
 # CONFIG_ROUTELOOM_MIGRATION); --remote-config and --channel-plan enable
