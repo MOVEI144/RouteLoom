@@ -3,9 +3,11 @@
 - `site.channel_plan.release` refuses with `NOT_READY` until every site
   member except the plan authority answered READY for the plan this daemon
   offered last. An offer drops the previous plan's report, and
-  `site.channel_plan.status` shows the `required` count.
-- A USB gateway hands each GATEWAY_SDK_RAM payload it received to its host
-  as a mesh message, which frees the mailbox slot.
+  `site.channel_plan.status` shows the `required` count. The gateway checks
+  each required member ID against READY for that plan before releasing.
+- A USB gateway hands each GATEWAY_SDK_RAM payload to its host and frees the
+  mailbox slot after ReceiveLog storage is confirmed. An unacknowledged
+  payload remains readable after USB session loss until its 60 s expiry.
 
 ### Fixed
 
