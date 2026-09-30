@@ -575,6 +575,47 @@ void test_refetched_blob_catches_up_after_switch() {
   CHECK(rig.port.committed == 6);
 }
 
+// A member that missed the switch was brought to the plan's channel by
+// its stranded search, and the verified commit arrives after the plan
+// expired: it records the plan applied in place instead of recovering.
+void test_expired_commit_settles_on_its_channel() {
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationParticipant participant(rig.participant_config, rig.storage,
+                                   verify, runner, &rig.hooks);
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow));
+  MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+  const MonotonicMs late = plan.expiry_ms + 60000;
+  CHECK_OK(participant.note_commit_evidence(
+      op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, late));
+  CHECK_OK(participant.prepare(blob, rig.measurements(), late + 10));
+  CHECK(participant.phase() == ParticipantPhase::Committed);
+  participant.poll(late + 20);
+  CHECK(participant.phase() == ParticipantPhase::Recovering);  // still on 1
+  RadioOperation move{};
+  move.kind = RadioOperationKind::ChannelCutover;
+  move.deadline_ms = late + 2000;
+  move.constraints.channel = 6;
+  move.constraints.outage_permitted = true;
+  (void)runner.request(move, late + 30);
+  runner.poll(late + 30);
+  CHECK(runner.committed_channel() == 6);
+  const int sets = rig.port.set_calls;
+  participant.poll(late + 40);
+  CHECK(participant.phase() == ParticipantPhase::Verifying);
+  CHECK(participant.active_channel() == 6);
+  CHECK(participant.active_epoch() == plan.new_epoch);
+  CHECK(rig.port.set_calls == sets);  // no timed switch of an expired plan
+}
+
 void test_verified_plan_only() {
   Rig rig{};
   rig.ops.visit_hard_cap_ms = 1000;
@@ -1787,6 +1828,7 @@ int main() {
   test_blob_alone_never_switches();
   test_commit_without_blob_refetches();
   test_refetched_blob_catches_up_after_switch();
+  test_expired_commit_settles_on_its_channel();
   test_verified_plan_only();
   test_required_set_gating();
   test_assess_survey_bookkeeping();

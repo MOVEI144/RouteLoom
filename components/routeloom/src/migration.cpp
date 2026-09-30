@@ -1366,6 +1366,19 @@ void MigrationParticipant::poll_helper(const MonotonicMs now_ms) noexcept {
 
 // --- poll / resume -----------------------------------------------------------------------------
 
+bool MigrationParticipant::settle_in_place(const MonotonicMs now_ms) noexcept {
+  // A member that missed the switch and found the site on the committed
+  // plan's channel already runs the plan: record it applied without a
+  // timed switch, so an expired plan does not strand it in recovery.
+  if (!plan_known_ || awaiting_blob_ || pending_hash_ != commit_plan_hash_ ||
+      committed_epoch_.value <= active_epoch_.value || runner_.busy() ||
+      runner_.committed_channel() != pending_plan_.new_channel) {
+    return false;
+  }
+  finish_cutover_applied(now_ms);
+  return true;
+}
+
 void MigrationParticipant::poll(const MonotonicMs now_ms) noexcept {
   switch (phase_) {
     case ParticipantPhase::Preparing:
@@ -1386,7 +1399,7 @@ void MigrationParticipant::poll(const MonotonicMs now_ms) noexcept {
           // scout traffic can bring newer signed state (04 §6/§9).
           if (map_to_authority(clock_mapping_, now_ms) >=
               pending_plan_.expiry_ms) {
-            enter_recovering(false);
+            if (!settle_in_place(now_ms)) enter_recovering(false);
           } else {
             begin_cutover(now_ms);
           }
@@ -1440,6 +1453,7 @@ void MigrationParticipant::poll(const MonotonicMs now_ms) noexcept {
       }
       break;
     case ParticipantPhase::Recovering:
+      if (settle_in_place(now_ms)) break;
       if (recovery_retry_pending_ && plan_known_ && clock_valid_ &&
           !runner_.busy() && now_ms >= switch_time_local()) {
         // Verified commit already held: re-follow once — but only inside
@@ -1459,6 +1473,9 @@ void MigrationParticipant::poll(const MonotonicMs now_ms) noexcept {
         // SLO is over.
         note_recovery_violation(now_ms);
       }
+      break;
+    case ParticipantPhase::RecoveryRequired:
+      (void)settle_in_place(now_ms);
       break;
     default:
       break;
