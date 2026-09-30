@@ -624,7 +624,8 @@ void test_late_commit_uses_the_stored_blob() {
   rig.ops.visit_hard_cap_ms = 1000;
   ChannelOperationRunner runner(rig.port, rig.ops);
   MigrationAuthority verify = rig.verifier_only();
-  MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+  MigrationPlan plan = rig.plan(2, 1, 6, 7500, 2);
+  plan.old_epoch = ChannelEpoch{0};
   std::array<std::uint8_t, 512> buf{};
   std::size_t size = 0;
   const ByteView blob = rig.encode(plan, buf, size);
@@ -641,10 +642,33 @@ void test_late_commit_uses_the_stored_blob() {
                              &rig.hooks);
   CHECK_OK(after.resume(kNow + 1000));
   CHECK(after.phase() == ParticipantPhase::Stable);
+  // An older commit is heard first, but its blob is absent. The newer
+  // stored blob must supersede that refetch, including its pending flag.
+  MigrationPlan missed = rig.plan(1, 1, 11, 7500, 1);
+  std::array<std::uint8_t, 512> missed_buf{};
+  std::size_t missed_size = 0;
+  const Digest256 missed_hash = plan_digest(rig.encode(missed, missed_buf, missed_size));
+  const AuthorityOperation missed_op = rig.operation(missed, missed_hash, Digest256{});
+  const Digest256 missed_sig = sign_commit(missed_op, missed_hash, missed.new_epoch);
+  CHECK_OK(after.note_commit_evidence(missed_op, missed_hash, missed.new_epoch,
+                                      ByteView{missed_sig.data(), missed_sig.size()}, kNow + 1500));
+  CHECK(after.phase() == ParticipantPhase::Recovering);
   CHECK_OK(after.note_commit_evidence(op, hash, plan.new_epoch,
                                       ByteView{sig.data(), sig.size()}, kNow + 2000));
   CHECK(after.phase() == ParticipantPhase::Committed);
-  CHECK(after.stats().blob_refetches == 0);
+  CHECK(after.stats().blob_refetches == 1);  // only the older missing plan
+  const MonotonicMs late = plan.expiry_ms + 60000;
+  CHECK_OK(after.note_clock(ClockMapping{0, 10}, late));
+  RadioOperation move{};
+  move.kind = RadioOperationKind::ChannelCutover;
+  move.deadline_ms = late + 2000;
+  move.constraints.channel = 6;
+  move.constraints.outage_permitted = true;
+  (void)runner.request(move, late);
+  runner.poll(late);
+  after.poll(late + 10);
+  CHECK(after.phase() == ParticipantPhase::Verifying);
+  CHECK(after.active_epoch() == plan.new_epoch);
 }
 
 void test_verified_plan_only() {

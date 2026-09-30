@@ -1016,6 +1016,9 @@ Status MigrationParticipant::commit(const VerifiedAuthorityPlan& verified,
     pending_plan_ = stored_plan;
     pending_hash_ = verified.plan_hash();
     plan_known_ = true;
+    awaiting_blob_ = false;
+    helper_index_ = static_cast<std::size_t>(-1);
+    helper_visit_active_ = false;
     enter_committed(now_ms);
     return Status::success();
   }
