@@ -402,6 +402,7 @@ class Device {
   bool in_callback_{false};
   DeviceObserver* device_observer_{nullptr};
   // Event bookkeeping (see the header comment).
+  bool stage_known_{false};
   MembershipStage stage_{MembershipStage::Unprovisioned};
   std::uint16_t stage_reason_{0};
   MonotonicMs stage_since_ms_{0};

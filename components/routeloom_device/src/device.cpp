@@ -677,7 +677,13 @@ void Device::update_membership(const MonotonicMs now_ms) noexcept {
   }
   pending_authority_ = joiner.counters.pendings > pending_base_;
   const MembershipStage stage = current_stage();
-  if (stage != stage_) {
+  if (!stage_known_) {
+    // The stage this boot starts in is not a change: no event.
+    stage_known_ = true;
+    stage_ = stage;
+    stage_since_ms_ = now_ms;
+    if (stage == MembershipStage::Member) member_since_ms_ = now_ms;
+  } else if (stage != stage_) {
     std::uint16_t cause = ROUTELOOM_REASON_MEMBERSHIP_CHANGED;
     switch (stage) {
       case MembershipStage::Member: cause = ROUTELOOM_REASON_JOINED; break;
