@@ -258,6 +258,10 @@ void Device::poll_channel_plan(const MonotonicMs now_ms) noexcept {
   if (owner_->coordinator().note_plan_cutover(channel, generation)) {
     plan.noted_channel = channel;
     plan.noted_generation = generation;
+    // A searched candidate is heard at once, not after the ramped
+    // rediscovery backoff of the channel it left.
+    NeighborDiscovery* discovery = owner_->discovery();
+    if (plan.search_channel != 0 && discovery != nullptr) discovery->rearm_repair();
   }
 }
 
@@ -277,7 +281,12 @@ void Device::search_stranded(DeviceChannelPlan& plan, const MonotonicMs now_ms) 
   const MigrationParticipant& participant = agent.participant();
   NodeId bound[1]{};
   const bool live = runtime_->migration_peers(bound, 1) != 0;
-  if (plan.authority || participant.in_progress() || runtime_->radio_operation_busy()) {
+  // A plan in flight owns the radio; a commit waiting for a clock sample
+  // while nothing is heard does not.
+  const bool plan_owns_radio =
+      participant.in_progress() &&
+      !(participant.phase() == ParticipantPhase::Committed && !participant.clock_valid());
+  if (plan.authority || plan_owns_radio || runtime_->radio_operation_busy()) {
     plan.isolated_since = 0;
     return;
   }
