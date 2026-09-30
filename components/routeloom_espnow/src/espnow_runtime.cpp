@@ -629,6 +629,7 @@ Status EspNowRuntime::adopt_member_node(const routeloom::NodeConfig& adopted) no
   GatewayServiceSink* const gateway_sink = node_.gateway_sink();
   ConfigEndpointSink* const config_sink = node_.config_sink();
   DiagnosticSink* const diagnostic_sink = node_.diagnostic_sink();
+  AppliedEndpointSink* const applied_sink = node_.applied_sink();
   node_.~MeshNode();
   new (&node_) MeshNode(applied, *this, security_, observer_);
   // Autonomy wire probes are assembled by the runtime, not MeshNode;
@@ -642,6 +643,7 @@ Status EspNowRuntime::adopt_member_node(const routeloom::NodeConfig& adopted) no
   if (gateway_sink != nullptr) (void)node_.set_gateway_sink(gateway_sink);
   if (config_sink != nullptr) (void)node_.set_config_sink(config_sink);
   if (diagnostic_sink != nullptr) (void)node_.set_diagnostic_sink(diagnostic_sink);
+  if (applied_sink != nullptr) (void)node_.set_applied_sink(applied_sink);
   return Status::success();
 }
 

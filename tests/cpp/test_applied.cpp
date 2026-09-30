@@ -1017,6 +1017,13 @@ void test_deferred_ticket() {
   } sink;
   b->set_applied_sink(&sink);
 
+  SendOptions coalesced = applied_options(5000, 1);
+  coalesced.coalesce_key = 1;
+  MessageId refused{};
+  CHECK(a->send_applied(2, user_payload(), b->applied_lease(), coalesced, w.now, refused).code ==
+        StatusCode::InvalidArgument);
+  CHECK(sink.calls == 0);
+
   const MessageId id = applied_exchange(w);
   w.run(1000);  // past the app window twice: both QUERYs see Pending
   CHECK(sink.calls == 1 && (sink.ticket >> 32) == 102);
@@ -1047,6 +1054,86 @@ void test_deferred_ticket() {
   w.run(200);
   CHECK(b->applied_stats().results_emitted == emitted);
   CHECK(a->delivery(late).state == DeliveryState::Indeterminate);
+}
+
+// Deferred tickets are bounded: with kAppliedTicketMax open, the next
+// request is refused Capacity without running the endpoint; completing one
+// ticket frees its place for the next request.
+void test_deferred_ticket_cap() {
+  World w;
+  MeshNode* a = w.add(1);
+  MeshNode* b = w.add(2);
+  w.start_all();
+  w.link(1, 2);
+  struct DeferringSink final : AppliedEndpointSink {
+    std::vector<std::uint64_t> tickets;
+    void on_applied_request(const AppliedRequest& request,
+                            AppliedReply& reply) noexcept override {
+      tickets.push_back(request.ticket);
+      reply.deferred = true;
+    }
+  } sink;
+  b->set_applied_sink(&sink);
+  for (std::size_t i = 0; i <= kAppliedTicketMax; ++i) {
+    (void)applied_exchange(w, 8000);
+    w.run(150);
+  }
+  CHECK(sink.tickets.size() == kAppliedTicketMax);
+  CHECK(b->applied_stats().refusals_capacity == 1);
+  AppliedReply reply{};
+  reply.outcome = ep::AppResultOutcome::Success;
+  CHECK_OK(b->complete_applied(sink.tickets.front(), reply, w.now));
+  const MessageId next = applied_exchange(w, 8000);
+  w.run(150);
+  CHECK(sink.tickets.size() == kAppliedTicketMax + 1);
+  CHECK(a->delivery(next).state != DeliveryState::Failed);
+  // Completed verdicts are acknowledged, so a steady stream of deferred
+  // requests reuses their records beyond the pool of kAppliedResultCapacity
+  // well within the records' retention.
+  for (std::size_t i = 1; i <= kAppliedTicketMax; ++i) {
+    CHECK_OK(b->complete_applied(sink.tickets[i], reply, w.now));
+  }
+  w.run(500);
+  for (std::size_t round = 0; round < 2 * kAppliedResultCapacity; ++round) {
+    const MessageId id = applied_exchange(w, 8000);
+    w.run(150);
+    CHECK_OK(b->complete_applied(sink.tickets.back(), reply, w.now));
+    CHECK(w.run_until([&] { return a->delivery(id).state == DeliveryState::Delivered; }, 2000));
+  }
+  CHECK(b->applied_stats().refusals_capacity == 1);
+}
+
+// Pending tickets cannot publish application success after their source
+// is revoked or the local node cancels its work for leave.
+void test_deferred_ticket_invalidation() {
+  for (const bool leave : {false, true}) {
+    World w;
+    w.add(1);
+    MeshNode* b = w.add(2);
+    w.start_all();
+    w.link(1, 2);
+    struct Sink final : AppliedEndpointSink {
+      std::uint64_t ticket{0};
+      void on_applied_request(const AppliedRequest& request, AppliedReply& reply) noexcept override {
+        ticket = request.ticket;
+        reply.deferred = true;
+      }
+    } sink;
+    CHECK_OK(b->set_applied_sink(&sink));
+    (void)applied_exchange(w);
+    w.run(150);
+    CHECK(sink.ticket != 0);
+    if (leave) {
+      CHECK_OK(b->cancel_all("CANCELLED_LEAVE"));
+    } else {
+      b->revoke_routes(1, w.now);
+    }
+    const auto committed = b->applied_stats().results_committed;
+    AppliedReply reply{};
+    reply.outcome = ep::AppResultOutcome::Success;
+    CHECK(b->complete_applied(sink.ticket, reply, w.now).code == StatusCode::NotFound);
+    CHECK(b->applied_stats().results_committed == committed);
+  }
 }
 
 void test_no_sink_commits_no_endpoint() {
@@ -1730,6 +1817,8 @@ int main() {
   test_app_rejected_verdict();
   test_no_sink_commits_no_endpoint();
   test_deferred_ticket();
+  test_deferred_ticket_cap();
+  test_deferred_ticket_invalidation();
   test_stale_lease_refusal_and_bootstrap();
   test_malformed_body_refusal();
   test_query_recovery_resends_result();

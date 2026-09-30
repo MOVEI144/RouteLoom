@@ -306,6 +306,7 @@ endif()
 add_executable(routeloom_espnow_owner_reapply_tests test_espnow_owner_reapply.cpp
     espnow_idf_stubs/idf_stubs.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_security_owner.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_sdkv1_store.cpp)
@@ -319,9 +320,10 @@ target_include_directories(routeloom_espnow_owner_reapply_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/include)
 target_compile_options(routeloom_espnow_owner_reapply_tests PRIVATE
     -Wall -Wextra -Wpedantic -Werror -Wno-unused-variable -Wno-unused-parameter
+    -Wno-unused-function -Wno-unused-private-field
     -ffunction-sections -fdata-sections)
-# The test drives Device::post/step only; the boot path it never calls is
-# dropped instead of linking the NVS and entropy adapters.
+# Unused factory bring-up is dropped; the test uses the real store and
+# runtime with the fixture's storage port and platform stand-ins.
 target_link_options(routeloom_espnow_owner_reapply_tests PRIVATE -Wl,--gc-sections)
 add_test(NAME routeloom_espnow_owner_reapply_tests COMMAND routeloom_espnow_owner_reapply_tests)
 

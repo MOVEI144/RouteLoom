@@ -216,4 +216,33 @@ Status ProxyPolicyStore::erase() noexcept {
   return Status::success();
 }
 
+Status JoinPolicyStore::load(JoinPolicy& out, std::uint32_t& revision) noexcept {
+  out = JoinPolicy{};
+  revision = 0;
+  std::size_t size = 0;
+  bool present = false;
+  Status status = blobs_.blob_size(kJoinPolicyKey, size, present);
+  if (!status || !present) return status;
+  if (size != kJoinPolicyRecordLen) return Status::error(StatusCode::IntegrityError, "rljp1 size");
+  std::array<std::uint8_t, kJoinPolicyRecordLen> bytes{};
+  std::size_t read_len = 0;
+  status = blobs_.blob_read(kJoinPolicyKey, MutableByteView{bytes.data(), bytes.size()}, read_len);
+  if (!status) return status;
+  if (read_len != bytes.size()) return Status::error(StatusCode::IntegrityError, "rljp1 read length");
+  return join_policy_record_decode(ByteView{bytes.data(), bytes.size()}, out, revision);
+}
+
+Status JoinPolicyStore::commit(const JoinPolicy& policy, const std::uint32_t revision) noexcept {
+  std::array<std::uint8_t, kJoinPolicyRecordLen> bytes{};
+  Status status = join_policy_record_encode(policy, revision, bytes);
+  if (status) status = blobs_.blob_write(kJoinPolicyKey, ByteView{bytes.data(), bytes.size()});
+  if (!status) return status;
+  JoinPolicy stored{};
+  std::uint32_t stored_revision = 0;
+  if (!load(stored, stored_revision) || stored_revision != revision || !(stored == policy)) {
+    return Status::error(StatusCode::StorageFailure, "rljp1 readback");
+  }
+  return Status::success();
+}
+
 }  // namespace routeloom::sdkv1

@@ -36,6 +36,10 @@ struct SecurityContext {
 enum class SecurityProfile : std::uint8_t {
   Development = 0,  // EXPERIMENTAL; never advertise as production-secure
   Production = 1,
+  // MemberEdhoc before its certification record (08 §4) exists: production
+  // mechanisms, not yet claimed production-secure. Gates that require
+  // Production treat it as not Production.
+  Candidate = 2,
 };
 
 // State of the provider-owned context a frame would be sealed under

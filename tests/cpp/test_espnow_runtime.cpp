@@ -1256,9 +1256,16 @@ void test_adopt_member_node_keeps_node_startable() {
     void on_diagnostic_body(routeloom::NodeId, ByteView,
                             routeloom::MonotonicMs) noexcept override {}
   } diagnostic_sink;
+  struct AppliedSink final : routeloom::AppliedEndpointSink {
+    void on_applied_request(const routeloom::AppliedRequest&,
+                            routeloom::AppliedReply& reply) noexcept override {
+      reply.deferred = true;
+    }
+  } applied_sink;
   CHECK(runtime.node().set_config_sink(&config_sink).ok());
   CHECK(runtime.node().set_gateway_sink(&service_sink).ok());
   CHECK(runtime.node().set_diagnostic_sink(&diagnostic_sink).ok());
+  CHECK(runtime.node().set_applied_sink(&applied_sink).ok());
   routeloom::NodeConfig adopted = config.node;
   adopted.node = 0x00A1000000001234ULL;
   adopted.network = 0x0A1B2C3DUL;
@@ -1271,6 +1278,7 @@ void test_adopt_member_node_keeps_node_startable() {
   CHECK(runtime.node().config_sink() == &config_sink);
   CHECK(runtime.node().gateway_sink() == &service_sink);
   CHECK(runtime.node().diagnostic_sink() == &diagnostic_sink);
+  CHECK(runtime.node().applied_sink() == &applied_sink);
   // Probe/Result wire headers must use the installed identity, not the
   // firmware's pre-join static node/network after a reassigned join.
   CHECK(EspNowRuntimeTestAccess::wire_config(runtime).node == adopted.node);

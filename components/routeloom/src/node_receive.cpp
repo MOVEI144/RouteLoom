@@ -243,6 +243,9 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
                              now_ms);
       return;
     }
+    if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
+      observer_.on_verified_contact(frame.header.origin, now_ms);
+    }
     // Terminal admission probes (design-q116 §8.1 — all read-only): the ACK
     // + receipt pool slots, the control lane, a transaction, the APPLIED
     // result slot when a fresh one is needed, and the transaction deadline.

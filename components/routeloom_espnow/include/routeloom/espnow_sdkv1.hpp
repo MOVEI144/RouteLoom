@@ -60,6 +60,8 @@ class Sdkv1Stores {
   sdkv1::LifecycleStore& lifecycle() noexcept { return lifecycle_; }
   // RLPP1 lives in the site namespace (no RAM beyond the call).
   sdkv1::ProxyPolicyStore proxy_policy() noexcept { return sdkv1::ProxyPolicyStore(site_ns_); }
+  // RLJP1 lives in the lifecycle namespace (no RAM beyond the call).
+  sdkv1::JoinPolicyStore join_policy() noexcept { return sdkv1::JoinPolicyStore(lifecycle_ns_); }
 
  private:
   std::size_t resume_slots_;

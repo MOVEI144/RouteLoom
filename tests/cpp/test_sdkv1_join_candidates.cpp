@@ -214,6 +214,20 @@ void j04_deny_then_other_site() {
   CHECK(s2.candidate != nullptr && s2.candidate->key.site_hint == 42);
 }
 
+void policy_avoid_holds() {
+  // JoinPolicy (#193): the avoid holds follow the configured lengths — a
+  // 5 min DenyNotHere hold is eligible again exactly at 5 min.
+  JoinCandidates t;
+  t.set_avoid(300000, 3600000);
+  CHECK(offer(t, 7, 42, 0xA5, 1, -30, 0, 1000) == JoinObserve::Inserted);
+  const Begun a = begin(t, 1100);
+  CHECK(t.apply_outcome(a.attempt, JoinAttemptOutcome::DenyNotHere, 0, 1200, entropy).ok());
+  CHECK(record_of(t, key(7, 42, 0xA5))->eligible_at_ms == 1200 + 300000);
+  CHECK(offer(t, 7, 42, 0xA5, 1, -20, 0, 1200 + 299990) == JoinObserve::Updated);
+  CHECK(peek(t, 1200 + 299999).candidate == nullptr);
+  CHECK(peek(t, 1200 + 300000).candidate != nullptr);
+}
+
 void j05_pending_retry_after() {
   // V1-J05 selection half: pending site is retried exactly at retry_after,
   // never earlier; an avoided site never competes meanwhile.
@@ -1441,6 +1455,7 @@ int main() {
       {"offer_never_releases_policy", offer_never_releases_policy},
       {"j04_deny_then_other_site", j04_deny_then_other_site},
       {"j05_pending_retry_after", j05_pending_retry_after},
+      {"policy_avoid_holds", policy_avoid_holds},
       {"ordering", ordering},
       {"freshness_and_flags", freshness_and_flags},
       {"proxy_best_two", proxy_best_two},

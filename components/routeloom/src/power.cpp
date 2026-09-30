@@ -1082,8 +1082,12 @@ void PowerCoordinator::restore_pending(const PowerImage& image,
       notify_pending_result(record, resumed.code);
       continue;
     }
-    const SendOptions options{record.delivery, record.priority, remaining,
-                              record.hop_limit, true};
+    SendOptions options{};
+    options.delivery = record.delivery;
+    options.priority = record.priority;
+    options.lifetime_ms = remaining;
+    options.hop_limit = record.hop_limit;
+    options.persist_across_sleep = true;
     // Resume under the ORIGINAL logical id, not a fresh send() allocation:
     // the destination may already have delivered the payload and lost only
     // the end receipt — terminal dedup keyed on this id must still suppress

@@ -284,7 +284,7 @@ class JoinCandidates {
   MonotonicMs next_eligible_ms(MonotonicMs now_ms) noexcept;
   // Deadline of the next scan when nothing is eligible: a jittered
   // saturated backoff in the cycle counter k, cut by the nearest pending
-  // eligibility and hard-capped at +600 s so unknown sites are still
+  // eligibility and hard-capped by the retry policy (default +600 s) so unknown sites are still
   // rediscovered under long avoids (design §4.1). k counts failed scan
   // cycles; an OFFER alone never resets it.
   Status next_scan_deadline(MonotonicMs now_ms, EntropySource& entropy,
@@ -307,6 +307,16 @@ class JoinCandidates {
   void set_preferred(std::uint64_t site_id, std::uint32_t org_hint,
                      std::uint32_t site_hint) noexcept;
   std::uint32_t preferred_hint(std::uint32_t org_hint) const noexcept;
+
+  // --- policy ---
+  // Hold lengths after an authenticated DenyNotHere / DenyBlocked
+  // (JoinPolicy); an existing hold keeps the length it was given.
+  void set_avoid(std::uint32_t not_here_ms, std::uint32_t blocked_ms) noexcept {
+    avoid_not_here_ms_ = not_here_ms;
+    avoid_blocked_ms_ = blocked_ms;
+  }
+
+  void set_retry_max(std::uint32_t retry_max_ms) noexcept { retry_max_ms_ = retry_max_ms; }
 
   // --- accessors ---
   // First occupied record carrying `key` (or nullptr). The mutable overload
@@ -350,6 +360,9 @@ class JoinCandidates {
   std::uint64_t preferred_site_id_{0};
   std::uint32_t preferred_org_hint_{0};
   std::uint32_t preferred_site_hint_{0};
+  std::uint32_t avoid_not_here_ms_{static_cast<std::uint32_t>(kJoinAvoidNotHereMs)};
+  std::uint32_t avoid_blocked_ms_{static_cast<std::uint32_t>(kJoinAvoidBlockedMs)};
+  std::uint32_t retry_max_ms_{static_cast<std::uint32_t>(kJoinBackoffMaxMs)};
   JoinCandidatesStats stats_{};
 };
 

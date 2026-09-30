@@ -548,6 +548,9 @@ Status MembershipLifecycle::dispatch(const LifecycleInput& input, const Monotoni
     case LifecycleInputTag::Stop:
       status = on_stop(now_ms);
       break;
+    case LifecycleInputTag::LocalLeave:
+      status = on_local_leave(now_ms);
+      break;
   }
   refresh_snapshot();
   return status;
@@ -595,8 +598,8 @@ MonotonicMs MembershipLifecycle::next_deadline() const noexcept {
   MonotonicMs next = 0xFFFFFFFFFFFFFFFFULL;
   if (phase_ == LifecyclePhase::ApplyingRrs || phase_ == LifecyclePhase::Removing) return 0;
   if (phase_ == LifecyclePhase::Holdoff) {
-    return holdoff_start_ <= 0xFFFFFFFFFFFFFFFFULL - 600000
-               ? holdoff_start_ + 600000 : 0xFFFFFFFFFFFFFFFFULL;
+    return holdoff_start_ <= 0xFFFFFFFFFFFFFFFFULL - config_.holdoff_ms
+               ? holdoff_start_ + config_.holdoff_ms : 0xFFFFFFFFFFFFFFFFULL;
   }
   if (need_rrs() && next_get_allowed_ < next) next = next_get_allowed_;
   if (pending_ack_ && pending_ack_due_ < next) next = pending_ack_due_;
@@ -687,7 +690,8 @@ void MembershipLifecycle::refresh_snapshot() noexcept {
   snapshot_.holdoff_remaining_ms = 0;
   if (phase_ == LifecyclePhase::Holdoff) {
     const MonotonicMs elapsed = last_now_ >= holdoff_start_ ? last_now_ - holdoff_start_ : 0;
-    snapshot_.holdoff_remaining_ms = elapsed < 600000 ? 600000 - elapsed : 0;
+    snapshot_.holdoff_remaining_ms =
+        elapsed < config_.holdoff_ms ? config_.holdoff_ms - elapsed : 0;
   }
 }
 
@@ -1465,6 +1469,27 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
         }
         return status;
       }
+      if (record.mode == LifecycleMode::LocalLeave) {
+        // The device's own intent needs no signature, only its identity and,
+        // while the site record still stands, the same membership binding.
+        const SiteStoreHealth health = site_.health();
+        if (!identity_.has_identity() || identity_.quarantined() || identity_.uncertain() ||
+            identity_.identity().node_id != config_.self || record.self != config_.self ||
+            !health.initialized || health.quarantined || health.unsupported_mask != 0 ||
+            health.read_error_mask != 0 || health.active_load_failed ||
+            (site_.has_site() && (site_.site().site_id != record.site_id ||
+                                  site_.site().network != record.old_network ||
+                                  site_.site().assignment_generation != record.generation))) {
+          enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+          return Status::success();
+        }
+        adopted_ = Adopted{};
+        phase_ = LifecyclePhase::Removing;
+        removal_step_ = RemovalStep::Runtime;
+        removal_cursor_ = 0;
+        removal_attempts_ = 0;
+        return Status::success();
+      }
       if (record.mode == LifecycleMode::Removing || record.mode == LifecycleMode::Holdoff) {
         if (!removal_proof_valid(record)) {
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
@@ -1505,7 +1530,8 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
         emit_action(LifecycleActionTag::AdoptNetwork, LifecycleActionReason::None);
         return Status::success();
       }
-      if (record.mode == LifecycleMode::UnassignedReady) {
+      if (record.mode == LifecycleMode::UnassignedReady ||
+          record.mode == LifecycleMode::LeftReady) {
         const SiteStoreHealth health = site_.health();
         if (!identity_.has_identity() || identity_.quarantined() || identity_.uncertain() ||
             identity_.identity().node_id != config_.self || record.self != config_.self ||
@@ -1535,7 +1561,7 @@ Status MembershipLifecycle::on_poll(const MonotonicMs now_ms) noexcept {
   if (phase_ == LifecyclePhase::Removing) return removal_poll(now_ms);
   if (phase_ == LifecyclePhase::Holdoff) {
     if (now_ms < holdoff_start_) holdoff_start_ = now_ms;
-    if (now_ms - holdoff_start_ >= 600000) {
+    if (now_ms - holdoff_start_ >= config_.holdoff_ms) {
       if (journal_ != nullptr && journal_->unassigned_ready()) {
         phase_ = LifecyclePhase::UnassignedReady;
         emit_action(LifecycleActionTag::RestartUnassigned, LifecycleActionReason::None);
@@ -1846,8 +1872,11 @@ bool MembershipLifecycle::never_assigned() const noexcept {
 }
 
 bool MembershipLifecycle::reassigned_after_removal() const noexcept {
-  if (journal_ == nullptr || !journal_->has_record() ||
-      journal_->record().mode != LifecycleMode::UnassignedReady || !site_.has_site()) return false;
+  if (journal_ == nullptr || !journal_->has_record() || !site_.has_site() ||
+      (journal_->record().mode != LifecycleMode::UnassignedReady &&
+       journal_->record().mode != LifecycleMode::LeftReady)) {
+    return false;
+  }
   const SiteStoreHealth health = site_.health();
   if (!health.initialized || health.quarantined || health.uncertain ||
       health.unsupported_mask != 0 || health.read_error_mask != 0 ||
@@ -1855,6 +1884,8 @@ bool MembershipLifecycle::reassigned_after_removal() const noexcept {
   const LifecycleRecord& previous = journal_->record();
   const SiteRecord& current = site_.site();
   if (previous.self != config_.self) return false;
+  // A local leave sets no watermark: any site, the left one included.
+  if (previous.mode == LifecycleMode::LeftReady) return true;
   if (current.site_id != previous.site_id) return true;
   return current.assignment_generation > previous.generation &&
          static_cast<std::uint32_t>(current.network) ==
@@ -1973,9 +2004,51 @@ Status MembershipLifecycle::on_removal(ByteView object, MonotonicMs now_ms) noex
   return Status::success();
 }
 
+Status MembershipLifecycle::on_local_leave(MonotonicMs now_ms) noexcept {
+  (void)now_ms;
+  if (journal_ == nullptr) return Status::error(StatusCode::Unsupported, "leave not wired");
+  if (phase_ == LifecyclePhase::Removing || phase_ == LifecyclePhase::Holdoff ||
+      phase_ == LifecyclePhase::UnassignedReady) {
+    return Status::error(StatusCode::InvalidState, "LEAVE_NOT_MEMBER");
+  }
+  // A cutover or an RRS1 apply finishes first; the caller retries.
+  if (phase_ != LifecyclePhase::Active && phase_ != LifecyclePhase::BootGate &&
+      phase_ != LifecyclePhase::SelfRevoked && phase_ != LifecyclePhase::Recovering) {
+    return Status::error(StatusCode::Busy, "LEAVE_BUSY");
+  }
+  if (!adopted_.site_ok || !site_.has_site()) {
+    return Status::error(StatusCode::InvalidState, "LEAVE_NOT_MEMBER");
+  }
+  LifecycleRecord intent{};
+  intent.mode = LifecycleMode::LocalLeave;
+  intent.self = config_.self;
+  intent.site_id = adopted_.site_id;
+  intent.old_network = adopted_.network;
+  intent.generation = adopted_.generation;
+  intent.rs_floor = adopted_.rs_epoch > site_.site().rs_epoch_floor
+                        ? adopted_.rs_epoch : site_.site().rs_epoch_floor;
+  intent.gk_floor = adopted_.gk_epoch;
+  intent.boot_witness = site_.site().boot_witness;
+  if (!bump_policy()) return Status::error(StatusCode::StorageFailure, "LEAVE_POLICY");
+  // The intent is durable before any state is erased; a cut from here on
+  // resumes the erasure at the next boot.
+  const Status written = journal_->begin_leave(intent);
+  if (!written) return written;
+  phase_ = LifecyclePhase::Removing;
+  pending_ack_ = false;
+  fetch_outstanding_ = false;
+  exchange_.abort();
+  action_pending_ = false;
+  removal_cursor_ = 0;
+  removal_attempts_ = 0;
+  removal_step_ = RemovalStep::Runtime;
+  return Status::success();
+}
+
 Status MembershipLifecycle::removal_poll(MonotonicMs now_ms) noexcept {
   if (journal_ == nullptr || !journal_->has_record() ||
-      journal_->record().mode != LifecycleMode::Removing) {
+      (journal_->record().mode != LifecycleMode::Removing &&
+       journal_->record().mode != LifecycleMode::LocalLeave)) {
     enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
     return Status::success();
   }
@@ -2015,12 +2088,23 @@ Status MembershipLifecycle::removal_poll(MonotonicMs now_ms) noexcept {
       result = site_.initialize();
       if (result) result = revocations_.initialize();
       const SiteStoreHealth health = site_.health();
+      const bool leave = journal_->record().mode == LifecycleMode::LocalLeave;
       if (result && health.initialized && !health.has_site && !health.quarantined &&
           !health.uncertain && health.unsupported_mask == 0 &&
           health.read_error_mask == 0 && !health.active_load_failed &&
-          revocations_.clean_empty()) result = journal_->holdoff();
-      else if (result) result = Status::error(StatusCode::IntegrityError, "removal postcondition");
-      if (result) {
+          revocations_.clean_empty()) {
+        // A local leave holds nothing off and keeps no watermark
+        // (LeftReady): the device restarts unassigned now.
+        result = leave ? journal_->left_ready() : journal_->holdoff();
+      } else if (result) {
+        result = Status::error(StatusCode::IntegrityError, "removal postcondition");
+      }
+      if (result && leave) {
+        phase_ = LifecyclePhase::UnassignedReady;
+        adopted_ = Adopted{};
+        sak_valid_ = false;
+        emit_action(LifecycleActionTag::RestartUnassigned, LifecycleActionReason::LocalLeave);
+      } else if (result) {
         phase_ = LifecyclePhase::Holdoff;
         holdoff_start_ = now_ms;
         adopted_ = Adopted{};

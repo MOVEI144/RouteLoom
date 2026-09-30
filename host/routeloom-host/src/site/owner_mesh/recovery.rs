@@ -8,6 +8,9 @@ use super::*;
 use routeloom_client::site::SiteAdmin;
 
 const STEP_MS: u64 = 25;
+// C++ `Connectivity` (device.hpp).
+const CONNECTIVITY_REACHABLE: u8 = 1;
+const CONNECTIVITY_ISOLATED: u8 = 3;
 
 fn run_for(world: &mut MeshWorld, ms: u64) {
     for _ in 0..ms / STEP_MS {
@@ -93,9 +96,44 @@ fn mesh_m04_long_isolation_recovers_without_reset() {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     converge_gated(&mut world, 1, "m04");
+    // JoinPolicy: a 5 min isolation is reported once (and never leaves).
+    assert_eq!(
+        world.peers[1].set_join_policy_with(600, 0, Some(300)),
+        (0, 1)
+    );
     deliver_each(&mut world, 1, 0, 1, b"m04-before");
+    assert_eq!(world.snaps[1].connectivity, CONNECTIVITY_REACHABLE);
+    let events = world.snaps[1].connectivity_events;
     world.switch.isolate(1);
-    run_for(&mut world, 15 * 60_000);
+    // Connectivity (#192): Degraded once the gateway evidence is older
+    // than 60 s, Isolated at 120 s. The last evidence is the gateway route
+    // refresh before the cut (≤ one 5 s advertisement period earlier), so
+    // Isolated lands within [T_iso − period, T_iso] of the cut, ± one tick.
+    let cut = world.now;
+    let mut isolated_after = None;
+    while world.now - cut < 130_000 {
+        world.step(STEP_MS);
+        if isolated_after.is_none() && world.snaps[1].connectivity == CONNECTIVITY_ISOLATED {
+            isolated_after = Some(world.now - cut);
+        }
+    }
+    let isolated_after = isolated_after.expect("A reports Isolated");
+    assert!(
+        (115_000 - STEP_MS..=120_000 + STEP_MS).contains(&isolated_after),
+        "Isolated at T_iso ({isolated_after} ms)"
+    );
+    assert_eq!(
+        world.snaps[1].connectivity_events,
+        events + 2,
+        "Degraded then Isolated, once each"
+    );
+    run_for(&mut world, 15 * 60_000 - 130_000);
+    assert_eq!(
+        world.snaps[1].connectivity_events,
+        events + 3,
+        "one isolation notice after 5 min Isolated"
+    );
+    assert!(world.snaps[1].has_site, "the notice never leaves");
     assert_eq!(
         world.snaps[1].mode, MODE_ZERO_TOUCH,
         "the heal lands inside A's retained-site refresh"
@@ -109,7 +147,16 @@ fn mesh_m04_long_isolation_recovers_without_reset() {
     );
     deliver_each(&mut world, 1, 0, 10, b"m04-up");
     deliver_each(&mut world, 0, 1, 10, b"m04-down");
+    assert_eq!(
+        world.snaps[1].connectivity, CONNECTIVITY_REACHABLE,
+        "Reachable after the heal"
+    );
+    let events = world.snaps[1].connectivity_events;
     steady_tail(&mut world, "m04");
+    assert_eq!(
+        world.snaps[1].connectivity_events, events,
+        "no connectivity flap in the tail"
+    );
 }
 
 /// J08 (K1a/K1b, isolation variant): A is isolated for 10 min virtual

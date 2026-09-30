@@ -28,7 +28,7 @@
 //!
 //! `world`, `peer`, `switch`, `usb_host` and `report` are the harness;
 //! `mesh`, `join`, `membership`, `cutover`, `fault`, `boot`, `recovery`,
-//! `compat`, `product` and `send` hold the scenario tests, each
+//! `compat`, `product`, `send` and `device` hold the scenario tests, each
 //! registered by its row in `tests/e2e/scenarios.json`.
 
 use std::io::{Read, Write};
@@ -67,6 +67,7 @@ use crate::{now_ms, serve_client, DeviceSession, SessionPhase, State};
 mod boot;
 mod compat;
 mod cutover;
+mod device;
 mod fault;
 mod join;
 mod membership;
