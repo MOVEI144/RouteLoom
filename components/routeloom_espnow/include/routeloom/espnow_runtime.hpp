@@ -688,6 +688,14 @@ class EspNowRuntime final : public RadioPort,
   // commits to the same channel still move the epoch.
   ChannelEpoch channel_epoch_{0};
   std::uint32_t telemetry_event_drops_{0};
+#if CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY
+  // Bench-only radio evidence (HIL RADIO line): driver send refusals and
+  // frames heard on a channel other than the committed one.
+  std::uint32_t hil_send_errors_{0};
+  std::int32_t hil_last_send_error_{0};
+  std::uint32_t hil_rx_frames_{0};
+  std::uint32_t hil_rx_other_channel_{0};
+#endif
   // Submit ms of the reserved TX — the poll-task callback watchdog so a
   // never-completing send cannot wedge pending_tx_ forever (02 §2.2).
   MonotonicMs pending_sent_ms_{0};

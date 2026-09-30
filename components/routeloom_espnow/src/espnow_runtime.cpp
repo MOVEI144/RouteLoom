@@ -886,12 +886,19 @@ void EspNowRuntime::poll_once() noexcept {
     std::uint8_t wifi_channel = 0;
     (void)channel_readback(wifi_channel);
     ESP_LOGI(kTag, "HIL RADIO wifi_channel=%u committed=%u generation=%lu busy=%d "
-                   "quarantined=%u fenced=%d",
+                   "quarantined=%u fenced=%d tx_ok=%lu tx_failed=%lu stale=%lu "
+                   "send_errors=%lu last_error=0x%lx rx=%lu rx_other_channel=%lu",
              static_cast<unsigned>(wifi_channel),
              static_cast<unsigned>(channel_runner_.committed_channel()),
              static_cast<unsigned long>(channel_runner_.radio_generation().value),
              channel_runner_.busy() ? 1 : 0, static_cast<unsigned>(quarantined_count_),
-             fenced_outstanding_ ? 1 : 0);
+             fenced_outstanding_ ? 1 : 0, static_cast<unsigned long>(autonomy_tx_ok_),
+             static_cast<unsigned long>(autonomy_tx_failed_),
+             static_cast<unsigned long>(stale_tx_results_),
+             static_cast<unsigned long>(hil_send_errors_),
+             static_cast<unsigned long>(hil_last_send_error_),
+             static_cast<unsigned long>(hil_rx_frames_),
+             static_cast<unsigned long>(hil_rx_other_channel_));
     if (discovery_ != nullptr) {
       const auto& stats = discovery_->stats();
       ESP_LOGI(kTag, "HIL DISCOVERY candidates=%lu neighbors=%lu "
@@ -1382,6 +1389,10 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
   if (error == ESP_OK) trace_rld1("tx", frame);
 #endif
   if (error != ESP_OK) {
+#if CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY
+    ++hil_send_errors_;
+    hil_last_send_error_ = error;
+#endif
     portENTER_CRITICAL(&callback_lock_);
     for (std::size_t i = 0; i < raw_tx_count_; ++i) {
       if (raw_tx_[i].mac == mac) {
@@ -1719,6 +1730,10 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
   }
 #endif
   if (error != ESP_OK) {
+#if CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY
+    ++hil_send_errors_;
+    hil_last_send_error_ = error;
+#endif
     portENTER_CRITICAL(&callback_lock_);
     pending_tx_ = false;
     pending_token_ = 0;
@@ -2673,6 +2688,13 @@ void EspNowRuntime::enqueue_rx(
       }
     }
     if (matches) return;
+  }
+#endif
+#if CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY
+  ++hil_rx_frames_;
+  if (info->rx_ctrl != nullptr &&
+      info->rx_ctrl->channel != channel_runner_.committed_channel()) {
+    ++hil_rx_other_channel_;
   }
 #endif
   // Carrier classification precedes the peer table: RLD1 is recognized once
