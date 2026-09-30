@@ -222,6 +222,18 @@ fn mesh_p03_devram_config_and_gateway_survive_reset() {
         (applied.active_revision, applied.active_hash)
     );
 
+    // The gateway accepts SDK RAM work only while a host mailbox reader is registered.
+    world.usb_host.register_gateway();
+    for _ in 0..100 {
+        if world.usb_host.gateway_token.is_some() {
+            break;
+        }
+        world.step(25);
+    }
+    assert!(
+        world.usb_host.gateway_token.is_some(),
+        "host registered as mailbox reader"
+    );
     world.peers[1].gateway_send(testkit::GATEWAY, b"p03-devram");
     world.step(25);
     world.pump_until(400, |snaps| snaps[1].gw_send == GATEWAY_RECEIVED);
