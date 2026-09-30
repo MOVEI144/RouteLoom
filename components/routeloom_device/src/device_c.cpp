@@ -37,6 +37,16 @@ void core_header(T& object) noexcept {
   object.version = RL_ABI_VERSION;
 }
 
+// C callers may store integers outside a C++ enum's valid range. Read the
+// ABI representation before validating, without loading an invalid enum.
+template <typename T>
+std::uint32_t enum_value(const T& value) noexcept {
+  static_assert(sizeof(T) == sizeof(std::uint32_t), "C API enum width");
+  std::uint32_t raw = 0;
+  std::memcpy(&raw, &value, sizeof(raw));
+  return raw;
+}
+
 rl_status_code_t to_c(const Status& status) noexcept {
   return static_cast<rl_status_code_t>(status.code);
 }
@@ -73,13 +83,15 @@ rl_dev_connectivity_t to_c(const ConnectivitySnapshot& s) noexcept {
 }
 
 bool from_c(const rl_dev_send_options_t* input, SendOptions& output) noexcept {
-  if (!dev_sized(input) ||
-      static_cast<std::uint32_t>(input->delivery) > static_cast<std::uint32_t>(RL_DELIVERY_APPLIED) ||
-      static_cast<std::uint32_t>(input->priority) > static_cast<std::uint32_t>(RL_PRIORITY_URGENT)) {
+  if (!dev_sized(input)) return false;
+  const std::uint32_t delivery = enum_value(input->delivery);
+  const std::uint32_t priority = enum_value(input->priority);
+  if (delivery > static_cast<std::uint32_t>(RL_DELIVERY_APPLIED) ||
+      priority > static_cast<std::uint32_t>(RL_PRIORITY_URGENT)) {
     return false;
   }
-  output.delivery = static_cast<DeliveryClass>(input->delivery);
-  output.priority = static_cast<Priority>(input->priority);
+  output.delivery = static_cast<DeliveryClass>(delivery);
+  output.priority = static_cast<Priority>(priority);
   output.lifetime_ms = input->lifetime_ms;
   output.hop_limit = input->hop_limit;
   output.ordered = input->ordered != 0;
@@ -304,13 +316,15 @@ rl_status_code_t rl_dev_send_group(rl_dev_t* device, const uint16_t group,
                                    const rl_group_send_options_t* options,
                                    rl_message_id_t* out_id) {
   if (device == nullptr || device->device == nullptr || out_id == nullptr ||
-      (payload_size != 0 && payload == nullptr) || !core_sized(options) ||
-      static_cast<std::uint32_t>(options->priority) >
-          static_cast<std::uint32_t>(RL_PRIORITY_URGENT)) {
+      (payload_size != 0 && payload == nullptr) || !core_sized(options)) {
+    return RL_STATUS_INVALID_ARGUMENT;
+  }
+  const std::uint32_t priority = enum_value(options->priority);
+  if (priority > static_cast<std::uint32_t>(RL_PRIORITY_URGENT)) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
   GroupSendOptions converted{};
-  converted.priority = static_cast<Priority>(options->priority);
+  converted.priority = static_cast<Priority>(priority);
   converted.lifetime_ms = options->lifetime_ms;
   converted.hop_limit = options->hop_limit;
   converted.ordered = options->ordered != 0;

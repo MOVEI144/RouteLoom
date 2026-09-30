@@ -74,6 +74,23 @@ static void check_boundaries(mesh_c_app_t* app) {
   options.version = RL_ABI_VERSION;
   count(app, rl_dev_send(app->device, 1, &byte, 1, &options, &id) ==
                  RL_STATUS_INVALID_ARGUMENT);
+  const int invalid_values[] = {-1, 99};
+  for (size_t i = 0; i < sizeof(invalid_values) / sizeof(invalid_values[0]); ++i) {
+    const int invalid = invalid_values[i];
+    rl_dev_send_options_init(&options);
+    options.delivery = (rl_delivery_class_t)invalid;
+    count(app, rl_dev_send(app->device, 1, &byte, 1, &options, &id) ==
+                   RL_STATUS_INVALID_ARGUMENT);
+    rl_dev_send_options_init(&options);
+    options.priority = (rl_priority_t)invalid;
+    count(app, rl_dev_send(app->device, 1, &byte, 1, &options, &id) ==
+                   RL_STATUS_INVALID_ARGUMENT);
+    rl_group_send_options_t group;
+    rl_group_send_options_init(&group);
+    group.priority = (rl_priority_t)invalid;
+    count(app, rl_dev_send_group(app->device, 1, &byte, 1, &group, &id) ==
+                   RL_STATUS_INVALID_ARGUMENT);
+  }
 }
 
 static void posted(rl_dev_t* device, void* ctx) {
