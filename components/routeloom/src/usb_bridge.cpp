@@ -373,6 +373,10 @@ void UsbBridge::poll(const MonotonicMs now_ms) noexcept {
          record != nullptr && report_outcome(*record, false, now_ms);
          record = idempotency_.next_unreported(keys_.session_id)) {
     }
+    if (rx_grant_due_ && control_q_.empty()) {
+      rx_grant_due_ = false;
+      issue_rx_grant(false, now_ms);
+    }
   }
   pump_tx(now_ms);
   if (state_ == SessionState::Draining && !tx_wire_active_ && control_q_.empty() &&
@@ -626,7 +630,7 @@ void UsbBridge::handle_authenticated(const UsbFrame& frame,
     }
   }
   dispatch_inner(frame.kind, frame.flags, frame.request, inner, now_ms);
-  if (!is_control_kind(frame.kind)) issue_rx_grant(false, now_ms);
+  if (!is_control_kind(frame.kind)) rx_grant_due_ = true;
 }
 
 void UsbBridge::dispatch_inner(const FrameKind kind, const std::uint16_t flags,
@@ -3023,6 +3027,7 @@ void UsbBridge::reset_session_state() noexcept {
   tx_wire_sent_ = 0;
   pending_request_ = 0;
   pending_record_ = nullptr;
+  rx_grant_due_ = false;
   request_map_ = FixedPool<RequestMap, kRequestMapCapacity>{};
   // Pending diagnostic queries are session state: a reconnected session can
   // never observe a late reply under a minted slot (04 §USB correlation).

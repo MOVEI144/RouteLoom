@@ -775,6 +775,10 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // The legacy send whose synchronous mesh->send is running: a terminal
   // callback inside it settles this record (its message id is not known yet).
   IdempotencyRecord* pending_record_{nullptr};
+  // One cumulative RX grant is due; poll() queues it once the CONTROL queue
+  // is empty, so grants never crowd out answers and the host sends no
+  // faster than the device can answer.
+  bool rx_grant_due_{false};
   // True while a host_ops SUBMIT's synchronous mesh->send runs: the Accepted/
   // Queued callbacks it fires must be suppressed (the window record is
   // created right after, and later callbacks correlate through it).
