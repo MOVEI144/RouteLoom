@@ -2,7 +2,9 @@
    post through the Device C API only, compiled as C11. */
 
 #include "owner_mesh_c_app.h"
+#include "routeloom/version.h"
 
+static void posted(rl_dev_t* device, void* ctx);
 
 static void try_reentry(mesh_c_app_t* app) {
   rl_dev_send_options_t options;
@@ -16,6 +18,30 @@ static void try_reentry(mesh_c_app_t* app) {
     ++app->reentry_busy;
   }
   if (rl_dev_leave(app->device, &operation) == RL_STATUS_BUSY) ++app->reentry_busy;
+  rl_dev_capabilities_t caps;
+  rl_dev_membership_t membership;
+  rl_dev_connectivity_t connectivity;
+  rl_dev_join_policy_t policy;
+  rl_delivery_result_t delivery;
+  rl_applied_result_t applied;
+  uint8_t lease[RL_APPLIED_LEASE_SIZE];
+  uint32_t revision;
+  rl_dev_struct_init(&caps, sizeof(caps));
+  rl_dev_struct_init(&membership, sizeof(membership));
+  rl_dev_struct_init(&connectivity, sizeof(connectivity));
+  rl_dev_struct_init(&policy, sizeof(policy));
+  rl_struct_init(&delivery, sizeof(delivery));
+  rl_struct_init(&applied, sizeof(applied));
+  app->reentry_calls += 7;
+  if (rl_dev_capabilities(app->device, &caps) == RL_STATUS_BUSY) ++app->reentry_busy;
+  if (rl_dev_membership(app->device, &membership) == RL_STATUS_BUSY) ++app->reentry_busy;
+  if (rl_dev_connectivity(app->device, &connectivity) == RL_STATUS_BUSY) ++app->reentry_busy;
+  if (rl_dev_join_policy(app->device, &policy, &revision) == RL_STATUS_BUSY) ++app->reentry_busy;
+  if (rl_dev_delivery(app->device, (rl_message_id_t){0, 0}, &delivery) == RL_STATUS_BUSY)
+    ++app->reentry_busy;
+  if (rl_dev_applied_result(app->device, (rl_message_id_t){0, 0}, &applied) == RL_STATUS_BUSY)
+    ++app->reentry_busy;
+  if (rl_dev_applied_lease(app->device, lease) == RL_STATUS_BUSY) ++app->reentry_busy;
 }
 
 static void count(mesh_c_app_t* app, int ok) {
@@ -69,11 +95,21 @@ static void on_message(void* user, rl_node_id_t origin, rl_message_id_t id,
   ++app->messages;
 }
 
+static void on_delivery(void* user, const rl_delivery_result_t* result) {
+  mesh_c_app_t* app = (mesh_c_app_t*)user;
+  if (result->reason_id == ROUTELOOM_REASON_APP_APPLIED) {
+    count(app, result->state == RL_DELIVERY_STATE_DELIVERED);
+    app->applied_id = result->id;
+    app->applied_result_pending = 1;
+  }
+}
+
 static void on_membership(void* user, const rl_dev_membership_t* snapshot, uint16_t cause) {
   mesh_c_app_t* app = (mesh_c_app_t*)user;
   (void)snapshot;
   ++app->membership_events;
   app->last_cause = cause;
+  try_reentry(app);
   (void)rl_dev_post(app->device, posted, app);
 }
 
@@ -106,7 +142,25 @@ static void on_poll(void* user, rl_dev_t* device, rl_monotonic_ms_t now_ms) {
   uint8_t i = 0;
   (void)device;
   app->now_ms = now_ms;
-  if (app->checks == 0) check_boundaries(app);
+  if (app->checks == 0) {
+    check_boundaries(app);
+    for (uint8_t n = 0; n < 8; ++n)
+      count(app, rl_dev_post(app->device, posted, app) == RL_STATUS_OK);
+    count(app, rl_dev_post(app->device, posted, app) == RL_STATUS_BUSY);
+    count(app, app->posted_runs == 0);
+  }
+  if (app->applied_result_pending) {
+    rl_applied_result_t result;
+    rl_delivery_result_t delivery;
+    rl_struct_init(&result, sizeof(result));
+    rl_struct_init(&delivery, sizeof(delivery));
+    count(app, rl_dev_applied_result(device, app->applied_id, &result) == RL_STATUS_OK &&
+                   result.outcome == RL_APPLIED_SUCCESS && result.code == 0 && !result.late);
+    count(app, rl_dev_delivery(device, app->applied_id, &delivery) == RL_STATUS_OK &&
+                   delivery.state == RL_DELIVERY_STATE_DELIVERED &&
+                   delivery.reason_id == ROUTELOOM_REASON_APP_APPLIED);
+    app->applied_result_pending = 0;
+  }
   while (i < app->open_count) {
     rl_applied_result_t result;
     if (now_ms < app->open_due[i]) {
@@ -117,6 +171,8 @@ static void on_poll(void* user, rl_dev_t* device, rl_monotonic_ms_t now_ms) {
     result.outcome = RL_APPLIED_SUCCESS;
     if (rl_dev_complete_applied(app->device, app->open_ticket[i], &result) == RL_STATUS_OK) {
       ++app->applied_completed;
+      count(app, rl_dev_complete_applied(app->device, app->open_ticket[i], &result) ==
+                     RL_STATUS_NOT_FOUND);
     } else {
       ++app->applied_refused;
     }
@@ -130,6 +186,7 @@ void mesh_c_app_observer(mesh_c_app_t* app, rl_dev_observer_t* out) {
   rl_dev_struct_init(out, sizeof(*out));
   out->user = app;
   out->on_message = on_message;
+  out->on_delivery = on_delivery;
   out->on_membership = on_membership;
   out->on_connectivity = on_connectivity;
   out->on_operation = on_operation;

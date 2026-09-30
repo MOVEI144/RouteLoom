@@ -17,7 +17,8 @@ extern "C" {
    Threads: rl_dev_post() is the only call another task may make. Every
    other call belongs to the Owner task (the observer's on_poll or a posted
    job). A call made from inside an rl_dev_observer_t callback returns
-   RL_STATUS_BUSY and changes nothing.
+   RL_STATUS_BUSY and changes nothing, except rl_dev_post (allowed) and
+   rl_dev_node_id (a read-only identity).
 
    Structs: every struct starts with {struct_size, version}. version must be
    RL_DEV_API_VERSION and struct_size at least the size this header
@@ -172,7 +173,8 @@ void rl_dev_send_options_init(rl_dev_send_options_t* options);
 /* Boots the image's Device from the component Kconfig on its own Owner
    task (device_config_from_kconfig) and returns its handle. `observer`
    (may be NULL) is copied. Call once; boot failures take the Device's
-   fail-streak restart path. */
+   fail-streak restart path. Returns NULL for an invalid observer header
+   or if the C handle is already bound; no task starts on rejection. */
 rl_dev_t* rl_dev_start(const rl_dev_observer_t* observer);
 #endif
 

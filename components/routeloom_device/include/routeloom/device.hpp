@@ -230,6 +230,8 @@ class Device;
 // the Device itself with begin() and step(). One handle per image: it
 // takes over observe(), observe_device() and on_poll(), and copies
 // `observer` (may be null). rl_dev_start() is the Kconfig boot path.
+// Returns null for an invalid observer header or a second binding, without
+// changing the existing observer or starting a task.
 rl_dev* device_c_bind(Device& device, const rl_dev_observer* observer) noexcept;
 
 class Device {
@@ -333,6 +335,7 @@ class Device {
   GatewayDelivery* gateway() noexcept;
 
  private:
+  friend struct ::rl_dev;
   friend struct DeviceTestAccess;
   class Observer final : public NodeObserver {
    public:

@@ -107,6 +107,8 @@ struct rl_dev final : public NodeObserver, public DeviceObserver, public Applied
 
   constexpr rl_dev() noexcept = default;
 
+  bool callback_active() const noexcept { return device->callback_active(); }
+
   void bind(Device& target, const rl_dev_observer_t* c_observer) noexcept {
     device = &target;
     observer = rl_dev_observer_t{};
@@ -203,6 +205,7 @@ rl_dev& handle() noexcept {
 
 namespace routeloom {
 rl_dev* device_c_bind(Device& device, const rl_dev_observer_t* observer) noexcept {
+  if ((observer != nullptr && !dev_sized(observer)) || handle().device != nullptr) return nullptr;
   handle().bind(device, observer);
   return &handle();
 }
@@ -231,6 +234,7 @@ void rl_dev_send_options_init(rl_dev_send_options_t* options) {
 rl_dev_t* rl_dev_start(const rl_dev_observer_t* observer) {
   static Device device;
   rl_dev_t* const dev = routeloom::device_c_bind(device, observer);
+  if (dev == nullptr) return nullptr;
   DeviceConfig config = device_config_from_kconfig();
   device.start(config);
   return dev;
@@ -263,6 +267,7 @@ rl_status_code_t rl_dev_capabilities(rl_dev_t* device, rl_dev_capabilities_t* ou
   if (device == nullptr || device->device == nullptr || !dev_sized(out)) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
+  if (device->callback_active()) return RL_STATUS_BUSY;
   const DeviceCapabilities caps = device->device->capabilities();
   rl_dev_capabilities_t c{};
   dev_header(c);
@@ -326,6 +331,7 @@ rl_status_code_t rl_dev_delivery(rl_dev_t* device, const rl_message_id_t id,
   if (device == nullptr || device->device == nullptr || !core_sized(out)) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
+  if (device->callback_active()) return RL_STATUS_BUSY;
   const DeliveryResult result = device->device->delivery(from_c(id));
   rl_delivery_result_t c{};
   core_header(c);
@@ -341,6 +347,7 @@ rl_status_code_t rl_dev_applied_lease(rl_dev_t* device, uint8_t out_lease[RL_APP
   if (device == nullptr || device->device == nullptr || out_lease == nullptr) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
+  if (device->callback_active()) return RL_STATUS_BUSY;
   const MeshNode* node = device->device->mesh();
   if (node == nullptr) return RL_STATUS_INVALID_STATE;
   const ExecutionLease lease = node->applied_lease();
@@ -386,6 +393,7 @@ rl_status_code_t rl_dev_applied_result(rl_dev_t* device, const rl_message_id_t i
   if (device == nullptr || device->device == nullptr || !core_sized(out)) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
+  if (device->callback_active()) return RL_STATUS_BUSY;
   const MeshNode* node = device->device->mesh();
   AppliedResultView view{};
   if (node == nullptr || !node->applied_result(from_c(id), view)) return RL_STATUS_NOT_FOUND;
@@ -404,6 +412,7 @@ rl_status_code_t rl_dev_membership(rl_dev_t* device, rl_dev_membership_t* out) {
   if (device == nullptr || device->device == nullptr || !dev_sized(out)) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
+  if (device->callback_active()) return RL_STATUS_BUSY;
   *out = to_c(device->device->membership());
   return RL_STATUS_OK;
 }
@@ -412,6 +421,7 @@ rl_status_code_t rl_dev_connectivity(rl_dev_t* device, rl_dev_connectivity_t* ou
   if (device == nullptr || device->device == nullptr || !dev_sized(out)) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
+  if (device->callback_active()) return RL_STATUS_BUSY;
   *out = to_c(device->device->connectivity());
   return RL_STATUS_OK;
 }
@@ -462,6 +472,7 @@ rl_status_code_t rl_dev_join_policy(rl_dev_t* device, rl_dev_join_policy_t* out,
       out_revision == nullptr) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
+  if (device->callback_active()) return RL_STATUS_BUSY;
   JoinPolicy policy{};
   std::uint32_t revision = 0;
   const Status status = device->device->join_policy(policy, revision);

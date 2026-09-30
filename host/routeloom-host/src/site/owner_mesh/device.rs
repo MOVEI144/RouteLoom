@@ -444,7 +444,7 @@ fn mesh_p05_c_device_api() {
     for i in [a, b] {
         let s = &world.snaps[i];
         assert!(
-            s.c_checks >= 5 && s.c_check_failures == 0,
+            s.c_checks >= 15 && s.c_check_failures == 0,
             "C boundary checks on {i}: {} of {} failed",
             s.c_check_failures,
             s.c_checks
@@ -489,6 +489,11 @@ fn mesh_p05_c_device_api() {
         assert_eq!(world.snaps[a].applied_completed, completed + 1);
     }
     let s = &world.snaps[a];
+    assert_eq!(s.c_check_failures, 0, "C ticket and capacity checks");
+    assert_eq!(
+        world.snaps[b].c_check_failures, 0,
+        "C delivery/result checks"
+    );
     assert!(
         s.reentry_calls >= 40 && s.reentry_calls == s.reentry_busy,
         "calls from the C APPLIED callback are Busy: {} of {}",
@@ -538,6 +543,36 @@ fn mesh_p05_c_device_api() {
         "the job posted from on_membership ran"
     );
     deliver_each(&mut world, a, 0, 5, b"p05-c-back");
+}
+
+/// P06: the standalone example serves two C endpoints after the host is
+/// disconnected. Each endpoint receives the example's "ok" response to
+/// every message through its C observer, without an authority connection.
+#[test]
+fn mesh_p06_standalone_c_endpoints() {
+    let Some(mut world) = MeshWorld::start_with_args(
+        "p06-standalone",
+        Switch::direct(),
+        &["--standalone"],
+        &["--c-app"],
+    ) else {
+        return;
+    };
+    converge(&mut world, "p06-standalone");
+    world.usb_disconnect();
+    for node in [NODE_A, NODE_B] {
+        let index = world.index_of(node);
+        for round in 0..10_u8 {
+            let before = world.snaps[index].c_messages;
+            deliver_each(&mut world, index, 0, 1, &[round]);
+            until(&mut world, 3_000, |w| w.snaps[index].c_messages > before);
+            let snap = &world.snaps[index];
+            assert_eq!(snap.c_messages, before + 1, "one C response per request");
+            assert_eq!(snap.rx_src, testkit::GATEWAY);
+            assert_eq!(snap.rx, b"ok");
+            assert_eq!(snap.c_check_failures, 0);
+        }
+    }
 }
 
 /// JoinPolicy (J06-P): range and compare-and-set on A, the stored revision

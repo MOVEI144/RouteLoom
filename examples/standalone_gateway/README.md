@@ -32,5 +32,6 @@ idf.py build
 
 Outside the repository, use the git dependency described in the
 [endpoint example](../endpoint_cpp/README.md#style-b-component-manager-git-dependency).
-A successful build proves compile and link only; the standalone exchange is
-checked on hardware (E2E row P06).
+A successful build proves compile and link only. E2E row P06 runs this
+application with two C endpoints through the real Device/Owner host
+harness after disconnecting the host; hardware confirmation is part of H2.

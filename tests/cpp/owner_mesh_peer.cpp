@@ -224,6 +224,7 @@
 #include "routeloom/gateway.hpp"
 #include "idf_stubs.hpp"
 #include "owner_mesh_c_app.h"
+#include "../../examples/standalone_gateway/main/app.hpp"
 
 namespace {
 
@@ -886,6 +887,7 @@ struct Setup {
   bool flat{false};
   bool remote_config{false};
   bool c_app{false};
+  bool standalone{false};
   std::uint8_t channel_plan{0};
   std::string nvs_load;
   std::string flash;
@@ -952,6 +954,8 @@ Setup parse_argv(int argc, char** argv) {
       setup.flat = true;
     } else if (arg == std::string("--c-app")) {
       setup.c_app = true;
+    } else if (arg == std::string("--standalone")) {
+      setup.standalone = true;
     } else if (arg == std::string("--remote-config")) {
       setup.remote_config = true;
     } else if (arg == std::string("--channel-plan")) {
@@ -1464,9 +1468,17 @@ int main(int argc, char** argv) {
   // The production boot: Device::open_storage then Device::begin.
   PipeByteStream usb_stream;
   TeeObserver observer(nullptr);
+  routeloom_example::StandaloneApp standalone;
   Device device;
   observer.bind_device(device);
   device.observe(&observer);
+  if (setup.standalone) {
+    if (!setup.gateway) fatal("--standalone needs a gateway");
+    observer.chain(&standalone);
+    device.on_poll([](Device& target, MonotonicMs, void* app) {
+      static_cast<routeloom_example::StandaloneApp*>(app)->answer(target);
+    }, &standalone);
+  }
   DeviceEvents events;
   events.device = &device;
   events.load();
@@ -1542,7 +1554,15 @@ int main(int argc, char** argv) {
     c_app.reentry_busy = events.reentry_busy;
     rl_dev_observer_t c_observer;
     mesh_c_app_observer(&c_app, &c_observer);
+    rl_dev_observer_t invalid = c_observer;
+    invalid.struct_size = sizeof(invalid) - 1;
+    if (device_c_bind(device, &invalid) != nullptr) fatal("short C observer accepted");
+    invalid = c_observer;
+    invalid.version = RL_DEV_API_VERSION + 1;
+    if (device_c_bind(device, &invalid) != nullptr) fatal("unknown C observer accepted");
     c_app.device = device_c_bind(device, &c_observer);
+    if (c_app.device == nullptr) fatal("valid C observer refused");
+    if (device_c_bind(device, nullptr) != nullptr) fatal("second C binding accepted");
     g_c_app = &c_app;
     // The harness tee stays first so the snapshot sees every message.
     observer.chain(DeviceTestAccess::app(device));

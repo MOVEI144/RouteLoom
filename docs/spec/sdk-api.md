@@ -58,7 +58,8 @@ ESP-IDF の機器は `components/routeloom_device` の `routeloom::Device` を�
 
 C++ の各関数に対応する `rl_dev_*` を置く（`rl_dev_send`、`rl_dev_send_group`、`rl_dev_cancel`、`rl_dev_delivery`、`rl_dev_send_applied`、`rl_dev_complete_applied`、`rl_dev_applied_lease`、`rl_dev_applied_result`、`rl_dev_membership`、`rl_dev_connectivity`、`rl_dev_request_join`、`rl_dev_leave`、`rl_dev_set_join_policy`、`rl_dev_join_policy`、`rl_dev_capabilities`、`rl_dev_node_id`）。規則は C++ と同じで、違うのは次だけである。
 
-- 起動は `rl_dev_start(observer)`：component の Kconfig から Device を Owner task で起動し、handle を返す。image に Device は 1 つで、handle も 1 つ。
+- 起動は `rl_dev_start(observer)`：component の Kconfig から Device を Owner task で起動し、handle を返す。image に Device は 1 つで、handle も 1 つ。不正な observer header と二度目の起動は NULL を返し、task を起動しない。
+- callback 内の状態取得も `RL_STATUS_BUSY`。`rl_dev_post` と読み取り専用の `rl_dev_node_id` は callback 内でも使える。
 - callback は `rl_dev_observer_t`（`on_message`、`on_delivery`、`on_membership`、`on_connectivity`、`on_operation`、`on_applied_request`、`on_poll`）。`on_poll` は Owner の pass ごとに callback の外で呼ぶので、そこから Device を呼べる。
 - APPLIED の受信側は常に非同期：`on_applied_request` で ticket を受け、callback の後で `rl_dev_complete_applied` を呼ぶ。`on_applied_request` が NULL なら NoEndpoint で拒否する。
 - 他の task からは `rl_dev_post(job, ctx)` だけ（8 件、満杯は `RL_STATUS_BUSY`）。

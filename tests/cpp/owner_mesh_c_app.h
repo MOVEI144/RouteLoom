@@ -42,6 +42,8 @@ typedef struct mesh_c_app {
   uint32_t posted_runs;
   /* Application messages received through on_message. */
   uint32_t messages;
+  rl_message_id_t applied_id;
+  uint8_t applied_result_pending;
 } mesh_c_app_t;
 
 void mesh_c_app_observer(mesh_c_app_t* app, rl_dev_observer_t* out);
