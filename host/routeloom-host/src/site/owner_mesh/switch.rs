@@ -310,13 +310,17 @@ impl Switch {
     }
 
     pub(super) fn consume_wire_loss(&mut self, from: usize, to: usize, frame: &[u8]) -> bool {
-        if frame.len() < 5 || frame[..4] != *b"RL\x02\0" {
+        let kind = if frame.len() >= 5 && frame[..4] == *b"RL\x02\0" {
+            frame[4]
+        } else if frame.len() >= 44 && frame[..4] == *b"RLD1" {
+            frame[5]
+        } else {
             return false;
-        }
+        };
         if let Some(rule) = self
             .drop_wire
             .iter_mut()
-            .find(|rule| rule.0 == from && rule.1 == to && rule.2 == frame[4] && rule.3 > 0)
+            .find(|rule| rule.0 == from && rule.1 == to && rule.2 == kind && rule.3 > 0)
         {
             rule.3 -= 1;
             self.wire_dropped += 1;
