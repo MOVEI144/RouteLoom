@@ -1,0 +1,4 @@
+[2026-10-01T00:46:07.660+00:00] I (877) RouteLoomRef: sdkv1 identity: node=3 kid=249bc8aa4cc88e2I (3464) RouteLoomRef: discovery event=BOUND peer=2
+[2026-10-01T00:46:07.660+00:00] W (3465) RouteLoomRef: diagnostic reason=BOUND peer=2 message=none
+[2026-10-01T00:46:07.760+00:00] I (3509) RouteLoomRef: discovery event=REACHABLE peer=2
+[2026-10-01T00:46:07.760+00:00] W (3509) RouteLoomRef: diagnostic reason=REACHABLE peer=2 message=none

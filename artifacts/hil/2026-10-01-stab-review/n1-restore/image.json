@@ -1,0 +1,41 @@
+{
+  "write": {
+    "identity": {
+      "chip": "esp32c3",
+      "mac": "94:a9:90:7a:26:ac",
+      "log": "flash-bridge-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "74970e89cfc7271f31128ec5ba9373b9fcfdc7683a0bd6f72d87dffcc948bc31",
+    "app_bytes": 1268672,
+    "bundle": "hil-review-br-bridge_node-esp32c3"
+  },
+  "nvs_before": {
+    "rlcfg": {
+      "sha256": "cdbf1298d9af8fa26ecca4e91b080bb71f246646a3ee9a7d509be542975c5c10",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "f3bafdb60e1fe2f4a16fa8edbf2dd1547dbe69c6ca5821a6dc9c620ec5e015c6",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "88f0a71be01ca199c19d85821968a23936d5724c150345a42cadd8fbce57540d",
+      "blank": false
+    }
+  },
+  "nvs_after": {
+    "rlcfg": {
+      "sha256": "cdbf1298d9af8fa26ecca4e91b080bb71f246646a3ee9a7d509be542975c5c10",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "f3bafdb60e1fe2f4a16fa8edbf2dd1547dbe69c6ca5821a6dc9c620ec5e015c6",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "88f0a71be01ca199c19d85821968a23936d5724c150345a42cadd8fbce57540d",
+      "blank": false
+    }
+  }
+}

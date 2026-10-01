@@ -1,0 +1,22 @@
+{
+  "production_commit": "5820b8d8bd9a82e2fab14e6087a4a0820dfe3269",
+  "note": "SDK image metadata records the earlier base plus the then-uncommitted routing and M3 changes; these files are unchanged by later test and budget commits.",
+  "files": [
+    {
+      "path": "components/routeloom/src/migration.cpp",
+      "sha256": "50e5d3052f14b0e7d475059a85d15867d23052c722b4be635b21fa1194b03f9e"
+    },
+    {
+      "path": "components/routeloom/src/sdkv1_handshake.cpp",
+      "sha256": "9d3a52133ddf4804ae1de38af11113c7b4ab9681b20db7b1ce50b666834ef47d"
+    },
+    {
+      "path": "components/routeloom/src/node.cpp",
+      "sha256": "a5f17fc90aead70aec8db4909cacba7ba1eec7db2ee1e120e7eeef727ac59f81"
+    },
+    {
+      "path": "components/routeloom/src/route_scale.cpp",
+      "sha256": "3b7ce32b796d4525736d86059efded2b20567c8c8e143f948378c1376ea664f9"
+    }
+  ]
+}

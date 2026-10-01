@@ -1,0 +1,9 @@
+[2026-10-01T00:46:07.653+00:00] I (3062) RouteLoomRef: discovery event=BOUND peer=3
+[2026-10-01T00:46:07.653+00:00] W (3062) RouteLoomRef: diagnostic reason=BOUND peer=3 message=none
+[2026-10-01T00:46:07.753+00:00] I (3157) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-10-01T00:46:07.753+00:00] W (3157) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-10-01T00:46:07.954+00:00] I (3363) RouteLoomRef: discovery event=BOUND peer=1
+[2026-10-01T00:46:07.954+00:00] W (3364) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-10-01T00:46:07.954+00:00] I (3387) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-10-01T00:46:07.954+00:00] W (3388) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-10-01T00:46:08.054+00:00] W (3411) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
