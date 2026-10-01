@@ -203,10 +203,11 @@ impl SiteAuthority {
             .ledger_sequence
             .checked_add(1)
             .ok_or("gateway plan sequence exhausted")?;
-        let epoch = report
-            .active_epoch
-            .checked_add(1)
-            .ok_or("gateway channel epoch exhausted")?;
+        // Every ledger entry consumed one epoch, and an offer that was never
+        // released left its epoch behind: the next epoch passes both the
+        // active one and every issued one (each at most its sequence).
+        let epoch = u32::try_from(sequence.max(u64::from(report.active_epoch) + 1))
+            .map_err(|_| "gateway channel epoch exhausted")?;
         let plan = ChannelPlan {
             network: self.id.network,
             authority: self.id.site_id,
@@ -345,6 +346,26 @@ mod tests {
             100,
         ));
         assert!(site.channel_plan_build(6, DEFAULT_LEAD_MS, 100).is_err());
+    }
+
+    #[test]
+    fn offer_after_an_unreleased_plan_takes_a_new_epoch() {
+        let mut site = testkit::authority(Box::<MemoryStore>::default(), 100);
+        // Epochs 1..=2 applied, then plans 3 and 4 offered but never released.
+        site.channel_plan.report = Some((
+            ChannelPlanReport {
+                active_channel: 6,
+                active_epoch: 2,
+                ledger_sequence: 4,
+                ..ChannelPlanReport::default()
+            },
+            100,
+        ));
+        let plan = site.channel_plan_build(1, DEFAULT_LEAD_MS, 100).unwrap();
+        assert_eq!(
+            (plan.operation_sequence, plan.old_epoch, plan.new_epoch),
+            (5, 2, 5)
+        );
     }
 
     #[test]

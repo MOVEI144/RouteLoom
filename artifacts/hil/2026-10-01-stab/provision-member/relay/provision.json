@@ -1,0 +1,89 @@
+{
+  "board": "relay",
+  "node": "0000000000000002",
+  "role": "bench",
+  "setup_bundle": "stab-5f-setup-ref",
+  "field_bundle": "stab-5f-relay",
+  "before_factory_reset": {
+    "rlcfg": {
+      "sha256": "5da23dc5d35cc6c4abdf556c10945ac068a614e23a5672c5ac3382ce4ec05065",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "c8baf7eee80a29496f1f33a90c348c4bc04a8e51ea4310820d1f598b7744cd38",
+      "blank": false
+    }
+  },
+  "erase": "ok",
+  "config": {
+    "generation": 1,
+    "node": "0000000000000002",
+    "role": "reference",
+    "security": "member",
+    "secrets_generation": "0",
+    "fingerprint": "-",
+    "secrets_fingerprint": ""
+  },
+  "identity_status": "OK identity=sealed pending=0 locked=1 node=0000000000000002 kid=d97f829766094234108462200c4308c501cfbd928c43de28d8e9db13cb44b46b serial=302 devcert_sha256=4c9d25cd29f3da01e57a19d7821d0d591aae22785e777",
+  "nvs_after_identity": {
+    "rlcfg": {
+      "sha256": "db771d2b558dce01c0cbe48e32875e0c8aed2940b6bc05139988f012fcb11609",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "01f736a59a5f39407501a863e2a416b5b5894d5d1b9cd4c46809c47a4695e410",
+      "blank": false
+    }
+  },
+  "app_only": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:48:a8",
+      "log": "flash-relay-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "d87d0bcf10f840b484b44bcb1e038879ca280b5b000400cee733e887ee72f2bb",
+    "app_bytes": 1352512,
+    "bundle": "hil-stab-5f-relay-reference_node-esp32c6"
+  },
+  "nvs_after_app_write": {
+    "rlcfg": {
+      "sha256": "db771d2b558dce01c0cbe48e32875e0c8aed2940b6bc05139988f012fcb11609",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "01f736a59a5f39407501a863e2a416b5b5894d5d1b9cd4c46809c47a4695e410",
+      "blank": false
+    }
+  },
+  "nvs_preserved": {
+    "rlcfg": true,
+    "rlkeys": true,
+    "rlsec": true
+  },
+  "readback": {
+    "stage": "readback",
+    "mono_ms": 585504245,
+    "wall": "2026-09-30T20:42:53Z",
+    "source": "boot",
+    "node": "0000000000000002",
+    "kid": "d97f829766094234108462200c4308c501cfbd928c43de28d8e9db13cb44b46b",
+    "devcert_sha256": "4c9d25cd29f3da01e57a19d7821d0d591aae22785e777ae47491db2e33e503ab",
+    "fw": "1",
+    "app_sha256": "10585ca73ae4e3f99958faa765463aa24ba55c3291f25b292e1ff67081e1e314",
+    "config_generation": 1,
+    "secrets_generation": 0
+  }
+}

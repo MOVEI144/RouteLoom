@@ -1,0 +1,72 @@
+{
+  "sends": [
+    {
+      "accepted": true,
+      "request": 101
+    },
+    {
+      "accepted": true,
+      "request": 102
+    },
+    {
+      "accepted": true,
+      "request": 103
+    },
+    {
+      "accepted": true,
+      "request": 104
+    },
+    {
+      "accepted": true,
+      "request": 105
+    }
+  ],
+  "deliveries": [
+    {
+      "request": 101,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 760226090,
+      "msg_seq": 136,
+      "updated_ms": 1790804692336
+    },
+    {
+      "request": 102,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 760226090,
+      "msg_seq": 137,
+      "updated_ms": 1790804693846
+    },
+    {
+      "request": 103,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 760226090,
+      "msg_seq": 138,
+      "updated_ms": 1790804695340
+    },
+    {
+      "request": 104,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 760226090,
+      "msg_seq": 139,
+      "updated_ms": 1790804696842
+    },
+    {
+      "request": 105,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 760226090,
+      "msg_seq": 140,
+      "updated_ms": 1790804698343
+    }
+  ],
+  "delivered": 5
+}

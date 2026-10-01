@@ -544,6 +544,167 @@ void test_commit_without_blob_refetches() {
   CHECK(rig.port.committed == 6);
 }
 
+// A member that missed a switch learns the commit late and refetches the
+// blob after the switch time: the verified commit is caught up (switch
+// now), never refused for a commit lead it could no longer meet.
+void test_refetched_blob_catches_up_after_switch() {
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationParticipant participant(rig.participant_config, rig.storage,
+                                   verify, runner, &rig.hooks);
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow));
+  MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+  constexpr MonotonicMs kLate = 20000;
+  CHECK_OK(participant.note_commit_evidence(
+      op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kLate));
+  CHECK(participant.phase() == ParticipantPhase::Recovering);
+  CHECK_OK(participant.prepare(blob, rig.measurements(), kLate + 100));
+  CHECK(participant.phase() == ParticipantPhase::Committed);
+  participant.poll(kLate + 200);
+  runner.poll(kLate + 200);
+  participant.poll(kLate + 300);
+  CHECK(participant.phase() == ParticipantPhase::Verifying);
+  CHECK(rig.port.committed == 6);
+}
+
+// A member that missed the switch was brought to the plan's channel by
+// its stranded search, and the verified commit arrives after the plan
+// expired: it records the plan applied in place instead of recovering.
+void test_expired_commit_settles_on_its_channel() {
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationParticipant participant(rig.participant_config, rig.storage,
+                                   verify, runner, &rig.hooks);
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow));
+  MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+  const MonotonicMs late = plan.expiry_ms + 60000;
+  CHECK_OK(participant.note_commit_evidence(
+      op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, late));
+  CHECK_OK(participant.prepare(blob, rig.measurements(), late + 10));
+  CHECK(participant.phase() == ParticipantPhase::Committed);
+  participant.poll(late + 20);
+  CHECK(participant.phase() == ParticipantPhase::Recovering);  // still on 1
+  RadioOperation move{};
+  move.kind = RadioOperationKind::ChannelCutover;
+  move.deadline_ms = late + 2000;
+  move.constraints.channel = 6;
+  move.constraints.outage_permitted = true;
+  (void)runner.request(move, late + 30);
+  runner.poll(late + 30);
+  CHECK(runner.committed_channel() == 6);
+  const int sets = rig.port.set_calls;
+  participant.poll(late + 40);
+  CHECK(participant.phase() == ParticipantPhase::Verifying);
+  CHECK(participant.active_channel() == 6);
+  CHECK(participant.active_epoch() == plan.new_epoch);
+  CHECK(rig.port.set_calls == sets);  // no timed switch of an expired plan
+}
+
+// A member prepared plan 2, missed its commit and restarted: resume loads
+// its applied plan 1. The late commit of plan 2 uses the blob it already
+// stored instead of waiting for a refetch.
+void test_late_commit_uses_the_stored_blob() {
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationPlan plan = rig.plan(2, 1, 6, 7500, 2);
+  plan.old_epoch = ChannelEpoch{0};
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+  {
+    MigrationParticipant before(rig.participant_config, rig.storage, verify, runner,
+                                &rig.hooks);
+    CHECK_OK(before.note_clock(ClockMapping{0, 10}, kNow));
+    CHECK_OK(before.prepare(blob, rig.measurements(), kNow));
+  }
+  MigrationParticipant after(rig.participant_config, rig.storage, verify, runner,
+                             &rig.hooks);
+  CHECK_OK(after.resume(kNow + 1000));
+  CHECK(after.phase() == ParticipantPhase::Stable);
+  // An older commit is heard first, but its blob is absent. The newer
+  // stored blob must supersede that refetch, including its pending flag.
+  MigrationPlan missed = rig.plan(1, 1, 11, 7500, 1);
+  std::array<std::uint8_t, 512> missed_buf{};
+  std::size_t missed_size = 0;
+  const Digest256 missed_hash = plan_digest(rig.encode(missed, missed_buf, missed_size));
+  const AuthorityOperation missed_op = rig.operation(missed, missed_hash, Digest256{});
+  const Digest256 missed_sig = sign_commit(missed_op, missed_hash, missed.new_epoch);
+  CHECK_OK(after.note_commit_evidence(missed_op, missed_hash, missed.new_epoch,
+                                      ByteView{missed_sig.data(), missed_sig.size()}, kNow + 1500));
+  CHECK(after.phase() == ParticipantPhase::Recovering);
+  CHECK_OK(after.note_commit_evidence(op, hash, plan.new_epoch,
+                                      ByteView{sig.data(), sig.size()}, kNow + 2000));
+  CHECK(after.phase() == ParticipantPhase::Committed);
+  CHECK(after.stats().blob_refetches == 1);  // only the older missing plan
+  const MonotonicMs late = plan.expiry_ms + 60000;
+  CHECK_OK(after.note_clock(ClockMapping{0, 10}, late));
+  RadioOperation move{};
+  move.kind = RadioOperationKind::ChannelCutover;
+  move.deadline_ms = late + 2000;
+  move.constraints.channel = 6;
+  move.constraints.outage_permitted = true;
+  (void)runner.request(move, late);
+  runner.poll(late);
+  after.poll(late + 10);
+  CHECK(after.phase() == ParticipantPhase::Verifying);
+  CHECK(after.active_epoch() == plan.new_epoch);
+}
+
+void test_cached_commit_blob_obeys_adoption_checks() {
+  for (const bool wrong_scope : {false, true}) {
+    Rig rig{};
+    ChannelOperationRunner runner(rig.port, rig.ops);
+    MigrationAuthority verify = rig.verifier_only();
+    MigrationParticipant participant(rig.participant_config, rig.storage, verify, runner,
+                                     &rig.hooks);
+    MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+    if (wrong_scope) {
+      plan.network = kNet + 1;
+    } else {
+      plan.expiry_ms = plan.switch_reference_ms;  // no legal post-switch window
+    }
+    std::array<std::uint8_t, 512> buf{};
+    std::size_t size = 0;
+    const ByteView blob = rig.encode(plan, buf, size);
+    const Digest256 hash = plan_digest(blob);
+    CHECK_OK(rig.storage.write_blob(hash, blob));
+    const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+    const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+    CHECK_OK(participant.note_commit_evidence(
+        op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
+    CHECK(participant.phase() == ParticipantPhase::Recovering);
+    CHECK(!participant.prepare(blob, rig.measurements(), kNow).ok());
+    CHECK(participant.phase() == ParticipantPhase::Recovering);
+    CHECK(participant.active_epoch().value == 0);
+    MigrationParticipant rebooted(rig.participant_config, rig.storage, verify, runner,
+                                  &rig.hooks);
+    CHECK(rebooted.resume(kNow + 1000).code == StatusCode::IntegrityError);
+    CHECK(rebooted.phase() == ParticipantPhase::Recovering);
+    CHECK(!rebooted.prepare(blob, rig.measurements(), kNow + 1000).ok());
+  }
+}
+
 void test_verified_plan_only() {
   Rig rig{};
   rig.ops.visit_hard_cap_ms = 1000;
@@ -1755,6 +1916,10 @@ void test_armed_commit_lead_and_unarmed_skip() {
 int main() {
   test_blob_alone_never_switches();
   test_commit_without_blob_refetches();
+  test_refetched_blob_catches_up_after_switch();
+  test_expired_commit_settles_on_its_channel();
+  test_cached_commit_blob_obeys_adoption_checks();
+  test_late_commit_uses_the_stored_blob();
   test_verified_plan_only();
   test_required_set_gating();
   test_assess_survey_bookkeeping();

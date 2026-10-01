@@ -1,0 +1,11 @@
+[2026-09-30T11:27:28.805+00:00] !! opened
+[2026-09-30T11:27:29.005+00:00] I (884) RouteLoomRef: sdkv1 identity: node=2 kid=bf689dc8a44cb79I (2646) RouteLoomRef: discovery event=REACHABLE peer=3
+[2026-09-30T11:27:29.005+00:00] W (2647) RouteLoomRef: diagnostic reason=REACHABLE peer=3 message=none
+[2026-09-30T11:27:30.007+00:00] I (3778) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-30T11:27:30.007+00:00] W (3779) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-30T11:27:30.007+00:00] I (3804) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T11:27:30.007+00:00] W (3805) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T11:27:30.007+00:00] W (3823) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-30T11:27:32.611+00:00] W (6370) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T11:27:33.212+00:00] W (6999) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present
+[2026-09-30T11:27:33.812+00:00] W (7502) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=3 message=present

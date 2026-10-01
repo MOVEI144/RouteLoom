@@ -1,0 +1,51 @@
+{
+  "started": "2026-10-01T00:45:53.145422+00:00",
+  "hold_s": 0.5,
+  "boards": [
+    {
+      "name": "bridge",
+      "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00",
+      "identity": {
+        "chip": "esp32c3",
+        "mac": "94:a9:90:7a:26:ac",
+        "log": "flash-bridge-preflight.log"
+      },
+      "open_attempts": 1,
+      "asserted": "2026-10-01T00:45:53.146831+00:00",
+      "released": "2026-10-01T00:45:53.647660+00:00",
+      "after_state": "ONLINE",
+      "after_port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00"
+    },
+    {
+      "name": "relay",
+      "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00",
+      "identity": {
+        "chip": "esp32c6",
+        "mac": "10:bd:a3:ff:fe:b1:48:a8",
+        "log": "flash-relay-preflight.log"
+      },
+      "open_attempts": 1,
+      "asserted": "2026-10-01T00:45:53.146945+00:00",
+      "released": "2026-10-01T00:45:53.647792+00:00",
+      "after_state": "ONLINE",
+      "after_port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00"
+    },
+    {
+      "name": "endpoint",
+      "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00",
+      "identity": {
+        "chip": "esp32c6",
+        "mac": "10:bd:a3:ff:fe:b1:47:54",
+        "log": "flash-endpoint-preflight.log"
+      },
+      "open_attempts": 1,
+      "asserted": "2026-10-01T00:45:53.147197+00:00",
+      "released": "2026-10-01T00:45:53.648010+00:00",
+      "after_state": "ONLINE",
+      "after_port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00"
+    }
+  ],
+  "assert_skew_ms": 0.368,
+  "release_skew_ms": 0.36,
+  "finished": "2026-10-01T00:45:55.719397+00:00"
+}

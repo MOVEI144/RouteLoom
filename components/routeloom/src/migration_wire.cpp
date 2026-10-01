@@ -1706,6 +1706,27 @@ Status MigrationAgent::resume(const MonotonicMs now_ms) noexcept {
   return Status::success();
 }
 
+void MigrationAgent::request_newest_state(const MonotonicMs now_ms) noexcept {
+  if (now_ms < next_snapshot_request_ms_) return;
+  SnapshotRequest request{};
+  request.known_epoch = participant_.committed_epoch();
+  std::array<std::uint8_t, migration_wire_const::kInlineObjectMax> content{};
+  std::size_t size = 0;
+  content[0] = static_cast<std::uint8_t>(PlanMessage::SnapshotRequest);
+  if (snapshot_request_encode(
+          request, MutableByteView{content.data() + 1, content.size() - 1}, size)
+          .ok()) {
+    std::array<NodeId, 24> peers{};
+    const std::size_t count = wire_.migration_peers(peers.data(), peers.size());
+    for (std::size_t i = 0; i < count; ++i) {
+      queue_inline(peers[i], autonomy::ControlObjectKind::ChannelPlan,
+                   ByteView{content.data(), size + 1},
+                   now_ms + migration_wire_const::kPendingTtlMs, false);
+    }
+  }
+  next_snapshot_request_ms_ = now_ms + config_.snapshot_request_period_ms;
+}
+
 void MigrationAgent::poll(const MonotonicMs now_ms) noexcept {
   participant_.poll(now_ms);
   if (coordinator_ != nullptr) {
@@ -1804,29 +1825,7 @@ void MigrationAgent::poll(const MonotonicMs now_ms) noexcept {
   // Stranded-node scout traffic: while Recovering, periodically ask every
   // bound peer for the newest signed state (04 §9.2). Bounded cadence; the
   // strong SLO ends when the engine reaches RECOVERY_REQUIRED.
-  if (phase == ParticipantPhase::Recovering &&
-      now_ms >= next_snapshot_request_ms_) {
-    SnapshotRequest request{};
-    request.known_epoch = participant_.committed_epoch();
-    std::array<std::uint8_t, migration_wire_const::kInlineObjectMax>
-        content{};
-    std::size_t size = 0;
-    content[0] = static_cast<std::uint8_t>(PlanMessage::SnapshotRequest);
-    if (snapshot_request_encode(
-            request,
-            MutableByteView{content.data() + 1, content.size() - 1}, size)
-            .ok()) {
-      std::array<NodeId, 24> peers{};
-      const std::size_t count =
-          wire_.migration_peers(peers.data(), peers.size());
-      for (std::size_t i = 0; i < count; ++i) {
-        queue_inline(peers[i], autonomy::ControlObjectKind::ChannelPlan,
-                     ByteView{content.data(), size + 1},
-                     now_ms + migration_wire_const::kPendingTtlMs, false);
-      }
-    }
-    next_snapshot_request_ms_ = now_ms + config_.snapshot_request_period_ms;
-  }
+  if (phase == ParticipantPhase::Recovering) request_newest_state(now_ms);
 
   if (config_.authority_role) {
     if (config_.timesync_period_ms != 0 &&

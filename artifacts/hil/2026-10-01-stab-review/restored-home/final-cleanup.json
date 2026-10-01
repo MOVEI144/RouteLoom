@@ -1,0 +1,26 @@
+{
+  "stopped": [
+    {
+      "pid": 3496582,
+      "program": "routeloom-host"
+    }
+  ],
+  "serial_ports": [
+    {
+      "port": "/dev/ttyACM0",
+      "returncode": 1,
+      "users": ""
+    },
+    {
+      "port": "/dev/ttyACM1",
+      "returncode": 1,
+      "users": ""
+    },
+    {
+      "port": "/dev/ttyACM2",
+      "returncode": 1,
+      "users": ""
+    }
+  ],
+  "wall_unix": 1790820401.7869432
+}

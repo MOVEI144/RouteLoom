@@ -1,0 +1,14 @@
+[2026-09-30T21:01:20.898+00:00] !! opened
+[2026-09-30T21:01:21.098+00:00] I (150) esp_image: segment 1: paddr=00065f70 vaddr=40800000 sizeI (1443) RouteLoomRef: booted (radio)
+[2026-09-30T21:01:21.098+00:00] I (1443) RouteLoomRef: security owner started; node start deferred to membership
+[2026-09-30T21:01:21.899+00:00] W (2133) RouteLoomRef: diagnostic reason=SECURITY_PROFILE_EXPERIMENTAL peer=0 message=none
+[2026-09-30T21:01:21.899+00:00] W (2134) rl_migrate: migration event MIGRATION_MODE_MANUAL peer=0
+[2026-09-30T21:01:21.899+00:00] W (2136) RouteLoomRef: diagnostic reason=MIGRATION_MODE_MANUAL peer=0 message=none
+[2026-09-30T21:01:21.899+00:00] I (2152) RouteLoomRef: member discovery started
+[2026-09-30T21:01:22.500+00:00] I (2789) RouteLoomRef: discovery event=BOUND peer=2
+[2026-09-30T21:01:22.500+00:00] W (2789) RouteLoomRef: diagnostic reason=BOUND peer=2 message=none
+[2026-09-30T21:01:22.700+00:00] I (2882) RouteLoomRef: discovery event=REACHABLE peer=2
+[2026-09-30T21:01:22.700+00:00] W (2882) RouteLoomRef: diagnostic reason=REACHABLE peer=2 message=none
+[2026-09-30T21:01:22.900+00:00] W (3183) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-30T21:01:23.501+00:00] W (3769) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=2 message=present
+[2026-09-30T21:01:23.701+00:00] W (4020) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=2 message=present

@@ -75,6 +75,8 @@ SeqNoRequestも同じ仕組みに乗せる：中継nodeは要求元隣接にinte
 
 ### 3.5 generation 0の仮経路は広告しない
 
+新しい隣接 binding では自己＋gateway record を一度交換する。古い迂回経路が残って bootstrap pull が省略されても、直結相手の現在の generation を学習できるようにする。既存の隣接ごとの pull 応答待ちを使い、local enqueue の拒否では待ちを消費しない。周期の tick と位相は変更しない。
+
 `add_neighbor()`は隣接への直結経路をgeneration 0で仮置きし、隣接の自己recordで本来のgenerationへ上がる。flat profileでは毎周期全隣接が自己recordを送るのですぐ上がるが、本profileでは木以外の隣接は自己recordをほとんど送らない。generation 0の経路を広告すると、本来のgenerationが届いた瞬間に網全体の当該source状態（候補・FD）がリセットされる（試験で、gatewayの直近隣がgeneration 0の経路を広げ、最初のgateway tickで全100台が一斉に再学習した）。そこで本profileはgeneration 0のselectionを広告しない（転送には使う）。gateway隣接の仮経路はpullの対象にする。
 
 ## 4. board間：on-demand探索（Discover／Reply）

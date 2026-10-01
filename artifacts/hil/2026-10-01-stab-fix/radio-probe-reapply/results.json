@@ -1,0 +1,29 @@
+{
+  "rows": [
+    {"node":1,"peer":2,"phase":0,"ch":1,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":0},
+    {"node":1,"peer":3,"phase":0,"ch":1,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":0},
+    {"node":1,"peer":2,"phase":1,"ch":6,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":46},
+    {"node":1,"peer":3,"phase":1,"ch":6,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":50},
+    {"node":1,"peer":2,"phase":2,"ch":1,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":0},
+    {"node":1,"peer":3,"phase":2,"ch":1,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":0},
+    {"node":1,"peer":2,"phase":3,"ch":6,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":46},
+    {"node":1,"peer":3,"phase":3,"ch":6,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":50},
+    {"node":3,"phase":0,"ch":1,"lr":1,"peer":1,"admitted":50,"errors":0,"ok":0,"fail":50,"rx":50},
+    {"node":3,"peer":2,"phase":0,"ch":1,"lr":1,"admitted":50,"errors":0,"ok":1,"fail":49,"rx":1},
+    {"node":3,"peer":1,"phase":1,"ch":6,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":51},
+    {"node":3,"peer":2,"phase":1,"ch":6,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":46},
+    {"node":3,"peer":1,"phase":2,"ch":1,"lr":1,"admitted":50,"errors":0,"ok":0,"fail":50,"rx":50},
+    {"node":3,"peer":2,"phase":2,"ch":1,"lr":1,"admitted":50,"errors":0,"ok":1,"fail":49,"rx":0},
+    {"node":3,"peer":1,"phase":3,"ch":6,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":50},
+    {"node":3,"peer":2,"phase":3,"ch":6,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":46},
+    {"node":2,"peer":1,"phase":0,"ch":1,"lr":1,"admitted":50,"errors":0,"ok":0,"fail":50,"rx":42},
+    {"node":2,"peer":3,"phase":0,"ch":1,"lr":1,"admitted":50,"errors":0,"ok":0,"fail":50,"rx":1},
+    {"node":2,"peer":1,"phase":1,"ch":6,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":41},
+    {"node":2,"peer":3,"phase":1,"ch":6,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":41},
+    {"node":2,"peer":1,"phase":2,"ch":1,"lr":1,"admitted":50,"errors":0,"ok":0,"fail":50,"rx":42},
+    {"node":2,"peer":3,"phase":2,"ch":1,"lr":1,"admitted":50,"errors":0,"ok":0,"fail":50,"rx":2},
+    {"node":2,"peer":1,"phase":3,"ch":6,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":41},
+    {"node":2,"peer":3,"phase":3,"ch":6,"lr":1,"admitted":50,"errors":0,"ok":50,"fail":0,"rx":41}
+  ],
+  "done": {"console-relay":true,"console-endpoint":true,"console-bridge":true}
+}

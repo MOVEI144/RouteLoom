@@ -1,0 +1,12 @@
+{
+  "count": 5,
+  "accepted": 5,
+  "delivered": 5,
+  "success_rate": 1.0,
+  "rtt_ms_min": 65.56,
+  "rtt_ms_median": 69.43,
+  "rtt_ms_p95": 111.58,
+  "rtt_ms_p99": 119.96,
+  "rtt_ms_max": 122.05,
+  "evidence": "artifacts/hil/2026-10-01-stab-review/n1/traffic.jsonl"
+}

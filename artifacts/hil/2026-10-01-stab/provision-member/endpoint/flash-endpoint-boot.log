@@ -1,0 +1,40 @@
+[2026-09-30T20:43:03.969Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-30T20:43:04.013Z] I (137) esp_image: segment 1: paddr=0004fe30 vaddr=40800000 sizeI (187) esp_image: segment 3: paddr=00089e08 vaddr=408001e8 size=12de4h ( 77284) load
+[2026-09-30T20:43:04.029Z] I (204) esp_image: segment 4: paddr=0009cbf4 vaddr=40812fd0 size=02b88h ( 11144) load
+[2026-09-30T20:43:04.033Z] I (207) esp_image: segment 5: paddr=0009f784 vaddr=50000000 size=00044h (    68) load
+[2026-09-30T20:43:04.040Z] I (208) esp_image: segment 6: paddr=0009f7d0 vaddr=5000004c size=00024h (    36) load
+[2026-09-30T20:43:04.045Z] I (220) boot: Loaded app from partition at offset 0x40000
+[2026-09-30T20:43:04.050Z] I (225) boot: Set actual ota_seq=1 in otadata[0]
+[2026-09-30T20:43:04.054Z] I (225) boot: Disabling RNG early entropy source...
+[2026-09-30T20:43:04.066Z] I (241) cpu_start: Unicore app
+[2026-09-30T20:43:04.076Z] I (251) cpu_start: GPIO 17 and 16 are used as console UART I/O pins
+[2026-09-30T20:43:04.076Z] I (251) cpu_start: Pro cpu start user code
+[2026-09-30T20:43:04.078Z] I (251) cpu_start: cpu freq: 160000000 Hz
+[2026-09-30T20:43:04.081Z] I (253) app_init: Application information:
+[2026-09-30T20:43:04.087Z] I (257) app_init: Project name:     routeloom_reference_node
+[2026-09-30T20:43:04.090Z] I (262) app_init: App version:      1
+[2026-09-30T20:43:04.095Z] I (266) app_init: Compile time:     Sep 30 2026 20:36:38
+[2026-09-30T20:43:04.100Z] I (271) app_init: ELF file SHA256:  b4f50f497...
+[2026-09-30T20:43:04.103Z] I (275) app_init: ESP-IDF:          v6.0.3
+[2026-09-30T20:43:04.107Z] I (279) efuse_init: Min chip rev:     v0.0
+[2026-09-30T20:43:04.111Z] I (283) efuse_init: Max chip rev:     v0.99 
+[2026-09-30T20:43:04.115Z] I (287) efuse_init: Chip rev:         v0.2
+[2026-09-30T20:43:04.121Z] I (291) heap_init: Initializing. RAM available for dynamic allocation:
+[2026-09-30T20:43:04.127Z] I (297) heap_init: At 4081D380 len 0005F290 (380 KiB): RAM
+[2026-09-30T20:43:04.132Z] I (302) heap_init: At 4087C610 len 00002F54 (11 KiB): RAM
+[2026-09-30T20:43:04.137Z] I (307) heap_init: At 50000070 len 00003F78 (15 KiB): RTCRAM
+[2026-09-30T20:43:04.141Z] I (313) spi_flash: detected chip: generic
+[2026-09-30T20:43:04.144Z] I (316) spi_flash: flash io: dio
+[2026-09-30T20:43:04.150Z] I (320) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+[2026-09-30T20:43:04.156Z] I (325) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+[2026-09-30T20:43:04.168Z] I (341) main_task: Started on CPU0
+[2026-09-30T20:43:04.171Z] I (344) main_task: Calling app_main()
+[2026-09-30T20:43:04.175Z] I (347) main_task: Returned from app_main()
+[2026-09-30T20:43:04.181Z] I (348) rl_flash: image: sdk=0.1.0 layout=PT-4M-v2 storage_epoch=2
+[2026-09-30T20:43:04.222Z] I (397) RouteLoomRef: sdkv1 identity: none provisioned
+[2026-09-30T20:43:04.222Z] I (397) RouteLoomRef: sdkv1 site: not a member
+[2026-09-30T20:43:04.226Z] I (398) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+[2026-09-30T20:43:04.231Z] I (402) RouteLoomRef: sdkv1 local_revocation: none
+[2026-09-30T20:43:04.235Z] I (406) RouteLoomRef: sdkv1 lifecycle: none
+[2026-09-30T20:43:04.246Z] routeloom-maintenance v1 ready
+[2026-09-30T20:43:07.084Z] !! capture closed

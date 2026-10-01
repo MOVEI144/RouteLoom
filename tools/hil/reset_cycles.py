@@ -195,8 +195,7 @@ def main() -> int:
                 result["sends"].append(row)
                 if (result["recovery_s"] is None and
                         row.get("delivery", {}).get("state") == "delivered"):
-                    result["recovery_s"] = round(
-                        time.monotonic() - released - row["latency_ms"] / 1000, 3)
+                    result["recovery_s"] = row["offset_s"]
                 time.sleep(args.send_gap_s)
             result["delivered"] = sum(
                 1 for r in result["sends"] if r.get("delivery", {}).get("state") == "delivered")

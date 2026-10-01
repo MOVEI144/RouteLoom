@@ -1,0 +1,63 @@
+[2026-10-01T00:44:20.634+00:00] I (5018) RouteLoomRef: join mode=1 state=2 error=0
+[2026-10-01T00:44:20.634+00:00] I (5020) RouteLoomRef: join mode=1 state=3 error=0
+[2026-10-01T00:44:20.634+00:00] I (5026) RouteLoomRef: join mode=1 state=4 error=0
+[2026-10-01T00:44:20.935+00:00] I (5344) RouteLoomRef: join mode=1 state=2 error=0
+[2026-10-01T00:44:20.935+00:00] I (5346) RouteLoomRef: join mode=1 state=3 error=0
+[2026-10-01T00:44:20.935+00:00] I (5351) RouteLoomRef: join mode=1 state=4 error=0
+[2026-10-01T00:44:21.235+00:00] I (5670) RouteLoomRef: join mode=1 state=2 error=0
+[2026-10-01T00:44:21.235+00:00] I (5672) RouteLoomRef: join mode=1 state=3 error=0
+[2026-10-01T00:44:21.235+00:00] I (5677) RouteLoomRef: join mode=1 state=4 error=0
+[2026-10-01T00:44:21.636+00:00] I (5996) RouteLoomRef: join mode=1 state=5 error=0
+[2026-10-01T00:44:21.636+00:00] I (5998) RouteLoomRef: join mode=1 state=3 error=0
+[2026-10-01T00:44:21.636+00:00] I (6003) RouteLoomRef: join mode=1 state=6 error=0
+[2026-10-01T00:44:22.037+00:00] I (6431) RouteLoomRef: join mode=1 state=7 error=0
+[2026-10-01T00:44:22.137+00:00] I (6540) RouteLoomRef: join mode=1 state=8 error=0
+[2026-10-01T00:44:22.638+00:00] I (7010) RouteLoomRef: join mode=1 state=9 error=0
+[2026-10-01T00:44:22.738+00:00] I (7128) RouteLoomRef: join mode=1 state=10 error=0
+[2026-10-01T00:44:23.040+00:00] I (7450) RouteLoomRef: join mode=1 state=11 error=0
+[2026-10-01T00:44:23.140+00:00] I (7580) RouteLoomRef: join mode=1 state=12 error=0
+[2026-10-01T00:44:23.841+00:00] W (8227) RouteLoomRef: diagnostic reason=SECURITY_PROFILE_EXPERIMENTAL peer=0 message=none
+[2026-10-01T00:44:23.841+00:00] W (8232) rl_migrate: migration event MIGRATION_MODE_MANUAL peer=0
+[2026-10-01T00:44:23.841+00:00] W (8232) RouteLoomRef: diagnostic reason=MIGRATION_MODE_MANUAL peer=0 message=none
+[2026-10-01T00:44:24.042+00:00] I (8412) RouteLoomRef: p6: RRS1 applied rs_epoch=1
+[2026-10-01T00:44:24.042+00:00] I (8419) RouteLoomRef: member discovery started
+[2026-10-01T00:44:26.045+00:00] I (10424) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-10-01T00:44:26.045+00:00] W (10425) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-10-01T00:44:26.346+00:00] I (10793) RouteLoomRef: discovery event=BOUND peer=1
+[2026-10-01T00:44:26.346+00:00] W (10793) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-10-01T00:44:26.446+00:00] I (10816) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-10-01T00:44:26.446+00:00] W (10816) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-10-01T00:44:26.446+00:00] W (10840) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-10-01T00:44:27.147+00:00] W (11570) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-10-01T00:44:27.147+00:00] W (11582) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-10-01T00:44:29.351+00:00] I (13711) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-10-01T00:44:29.351+00:00] W (13712) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-10-01T00:44:30.454+00:00] W (14826) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-10-01T00:44:35.163+00:00] W (19592) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-10-01T00:44:35.164+00:00] W (19606) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:35.264+00:00] W (19622) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:35.264+00:00] W (19694) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:35.264+00:00] W (19710) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:35.364+00:00] W (19787) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:35.464+00:00] W (19839) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:35.464+00:00] W (19879) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:35.564+00:00] W (19925) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:36.065+00:00] W (20427) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:36.065+00:00] W (20430) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:36.065+00:00] W (20434) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:36.266+00:00] W (20651) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:36.366+00:00] W (20796) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:36.466+00:00] W (20848) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:36.466+00:00] W (20904) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:36.867+00:00] W (21271) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-10-01T00:44:36.867+00:00] W (21285) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:36.867+00:00] W (21298) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:44:37.268+00:00] W (21719) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-10-01T00:45:16.049+00:00] I (60483) RouteLoom: stack hwm rl_owner 9260 B
+[2026-10-01T00:45:16.049+00:00] I (60483) RouteLoom: owner polls=14671 empty=11850 rxq_max=6 max_us rx=14677 bootstrap=494971 node=3199 security=644864
+[2026-10-01T00:45:16.050+00:00] I (60487) RouteLoom: owner expiry_slots=4355640 hop_accept_expired=4
+[2026-10-01T00:45:16.050+00:00] I (60493) RouteLoom: HIL HEAP free=91528 largest=75776 min=90664 B
+[2026-10-01T00:45:16.150+00:00] I (60499) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=7 busy=0 quarantined=0 fenced=0 tx_ok=81 tx_failed=1 stale=0 send_errors=0 last_error=0x0 rx=178 rx_other_channel=0
+[2026-10-01T00:45:16.150+00:00] I (60515) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=2 stale=0 probes=6 send_failures=5 kind_rejects=0
+[2026-10-01T00:45:16.150+00:00] I (60526) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=9 seq=1
+[2026-10-01T00:45:16.150+00:00] I (60533) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0

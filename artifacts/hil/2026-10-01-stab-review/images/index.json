@@ -1,0 +1,434 @@
+[
+  {
+    "label": "review-br",
+    "build_info": {
+      "chip": "esp32c3",
+      "firmware_version": "hil-review-br",
+      "idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
+      "idf_image": "espressif/idf@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555",
+      "origin": "local-build",
+      "role": "bridge_node",
+      "sdk_commit": "33e44b04f09838ca1d553df7e1f3950cd5833031",
+      "source_digest": "c05d619998dd9b462d24579589e657fcde67ee0465cc587ebea238b139434c38",
+      "toolchain": "ESP-IDF v6.0.3"
+    },
+    "files": {
+      "LICENSES/LICENSE": {
+        "bytes": 11352,
+        "sha256": "6b21deb85b1e88c007c462b6fa657b90d7004ba4b33022f390cc5a465d4acceb"
+      },
+      "LICENSES/NOTICE": {
+        "bytes": 7431,
+        "sha256": "570599732e15664f67c74cc0af3183532614e7d163a885b9b484f7ccf1e5f846"
+      },
+      "SHA256SUMS": {
+        "bytes": 1046,
+        "sha256": "94e1fd36453a957eb9477e8f01a226f7015435cf2144b8c2448fa4f244494c3f"
+      },
+      "build-info.json": {
+        "bytes": 422,
+        "sha256": "8a8bbfc067af99e4c41e70b4f3a6af6f7303cc70059d2a841fe83912a00e1277"
+      },
+      "flasher_args.json": {
+        "bytes": 442,
+        "sha256": "a9368676a826e7c0942dac7af4b0410332e9843eda1dc8da76ebf450e1a63319"
+      },
+      "images/application.bin": {
+        "bytes": 1268672,
+        "sha256": "74970e89cfc7271f31128ec5ba9373b9fcfdc7683a0bd6f72d87dffcc948bc31"
+      },
+      "images/bootloader/bootloader.bin": {
+        "bytes": 21408,
+        "sha256": "7b3a076a7bafc3f2f13b81ac5786e16978866ccd48482ef9357842367890542d"
+      },
+      "images/ota_data_initial.bin": {
+        "bytes": 8192,
+        "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+      },
+      "images/partition_table/partition-table.bin": {
+        "bytes": 3072,
+        "sha256": "d75f28068a6e44a2a4075a490c5993c220f24cfc1862cb79e27f64357ee9ec6b"
+      },
+      "manifest.json": {
+        "bytes": 2102,
+        "sha256": "a13d4e40cce070bcfceacb2b9590e4dc43378456d88aea1687717013b868303c"
+      },
+      "partition-table.csv": {
+        "bytes": 1061,
+        "sha256": "43e71db1c498a49368392a24efb74632dc42863a1bfc09bf81fed97ed8c5d361"
+      },
+      "ram-report.json": {
+        "bytes": 830,
+        "sha256": "f1c85c5241207912b057a8361d1e30adf0ab67cff164bf3315f20c3e7f3d5797"
+      },
+      "sdkconfig": {
+        "bytes": 80575,
+        "sha256": "a40912370644e9facee2033856c8ad50298d730ff72fa8462bc046a9230fb36a"
+      },
+      "signature.json": {
+        "bytes": 167,
+        "sha256": "cf7fa4c83c1c206f537eb9ca4aeb10f955abd4ecb868e005c448d402ba5f7726"
+      }
+    }
+  },
+  {
+    "label": "review-relay",
+    "build_info": {
+      "chip": "esp32c6",
+      "firmware_version": "hil-review-relay",
+      "idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
+      "idf_image": "espressif/idf@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555",
+      "origin": "local-build",
+      "role": "reference_node",
+      "sdk_commit": "33e44b04f09838ca1d553df7e1f3950cd5833031",
+      "source_digest": "c05d619998dd9b462d24579589e657fcde67ee0465cc587ebea238b139434c38",
+      "toolchain": "ESP-IDF v6.0.3"
+    },
+    "files": {
+      "LICENSES/LICENSE": {
+        "bytes": 11352,
+        "sha256": "6b21deb85b1e88c007c462b6fa657b90d7004ba4b33022f390cc5a465d4acceb"
+      },
+      "LICENSES/NOTICE": {
+        "bytes": 7431,
+        "sha256": "570599732e15664f67c74cc0af3183532614e7d163a885b9b484f7ccf1e5f846"
+      },
+      "SHA256SUMS": {
+        "bytes": 1046,
+        "sha256": "2c464a0ca6dfd38f673604e413c6be58069fdb86ea54a90c0de063cdc6f00631"
+      },
+      "build-info.json": {
+        "bytes": 428,
+        "sha256": "c1b02a77058575f55d984bd5b6baa0022c1779396d40284fed8513bfadfbcd4c"
+      },
+      "flasher_args.json": {
+        "bytes": 442,
+        "sha256": "0a68d064885fdfea33bb6e881eb175bd9bb4d8f97ba8359e63319b8e9d39aca0"
+      },
+      "images/application.bin": {
+        "bytes": 1352896,
+        "sha256": "4b4c71dbfffd260f7c156088dc5149cc158887649af4264f8adc1eb43d7cdc65"
+      },
+      "images/bootloader/bootloader.bin": {
+        "bytes": 22528,
+        "sha256": "ab582a53d7669db17c32cc6b99e60ccae1e72449bdd562a3c908bebc2cbb684c"
+      },
+      "images/ota_data_initial.bin": {
+        "bytes": 8192,
+        "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+      },
+      "images/partition_table/partition-table.bin": {
+        "bytes": 3072,
+        "sha256": "d75f28068a6e44a2a4075a490c5993c220f24cfc1862cb79e27f64357ee9ec6b"
+      },
+      "manifest.json": {
+        "bytes": 2113,
+        "sha256": "4f13cc769510f357539f58fecda37af105ce3320c0c378c9e3b90069e9fa175c"
+      },
+      "partition-table.csv": {
+        "bytes": 1061,
+        "sha256": "43e71db1c498a49368392a24efb74632dc42863a1bfc09bf81fed97ed8c5d361"
+      },
+      "ram-report.json": {
+        "bytes": 720,
+        "sha256": "4e1394aa97ca210ff846c05c0dce1e5f6b04ab02f4eb9d3aec33f34efabbdee3"
+      },
+      "sdkconfig": {
+        "bytes": 88177,
+        "sha256": "0f6389c90f268ce4a6e982ec11e52d3151588564aed7b9e8fa2444983be1cd9c"
+      },
+      "signature.json": {
+        "bytes": 167,
+        "sha256": "acbf2af188dca2dfdffd5f0edf4385076e10bee34f7e8b2a2c62a7e4271e0d4c"
+      }
+    }
+  },
+  {
+    "label": "review-ep",
+    "build_info": {
+      "chip": "esp32c6",
+      "firmware_version": "hil-review-ep",
+      "idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
+      "idf_image": "espressif/idf@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555",
+      "origin": "local-build",
+      "role": "reference_node",
+      "sdk_commit": "33e44b04f09838ca1d553df7e1f3950cd5833031",
+      "source_digest": "c05d619998dd9b462d24579589e657fcde67ee0465cc587ebea238b139434c38",
+      "toolchain": "ESP-IDF v6.0.3"
+    },
+    "files": {
+      "LICENSES/LICENSE": {
+        "bytes": 11352,
+        "sha256": "6b21deb85b1e88c007c462b6fa657b90d7004ba4b33022f390cc5a465d4acceb"
+      },
+      "LICENSES/NOTICE": {
+        "bytes": 7431,
+        "sha256": "570599732e15664f67c74cc0af3183532614e7d163a885b9b484f7ccf1e5f846"
+      },
+      "SHA256SUMS": {
+        "bytes": 1046,
+        "sha256": "fdab0df10a10b13b275565c45796f5c5f98c68c7f62802e0822d09a2e4c138b7"
+      },
+      "build-info.json": {
+        "bytes": 425,
+        "sha256": "d64f72559e5e0f169bed6167c46c2781a924d9ccf35fab29d07132ef3c49e8e4"
+      },
+      "flasher_args.json": {
+        "bytes": 442,
+        "sha256": "0a68d064885fdfea33bb6e881eb175bd9bb4d8f97ba8359e63319b8e9d39aca0"
+      },
+      "images/application.bin": {
+        "bytes": 1297536,
+        "sha256": "d2c540157f70b68449339712a728bb7b29e3b80b65314fda86f3dde171a4e2b3"
+      },
+      "images/bootloader/bootloader.bin": {
+        "bytes": 22528,
+        "sha256": "42622bf129457c07aface8164255a1635053227c5f422e95bb210cb85e9f2365"
+      },
+      "images/ota_data_initial.bin": {
+        "bytes": 8192,
+        "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+      },
+      "images/partition_table/partition-table.bin": {
+        "bytes": 3072,
+        "sha256": "d75f28068a6e44a2a4075a490c5993c220f24cfc1862cb79e27f64357ee9ec6b"
+      },
+      "manifest.json": {
+        "bytes": 2107,
+        "sha256": "3abfc21bd6db4e6d008829aee443958ceb9001638d4e3c572d1aaa40292ac413"
+      },
+      "partition-table.csv": {
+        "bytes": 1061,
+        "sha256": "43e71db1c498a49368392a24efb74632dc42863a1bfc09bf81fed97ed8c5d361"
+      },
+      "ram-report.json": {
+        "bytes": 722,
+        "sha256": "d4aa509da3e1e6880e94238c9a514c4faf72fd3ed207e6bf94a5007ffa4bb9bd"
+      },
+      "sdkconfig": {
+        "bytes": 88199,
+        "sha256": "8556b3d4e48466be468bc3fc1d31e97aa5a8e7f3c8f84652e2227140a7a8846a"
+      },
+      "signature.json": {
+        "bytes": 167,
+        "sha256": "6d60f13e3388b1a8d393629cb6731e4da92287c3a6abfc620053c54525f3ac11"
+      }
+    }
+  },
+  {
+    "label": "review-chain-br",
+    "build_info": {
+      "chip": "esp32c3",
+      "firmware_version": "hil-review-chain-br",
+      "idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
+      "idf_image": "espressif/idf@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555",
+      "origin": "local-build",
+      "role": "bridge_node",
+      "sdk_commit": "acece4527229e42ef3e6af52a64b343bd2898388",
+      "source_digest": "82fcada11682c19bb6a0a237c7df4e9120084ea80bf6a0996465fff6d1aed2d2",
+      "toolchain": "ESP-IDF v6.0.3"
+    },
+    "files": {
+      "LICENSES/LICENSE": {
+        "bytes": 11352,
+        "sha256": "6b21deb85b1e88c007c462b6fa657b90d7004ba4b33022f390cc5a465d4acceb"
+      },
+      "LICENSES/NOTICE": {
+        "bytes": 7431,
+        "sha256": "570599732e15664f67c74cc0af3183532614e7d163a885b9b484f7ccf1e5f846"
+      },
+      "SHA256SUMS": {
+        "bytes": 1046,
+        "sha256": "13ddd754f03e1962246979e97bdd3e7fd5041b7d534294706bf29e76af6a3623"
+      },
+      "build-info.json": {
+        "bytes": 428,
+        "sha256": "fad77e8667610276cecd2dbb7c333006ef54524ac74fb44fbf920479c54296b4"
+      },
+      "flasher_args.json": {
+        "bytes": 442,
+        "sha256": "a9368676a826e7c0942dac7af4b0410332e9843eda1dc8da76ebf450e1a63319"
+      },
+      "images/application.bin": {
+        "bytes": 1268880,
+        "sha256": "5b651feeef15040491ef5f86c1a55e4f4c1541a201bc66d7b27e092435f63235"
+      },
+      "images/bootloader/bootloader.bin": {
+        "bytes": 21408,
+        "sha256": "13d380a98129055e638b64233b5fbd4ecd3bcb5ada9e08e80c3a5b51126a9b8e"
+      },
+      "images/ota_data_initial.bin": {
+        "bytes": 8192,
+        "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+      },
+      "images/partition_table/partition-table.bin": {
+        "bytes": 3072,
+        "sha256": "d75f28068a6e44a2a4075a490c5993c220f24cfc1862cb79e27f64357ee9ec6b"
+      },
+      "manifest.json": {
+        "bytes": 2114,
+        "sha256": "3c8aeafd0ee58e3ef49a97a1170083e7f776fbbe7e6487e73a2fa17aa13ff13d"
+      },
+      "partition-table.csv": {
+        "bytes": 1061,
+        "sha256": "43e71db1c498a49368392a24efb74632dc42863a1bfc09bf81fed97ed8c5d361"
+      },
+      "ram-report.json": {
+        "bytes": 830,
+        "sha256": "f1c85c5241207912b057a8361d1e30adf0ab67cff164bf3315f20c3e7f3d5797"
+      },
+      "sdkconfig": {
+        "bytes": 80581,
+        "sha256": "65c585f82ff3227117b9eb323215de4d7ca7cc4f1dca51ba8b748114c5b03793"
+      },
+      "signature.json": {
+        "bytes": 167,
+        "sha256": "c6ea669230cd2465774c8f977f76eb9108b38e34ae363572502fd52f10160f04"
+      }
+    }
+  },
+  {
+    "label": "review-chain-ep",
+    "build_info": {
+      "chip": "esp32c6",
+      "firmware_version": "hil-review-chain-ep",
+      "idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
+      "idf_image": "espressif/idf@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555",
+      "origin": "local-build",
+      "role": "reference_node",
+      "sdk_commit": "acece4527229e42ef3e6af52a64b343bd2898388",
+      "source_digest": "82fcada11682c19bb6a0a237c7df4e9120084ea80bf6a0996465fff6d1aed2d2",
+      "toolchain": "ESP-IDF v6.0.3"
+    },
+    "files": {
+      "LICENSES/LICENSE": {
+        "bytes": 11352,
+        "sha256": "6b21deb85b1e88c007c462b6fa657b90d7004ba4b33022f390cc5a465d4acceb"
+      },
+      "LICENSES/NOTICE": {
+        "bytes": 7431,
+        "sha256": "570599732e15664f67c74cc0af3183532614e7d163a885b9b484f7ccf1e5f846"
+      },
+      "SHA256SUMS": {
+        "bytes": 1046,
+        "sha256": "e62fa06f36d84b1fe93941b61814de016b04b660dfa753025d1c8feb7823b9a8"
+      },
+      "build-info.json": {
+        "bytes": 431,
+        "sha256": "6a34f57c66110baeb865581aa16bdd691dcf018e03eaa1704deb6606a7209366"
+      },
+      "flasher_args.json": {
+        "bytes": 442,
+        "sha256": "0a68d064885fdfea33bb6e881eb175bd9bb4d8f97ba8359e63319b8e9d39aca0"
+      },
+      "images/application.bin": {
+        "bytes": 1297728,
+        "sha256": "588b08fd2f7320f9ad836bc2ee4b4432048f358ad714a4944ab1a57cc062eab1"
+      },
+      "images/bootloader/bootloader.bin": {
+        "bytes": 22528,
+        "sha256": "5babb171c8812fda1922ff2208690ea6cac0cb4c6ca53a4f6bdbe557ec32a7b9"
+      },
+      "images/ota_data_initial.bin": {
+        "bytes": 8192,
+        "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+      },
+      "images/partition_table/partition-table.bin": {
+        "bytes": 3072,
+        "sha256": "d75f28068a6e44a2a4075a490c5993c220f24cfc1862cb79e27f64357ee9ec6b"
+      },
+      "manifest.json": {
+        "bytes": 2119,
+        "sha256": "ca8bdb68563c17e4d0039ea026cef93feb00819fe49c208f649ac905c3173e63"
+      },
+      "partition-table.csv": {
+        "bytes": 1061,
+        "sha256": "43e71db1c498a49368392a24efb74632dc42863a1bfc09bf81fed97ed8c5d361"
+      },
+      "ram-report.json": {
+        "bytes": 722,
+        "sha256": "d4aa509da3e1e6880e94238c9a514c4faf72fd3ed207e6bf94a5007ffa4bb9bd"
+      },
+      "sdkconfig": {
+        "bytes": 88205,
+        "sha256": "2b2b4265002ddfa266e7cd99e2807a5789f515b9397013f9fb2d7791db5b3abe"
+      },
+      "signature.json": {
+        "bytes": 167,
+        "sha256": "4aa8d2af3108a9cfa8dbcc1ccace98bddba5bf9b5bac9cc0fe92ad25691157eb"
+      }
+    }
+  },
+  {
+    "label": "review-n1",
+    "build_info": {
+      "chip": "esp32c3",
+      "firmware_version": "hil-review-n1",
+      "idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
+      "idf_image": "espressif/idf@sha256:54278f2c01e6e759502e2f04c9103589c17528923426f4d63193490c7a08f555",
+      "origin": "local-build",
+      "role": "bridge_node",
+      "sdk_commit": "acece4527229e42ef3e6af52a64b343bd2898388",
+      "source_digest": "82fcada11682c19bb6a0a237c7df4e9120084ea80bf6a0996465fff6d1aed2d2",
+      "toolchain": "ESP-IDF v6.0.3"
+    },
+    "files": {
+      "LICENSES/LICENSE": {
+        "bytes": 11352,
+        "sha256": "6b21deb85b1e88c007c462b6fa657b90d7004ba4b33022f390cc5a465d4acceb"
+      },
+      "LICENSES/NOTICE": {
+        "bytes": 7431,
+        "sha256": "570599732e15664f67c74cc0af3183532614e7d163a885b9b484f7ccf1e5f846"
+      },
+      "SHA256SUMS": {
+        "bytes": 1046,
+        "sha256": "3694e38131f7bc48761f068fe1bbf38e57a71b19108272d74b6f0db74d651001"
+      },
+      "build-info.json": {
+        "bytes": 422,
+        "sha256": "c8f32316a2b84391013e4ee9dfd4dbdb7dc60b54d307b6b08ec1cb631a5158ef"
+      },
+      "flasher_args.json": {
+        "bytes": 442,
+        "sha256": "a9368676a826e7c0942dac7af4b0410332e9843eda1dc8da76ebf450e1a63319"
+      },
+      "images/application.bin": {
+        "bytes": 1266448,
+        "sha256": "4e46fe3933716ee87232acccc6cd2a0a0907cd261b9b919b41672f8deab12d4a"
+      },
+      "images/bootloader/bootloader.bin": {
+        "bytes": 21408,
+        "sha256": "2335eedd02d21404275d69dde2b9a69884e193c32f70d4ed309e85e98d1b866c"
+      },
+      "images/ota_data_initial.bin": {
+        "bytes": 8192,
+        "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f"
+      },
+      "images/partition_table/partition-table.bin": {
+        "bytes": 3072,
+        "sha256": "d75f28068a6e44a2a4075a490c5993c220f24cfc1862cb79e27f64357ee9ec6b"
+      },
+      "manifest.json": {
+        "bytes": 2102,
+        "sha256": "c43d3106a258cb79b1ba981113d59298fc0c1e627e7e3ad807cde99114bd6c76"
+      },
+      "partition-table.csv": {
+        "bytes": 1061,
+        "sha256": "43e71db1c498a49368392a24efb74632dc42863a1bfc09bf81fed97ed8c5d361"
+      },
+      "ram-report.json": {
+        "bytes": 830,
+        "sha256": "6dc7e221d6bb4524a831fff5b3979d234efaca567a425a6b2fd3b38f3d816830"
+      },
+      "sdkconfig": {
+        "bytes": 80585,
+        "sha256": "fbc13aca8bfddaf112c8cc8d22af7c5ff4acd75b0f0b06912bb032efbb4a3894"
+      },
+      "signature.json": {
+        "bytes": 167,
+        "sha256": "142fb6473d76cbbbcdd3c29c6392e3ef8a4c5a81e2f7a9e2246286e36a7f2d00"
+      }
+    }
+  }
+]

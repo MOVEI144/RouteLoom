@@ -286,7 +286,8 @@ target_include_directories(routeloom_espnow_runtime_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
 target_compile_options(routeloom_espnow_runtime_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
-target_compile_definitions(routeloom_espnow_runtime_tests PRIVATE CONFIG_ROUTELOOM_TRACE=1)
+target_compile_definitions(routeloom_espnow_runtime_tests PRIVATE
+    CONFIG_ROUTELOOM_TRACE=1 CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY=1)
 add_test(NAME routeloom_espnow_runtime_tests COMMAND routeloom_espnow_runtime_tests)
 
 if(ROUTELOOM_RESOURCE_PROFILE STREQUAL "endpoint")
