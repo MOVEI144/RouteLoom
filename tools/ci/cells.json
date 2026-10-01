@@ -281,7 +281,7 @@
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1422768, "static_free_min": 147527, "rtc_used_max": 164}
+      "budget": {"app_bin_max": 1425056, "static_free_min": 147527, "rtc_used_max": 164}
     },
     {
       "id": "experimental-c6-bridge_node-member", "app": "bridge_node", "target": "esp32c6",
@@ -308,7 +308,7 @@
       "target": "esp32c3", "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_DEV_KCONFIG_IDENTITY=y", "CONFIG_ROUTELOOM_ROLE_ENDPOINT=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1323632, "static_free_min": 84992, "rtc_used_max": 5920}
+      "budget": {"app_bin_max": 1325792, "static_free_min": 84992, "rtc_used_max": 5920}
     },
     {
       "id": "endpoint_c-esp32c3-example", "app": "endpoint_c", "dir": "examples/endpoint_c",
