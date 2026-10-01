@@ -2956,7 +2956,6 @@ class MeshNode {
   FixedPool<GroupStream, kGroupStreamCapacity> group_streams_{};
   FixedPool<GroupHold, kGroupHoldCapacity> group_holds_{};
   GroupPromoteHold group_promote_hold_{};
-  std::uint32_t next_group_seq_{1};
   std::int64_t group_budget_tokens_us_{kGroupBudgetCapacityUs};
   MonotonicMs group_budget_last_ms_{0};
   GroupStats group_stats_{};
@@ -2987,6 +2986,7 @@ class MeshNode {
   // from the forwarding budget by queue_forward (01 §lifetime).
   std::uint32_t rx_age_ms_{0};
   std::uint64_t control_service_samples_{0};
+  std::uint32_t next_group_seq_{1};
   bool control_budget_unsat_reported_{false};
   // Dedup capacity counters (sdk-completion/02 §2.4) — admissions, refusals,
   // forced evictions and expiry releases, all saturating u64.
