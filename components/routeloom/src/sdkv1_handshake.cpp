@@ -889,11 +889,11 @@ void HandshakeEngine::finish_confirmed_exchange(const SecurityScope scope,
   if (!edhoc_flight_.active) return;
   CarrierRecord* record = find_record_by_token(edhoc_flight_.owner_token);
   if (record == nullptr || record->state != RecordState::EdhocM4Sent) return;
-  if (record->scope == SecurityScope::Link && scope == SecurityScope::Link) {
-    // Admitted m4 and its duplicate hashes remain in this record. A second
-    // neighbour's link can use the crypto flight before the first carries data.
+  if (record->scope == SecurityScope::Link) {
+    // Admitted m4 and its duplicate hashes remain in this record. Any next
+    // exchange can use the crypto flight before this link carries data.
     end_edhoc_flight();
-  } else if ((record->peer == peer || record->scope == SecurityScope::Link) &&
+  } else if (record->scope == scope && record->peer == peer &&
              sink_.has_authenticated_rx(record->scope, record->peer, edhoc_flight_.cid_own)) {
     // Only traffic in the exact installed context ends the quiet retry duty.
     drop_record(*record);
@@ -1758,6 +1758,14 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
           break;
         }
       }
+    }
+    // A fresh cookie-bound discovery carrier supersedes a completed link,
+    // while retries on the original carrier keep their exact m4 evidence.
+    // An unauthenticated carrier cannot terminate that retry duty.
+    if (record != nullptr && record->state == RecordState::EdhocM4Sent &&
+        rx.scope == SecurityScope::Link && !carrier_equal(record->carrier, rx.carrier)) {
+      if (!responder_cookie_ok(rx)) return Status::success();
+      record = nullptr;
     }
     if (record != nullptr && record->state == RecordState::EdhocM1Parked) {
       // Still waiting for the flight/budget: refresh a clobbered stash

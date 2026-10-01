@@ -14,8 +14,13 @@
   image (for example node status on `gateway_small`) boots without advertising
   that bit instead of entering the fail streak and deep sleep.
 - A committed link EDHOC responder yields its crypto workspace to another
-  link exchange after m4 is admitted, without waiting for data traffic
+  link or routed exchange after m4 is admitted, without waiting for data traffic
   on the first link. The same bounded retry record retains m4 and exact
   m1/m3 duplicate evidence through its original deadline.
+- A completed link's quiet m4 retry no longer delays a new cookie-verified
+  discovery carrier from the same peer; unauthenticated carriers cannot
+  supersede it.
+- Cached channel-plan blobs obey the same site and structural checks as
+  refetched blobs, including after a restart.
 - HIL reset-cycle recovery time now measures the first observed delivery
   completion after reset, including its send latency.

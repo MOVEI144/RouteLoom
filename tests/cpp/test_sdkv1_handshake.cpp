@@ -803,12 +803,8 @@ void test_admitted_m4_releases_crypto_flight(const SecurityScope next_scope) {
   // must let another peer use the crypto workspace without confirmation.
   CHECK_OK(deliver_to(*pair.b, c, next_m1, cb, kT0 + 2150));
   HandshakeResult m2c{};
-  if (next_scope == SecurityScope::Link) {
-    CHECK_OK(pair.b->engine.take_result(m2c));
-    CHECK(m2c.event == HandshakeEvent::Send && m2c.step == 2);
-  } else {
-    CHECK(pair.b->engine.take_result(out).code == StatusCode::NotFound);
-  }
+  CHECK_OK(pair.b->engine.take_result(m2c));
+  CHECK(m2c.event == HandshakeEvent::Send && m2c.step == 2);
 
   // Altered retries cannot solicit a cached reply or affect C's flight.
   m3.message[0] ^= 1;
@@ -832,10 +828,6 @@ void test_admitted_m4_releases_crypto_flight(const SecurityScope next_scope) {
   CHECK(!pair.b->bank.has_authenticated_rx(SecurityScope::Link, kNodeA,
                                             established_b.rx_context_id + 1));
   CHECK_OK(pair.b->engine.poll(kT0 + 2230));
-  if (next_scope == SecurityScope::EndToEnd) {
-    CHECK_OK(pair.b->engine.take_result(m2c));
-    CHECK(m2c.event == HandshakeEvent::Send && m2c.step == 2);
-  }
   CHECK_OK(deliver_to(*pair.b, *pair.a, m3, ab, kT0 + 2235));
   CHECK(pair.b->engine.take_result(out).code == StatusCode::NotFound);
   CHECK_OK(deliver_to(c, *pair.b, m2c, cb, kT0 + 2250));
@@ -848,6 +840,35 @@ void test_admitted_m4_releases_crypto_flight(const SecurityScope next_scope) {
   CHECK_OK(c.engine.take_result(out));
   CHECK(out.event == HandshakeEvent::Established);
   CHECK(pair.b->sink.installs == 2);
+}
+
+void test_new_link_carrier_supersedes_quiet_m4() {
+  Pair pair = Pair::make();
+  const FrozenLink first = freeze_link(*pair.a, *pair.b, kT0, kCapsEdhocOnly, kCapsEdhocOnly);
+  CHECK_OK(request_link(*pair.a, *pair.b, first, kT0));
+  const PumpResult initial = pump(*pair.a, *pair.b, first);
+  CHECK(initial.established_a && initial.established_b);
+  CHECK_OK(pair.a->engine.cancel_all());
+  FrozenLink next = first;
+  next.carrier.requester_nonce[0] ^= 1;
+  CHECK_OK(pair.b->cookie.seal(pair.a->mac_self, next.carrier.requester_nonce, kNet,
+                              kT0 + 2100, next.cookie));
+  next.carrier.cookie = next.cookie;
+  CHECK_OK(request_link(*pair.a, *pair.b, next, kT0 + 2100));
+  HandshakeResult m1{}, out{};
+  CHECK_OK(pair.a->engine.take_result(m1));
+  FrozenLink forged = next;
+  forged.cookie[0] ^= 1;
+  forged.carrier.cookie = forged.cookie;
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m1, forged, kT0 + 2150));
+  CHECK(pair.b->engine.take_result(out).code == StatusCode::NotFound);
+  CHECK(pair.b->sink.installs == 1);
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m1, next, kT0 + 2200));
+  const PumpResult rekey = pump(*pair.a, *pair.b, next, kT0 + 2200);
+  CHECK(rekey.established_a && rekey.established_b);
+  CHECK(rekey.failed_a == StatusCode::Ok && rekey.failed_b == StatusCode::Ok);
+  CHECK(pair.b->sink.installs == 2);
+  CHECK(roundtrip_ok(*pair.a, *pair.b, rekey.est_a, rekey.est_b));
 }
 
 void test_resume_after_edhoc() {
@@ -2031,6 +2052,7 @@ int main() {
   test_link_edhoc_full();
   test_responder_waits_for_m4_admission();
   test_m1_park_yields_to_live_m4();
+  test_new_link_carrier_supersedes_quiet_m4();
   for (const auto scope : {SecurityScope::EndToEnd, SecurityScope::Link}) {
     test_admitted_m4_releases_crypto_flight(scope);
   }
