@@ -1,0 +1,89 @@
+{
+  "board": "endpoint",
+  "node": "0000000000000003",
+  "role": "bench",
+  "setup_bundle": "stab-fix-setup-ref",
+  "field_bundle": "review-ep",
+  "before_factory_reset": {
+    "rlcfg": {
+      "sha256": "fb7d9fd2333aa371f7f37bc20a41bdbb8241ee7803e896bb6b7f198dcd188484",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "39315425510a98c7b51772282a474a2b92ac6a79195e0b9edd780f58910b7fc4",
+      "blank": false
+    }
+  },
+  "erase": "ok",
+  "config": {
+    "generation": 1,
+    "node": "0000000000000003",
+    "role": "reference",
+    "security": "member",
+    "secrets_generation": "0",
+    "fingerprint": "-",
+    "secrets_fingerprint": ""
+  },
+  "identity_status": "OK identity=sealed pending=0 locked=1 node=0000000000000003 kid=b757b8a03dfcf2dd94b508f4f7e168515f2fbf55bd009a77c6df7c53595ebb29 serial=403 devcert_sha256=5425832ce0925f7fb13dfdab2dd67082ea9bbd5f7ea54",
+  "nvs_after_identity": {
+    "rlcfg": {
+      "sha256": "f62223c541ae4d84d5adbe998747424aec611fd9d034187204709a5fbb1714c6",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "a9c630230c5e0179b55f4ac18d9b6fa1ca57e62a8539185ca82f1de0ffab88f2",
+      "blank": false
+    }
+  },
+  "app_only": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:47:54",
+      "log": "flash-endpoint-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "d2c540157f70b68449339712a728bb7b29e3b80b65314fda86f3dde171a4e2b3",
+    "app_bytes": 1297536,
+    "bundle": "hil-review-ep-reference_node-esp32c6"
+  },
+  "nvs_after_app_write": {
+    "rlcfg": {
+      "sha256": "f62223c541ae4d84d5adbe998747424aec611fd9d034187204709a5fbb1714c6",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "a9c630230c5e0179b55f4ac18d9b6fa1ca57e62a8539185ca82f1de0ffab88f2",
+      "blank": false
+    }
+  },
+  "nvs_preserved": {
+    "rlcfg": true,
+    "rlkeys": true,
+    "rlsec": true
+  },
+  "readback": {
+    "stage": "readback",
+    "mono_ms": 604456476,
+    "wall": "2026-10-01T01:58:46Z",
+    "source": "boot",
+    "node": "0000000000000003",
+    "kid": "b757b8a03dfcf2dd94b508f4f7e168515f2fbf55bd009a77c6df7c53595ebb29",
+    "devcert_sha256": "5425832ce0925f7fb13dfdab2dd67082ea9bbd5f7ea54e91e0c44fa2b821b866",
+    "fw": "1",
+    "app_sha256": "e4f0ce7a763e6af80e9cfcd843b46f7f171ee15035ec0c7fe7d0dfd7fee2f85c",
+    "config_generation": 1,
+    "secrets_generation": 0
+  }
+}

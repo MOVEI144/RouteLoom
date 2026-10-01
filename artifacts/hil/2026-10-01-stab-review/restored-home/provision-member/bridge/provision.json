@@ -1,0 +1,76 @@
+{
+  "board": "bridge",
+  "node": "0000000000000001",
+  "role": "bridge",
+  "setup_bundle": "stab-fix-setup-br",
+  "field_bundle": "review-br",
+  "before_factory_reset": {
+    "rlcfg": {
+      "sha256": "cdbf1298d9af8fa26ecca4e91b080bb71f246646a3ee9a7d509be542975c5c10",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "f3bafdb60e1fe2f4a16fa8edbf2dd1547dbe69c6ca5821a6dc9c620ec5e015c6",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "a3982d964e6931a55c4fd1388a765af425f34eb3e232fca1aded901927d8345b",
+      "blank": false
+    }
+  },
+  "erase": "ok",
+  "config": {
+    "generation": 1,
+    "node": "0000000000000001",
+    "role": "bridge",
+    "security": "member",
+    "secrets_generation": "1",
+    "fingerprint": "3b7a981be0ec608e4a7fcd64fc818a7a3fc7d285aab0218dca650ebb081c10ff",
+    "secrets_fingerprint": "3b7a981be0ec608e4a7fcd64fc818a7a3fc7d285aab0218dca650ebb081c10ff"
+  },
+  "identity_status": "OK identity=sealed pending=0 locked=1 node=0000000000000001 kid=24f514311176e02cbe7d83ddfd62c25995824addc70a2e549fca4c3c49fbcdbf serial=401 devcert_sha256=285b1f403f3adc71c61fd110310ae4216ecb18ee7a4ad",
+  "nvs_after_identity": {
+    "rlcfg": {
+      "sha256": "07255996caae95913bcb319453bd107ffa3d2d6b269469c2e76eaffd5c926037",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "931ef9feddf9b7f24252ceab1776997664d9be091725b37cefe5be4075d3dc05",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "949558953934ee2225f5724029010bfdcf5fdfa4e2a60ee403155e9150c2a6f0",
+      "blank": false
+    }
+  },
+  "app_only": {
+    "identity": {
+      "chip": "esp32c3",
+      "mac": "94:a9:90:7a:26:ac",
+      "log": "flash-bridge-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "74970e89cfc7271f31128ec5ba9373b9fcfdc7683a0bd6f72d87dffcc948bc31",
+    "app_bytes": 1268672,
+    "bundle": "hil-review-br-bridge_node-esp32c3"
+  },
+  "nvs_after_app_write": {
+    "rlcfg": {
+      "sha256": "07255996caae95913bcb319453bd107ffa3d2d6b269469c2e76eaffd5c926037",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "931ef9feddf9b7f24252ceab1776997664d9be091725b37cefe5be4075d3dc05",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "949558953934ee2225f5724029010bfdcf5fdfa4e2a60ee403155e9150c2a6f0",
+      "blank": false
+    }
+  },
+  "nvs_preserved": {
+    "rlcfg": true,
+    "rlkeys": true,
+    "rlsec": true
+  }
+}

@@ -1,0 +1,20 @@
+# RouteLoom flash layout PT-4M-v2: one table for every role and chip, 4 MB.
+# NVS partitions come first so their offsets never depend on the app slot
+# size, and two 1.8125 MiB OTA slots start on 64 KiB boundaries. The
+# bootloader and this table cannot change by OTA, so a layout change needs a
+# full erase and reprovision. Boot refuses RF unless the flashed table equals
+# kPt4mV2 (routeloom/espnow_flash_layout.hpp); tools/nvs_budget.py checks
+# that every app's copy of this file matches it.
+# Name,   Type, SubType,  Offset,   Size
+nvs,      data, nvs,      0x9000,   0x6000
+phy_init, data, phy,      0xF000,   0x1000
+otadata,  data, ota,      0x10000,  0x2000
+rlcfg,    data, nvs,      0x12000,  0x6000
+rlkeys,   data, nvs,      0x18000,  0x3000
+# 0x1B000-0x20000 reserved.
+rlsec,    data, nvs,      0x20000,  0x20000
+ota_0,    app,  ota_0,    0x40000,  0x1D0000
+ota_1,    app,  ota_1,    0x210000, 0x1D0000
+# Reserved for flash core dumps; only a field-debug build enables them.
+coredump, data, coredump, 0x3E0000, 0x10000
+# 0x3F0000-0x400000 reserved.

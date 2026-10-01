@@ -1,0 +1,204 @@
+{
+  "last_cycle_rows": [
+    {
+      "tag": "gwc9-0",
+      "reply": {
+        "accepted": true,
+        "request": 111
+      },
+      "admitted": 600490.838807316,
+      "delivery": {
+        "request": 111,
+        "destination": 0,
+        "state": "delivered",
+        "reason": "END_RECEIVED",
+        "msg_session": 1852762814,
+        "msg_seq": 1,
+        "updated_ms": 1790815963780
+      },
+      "finished_mono": 600494.214985442
+    },
+    {
+      "tag": "gwc9-1",
+      "reply": {
+        "accepted": true,
+        "request": 112
+      },
+      "admitted": 600492.859487241,
+      "delivery": {
+        "request": 112,
+        "destination": 0,
+        "state": "delivered",
+        "reason": "END_RECEIVED",
+        "msg_session": 1852762814,
+        "msg_seq": 2,
+        "updated_ms": 1790815963790
+      },
+      "finished_mono": 600494.214989295
+    },
+    {
+      "tag": "gwc9-2",
+      "reply": {
+        "accepted": true,
+        "request": 113
+      },
+      "admitted": 600494.876535628,
+      "delivery": {
+        "request": 113,
+        "destination": 0,
+        "state": "delivered",
+        "reason": "END_RECEIVED",
+        "msg_session": 1852762814,
+        "msg_seq": 6,
+        "updated_ms": 1790815964573
+      },
+      "finished_mono": 600494.959755187
+    },
+    {
+      "tag": "gwc9-3",
+      "reply": {
+        "accepted": true,
+        "request": 114
+      },
+      "admitted": 600496.892934902,
+      "delivery": {
+        "request": 114,
+        "destination": 0,
+        "state": "delivered",
+        "reason": "END_RECEIVED",
+        "msg_session": 1852762814,
+        "msg_seq": 9,
+        "updated_ms": 1790815966569
+      },
+      "finished_mono": 600496.954101213
+    },
+    {
+      "tag": "gwc9-4",
+      "reply": {
+        "accepted": true,
+        "request": 115
+      },
+      "admitted": 600498.959141237,
+      "delivery": {
+        "request": 115,
+        "destination": 2,
+        "state": "delivered",
+        "reason": "END_RECEIVED",
+        "msg_session": 1852762814,
+        "msg_seq": 10,
+        "updated_ms": 1790815968636
+      },
+      "finished_mono": 600499.046555194
+    },
+    {
+      "tag": "gwc9-5",
+      "reply": {
+        "accepted": true,
+        "request": 116
+      },
+      "admitted": 600500.979115968,
+      "delivery": {
+        "request": 116,
+        "destination": 2,
+        "state": "delivered",
+        "reason": "END_RECEIVED",
+        "msg_session": 1852762814,
+        "msg_seq": 11,
+        "updated_ms": 1790815970656
+      },
+      "finished_mono": 600501.050422793
+    },
+    {
+      "tag": "gwc9-6",
+      "reply": {
+        "accepted": true,
+        "request": 117
+      },
+      "admitted": 600502.992182206,
+      "delivery": {
+        "request": 117,
+        "destination": 2,
+        "state": "delivered",
+        "reason": "END_RECEIVED",
+        "msg_session": 1852762814,
+        "msg_seq": 12,
+        "updated_ms": 1790815972671
+      },
+      "finished_mono": 600503.060965566
+    },
+    {
+      "tag": "gwc9-7",
+      "reply": {
+        "accepted": true,
+        "request": 118
+      },
+      "admitted": 600505.004244623,
+      "delivery": {
+        "request": 118,
+        "destination": 2,
+        "state": "delivered",
+        "reason": "END_RECEIVED",
+        "msg_session": 1852762814,
+        "msg_seq": 13,
+        "updated_ms": 1790815974678
+      },
+      "finished_mono": 600505.069711252
+    },
+    {
+      "tag": "gwc9-8",
+      "reply": {
+        "accepted": true,
+        "request": 119
+      },
+      "admitted": 600507.018546666,
+      "delivery": {
+        "request": 119,
+        "destination": 0,
+        "state": "delivered",
+        "reason": "END_RECEIVED",
+        "msg_session": 1852762814,
+        "msg_seq": 14,
+        "updated_ms": 1790815976693
+      },
+      "finished_mono": 600507.091511851
+    },
+    {
+      "tag": "gwc9-9",
+      "reply": {
+        "accepted": true,
+        "request": 120
+      },
+      "admitted": 600509.029463521,
+      "delivery": {
+        "request": 120,
+        "destination": 2,
+        "state": "delivered",
+        "reason": "END_RECEIVED",
+        "msg_session": 1852762814,
+        "msg_seq": 15,
+        "updated_ms": 1790815978713
+      },
+      "finished_mono": 600509.095918342
+    }
+  ],
+  "last_cycle_probes": [
+    {
+      "tag": "gwc9-probe0",
+      "reply": {
+        "accepted": false,
+        "error": "authorization failed"
+      },
+      "admitted": 600488.974137757,
+      "delivery": {}
+    },
+    {
+      "tag": "gwc9-probe1",
+      "reply": {
+        "accepted": false,
+        "error": "authorization failed"
+      },
+      "admitted": 600488.984134221,
+      "delivery": {}
+    }
+  ]
+}

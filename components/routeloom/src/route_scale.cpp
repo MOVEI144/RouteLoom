@@ -987,34 +987,29 @@ void MeshNode::schedule_gateway_pulls(const MonotonicMs now_ms) noexcept {
 }
 
 void MeshNode::flush_pull_answers(const MonotonicMs now_ms) noexcept {
-  std::array<NodeId, kNeighborCapacity> answer{};
-  std::array<NodeId, kNeighborCapacity> target{};
-  std::size_t count = 0;
   neighbors_.for_each([&](Neighbor& neighbor) {
     if (!neighbor.active || !neighbor.pull_answer_pending) return;
     if (neighbor.tree.scoped.last_pull_answer_ms != 0 &&
         now_ms - neighbor.tree.scoped.last_pull_answer_ms < kPullAnswerGapMs) {
       return;  // coalesced: stays pending until the gap passes
     }
-    neighbor.pull_answer_pending = false;
     const NodeId wanted = neighbor.tree.scoped.pull_target;
     // Nothing useful to say yet: the interest mark makes the triggered
     // update carry the route to this neighbor as soon as we learn it.
     // (kInvalidNodeId = a plain self + gateway refresh for a new child.)
     if (wanted != kInvalidNodeId && wanted != config_.node &&
         !routes_.best(wanted).valid) {
+      neighbor.pull_answer_pending = false;
       return;
     }
-    neighbor.tree.scoped.last_pull_answer_ms = now_ms;
-    answer[count] = neighbor.node;
-    target[count++] = wanted;
-  });
-  for (std::size_t i = 0; i < count; ++i) {
-    if (scheduler_.full()) return;
-    if (queue_scoped_update(answer[i], target[i], now_ms)) {
+    // Queue pressure cannot consume an owed answer: retry the same bounded
+    // neighbor entry on the next poll, without restarting the periodic grid.
+    if (!scheduler_.full() && queue_scoped_update(neighbor.node, wanted, now_ms)) {
+      neighbor.pull_answer_pending = false;
+      neighbor.tree.scoped.last_pull_answer_ms = now_ms;
       saturating_inc(route_scale_stats_.pull_answers);
     }
-  }
+  });
 }
 
 // --- On-demand discovery (Discover / Reply) --------------------------------------

@@ -1,0 +1,229 @@
+[2026-09-30T12:31:44.675+00:00] !! opened
+[2026-09-30T12:31:50.483+00:00] I (805689) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:31:50.483+00:00] W (805690) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:32:01.500+00:00] W (816661) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:32:12.314+00:00] I (827437) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:32:12.314+00:00] W (827438) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:32:16.520+00:00] W (831661) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:32:25.270+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:32:25.271+00:00] !! opened
+[2026-09-30T12:32:25.471+00:00] I (840518) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:32:25.471+00:00] I (840529) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:32:25.471+00:00] I (840536) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:32:31.480+00:00] W (846663) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:32:38.088+00:00] I (853180) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:32:46.498+00:00] W (861666) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:33:01.518+00:00] W (876666) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:33:03.427+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:33:03.428+00:00] !! opened
+[2026-09-30T12:33:16.445+00:00] W (891667) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:33:23.552+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:33:23.553+00:00] !! opened
+[2026-09-30T12:33:25.239+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:33:25.239+00:00] !! opened
+[2026-09-30T12:33:25.440+00:00] I (900490) RouteLoom: owner expiry_slots=44809960 hop_accept_expired=0
+[2026-09-30T12:33:25.440+00:00] I (900496) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:33:25.440+00:00] I (900503) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=104 busy=0 quarantined=0 fenced=0 tx_ok=227 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:33:31.420+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:33:31.421+00:00] !! opened
+[2026-09-30T12:33:48.838+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:33:48.839+00:00] !! opened
+[2026-09-30T12:34:01.423+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:34:01.424+00:00] !! opened
+[2026-09-30T12:34:18.646+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:34:18.647+00:00] !! opened
+[2026-09-30T12:34:25.256+00:00] I (960488) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:34:25.256+00:00] I (960489) RouteLoom: owner polls=348182 empty=347941 rxq_max=1 max_us rx=52 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:34:25.256+00:00] I (960492) RouteLoom: owner expiry_slots=47352344 hop_accept_expired=0
+[2026-09-30T12:34:25.273+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:34:25.274+00:00] !! opened
+[2026-09-30T12:34:31.484+00:00] W (966672) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:34:46.505+00:00] W (981672) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:34:48.508+00:00] I (983680) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:34:48.508+00:00] W (983681) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:35:01.428+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:35:01.429+00:00] !! opened
+[2026-09-30T12:35:03.627+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:35:03.628+00:00] !! opened
+[2026-09-30T12:35:19.366+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:35:19.366+00:00] !! opened
+[2026-09-30T12:35:25.245+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:35:25.246+00:00] !! opened
+[2026-09-30T12:35:25.268+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:35:25.269+00:00] !! opened
+[2026-09-30T12:35:25.469+00:00] tale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:35:25.469+00:00] I (1020533) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:35:49.509+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:35:49.510+00:00] !! opened
+[2026-09-30T12:36:04.834+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:36:04.834+00:00] !! opened
+[2026-09-30T12:36:04.835+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:36:04.835+00:00] !! opened
+[2026-09-30T12:36:16.431+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:36:16.432+00:00] !! opened
+[2026-09-30T12:36:22.374+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:36:22.374+00:00] !! opened
+[2026-09-30T12:36:22.575+00:00] W (1077621) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-30T12:36:22.575+00:00] I (1077624) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:36:25.269+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:36:25.270+00:00] !! opened
+[2026-09-30T12:36:25.471+00:00] tale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:36:46.505+00:00] W (1101678) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:36:49.853+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:36:49.854+00:00] !! opened
+[2026-09-30T12:36:50.054+00:00] W (1105101) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:37:12.482+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:37:12.482+00:00] !! opened
+[2026-09-30T12:37:16.487+00:00] W (1131681) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:37:25.298+00:00] I (1140491) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:37:25.298+00:00] I (1140492) RouteLoom: owner polls=404251 empty=403968 rxq_max=1 max_us rx=179 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:37:25.298+00:00] I (1140496) RouteLoom: owner expiry_slots=54977728 hop_accept_expired=0
+[2026-09-30T12:37:25.298+00:00] I (1140502) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:37:25.298+00:00] I (1140508) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=120 busy=0 quarantined=0 fenced=0 tx_ok=280 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:37:25.298+00:00] I (1140524) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:37:25.298+00:00] I (1140536) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:37:25.498+00:00] I (1140543) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:37:31.506+00:00] W (1146681) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:37:46.327+00:00] I (1161486) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:37:46.327+00:00] W (1161487) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:38:01.547+00:00] W (1176683) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:38:14.965+00:00] I (1190143) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:38:14.965+00:00] W (1190144) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:38:16.567+00:00] W (1191686) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:38:25.380+00:00] I (1200493) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:38:25.380+00:00] I (1200494) RouteLoom: owner polls=422943 empty=422646 rxq_max=1 max_us rx=179 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:38:25.380+00:00] I (1200498) RouteLoom: owner expiry_slots=57519840 hop_accept_expired=0
+[2026-09-30T12:38:25.380+00:00] I (1200504) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:38:25.380+00:00] I (1200510) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=124 busy=0 quarantined=0 fenced=0 tx_ok=294 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:38:25.380+00:00] I (1200526) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:38:25.380+00:00] I (1200538) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:38:25.380+00:00] I (1200545) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:38:31.588+00:00] W (1206685) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:38:45.008+00:00] I (1220117) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:38:45.008+00:00] W (1220118) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:38:46.610+00:00] W (1221686) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:38:54.632+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:38:54.633+00:00] !! opened
+[2026-09-30T12:38:54.633+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:38:54.633+00:00] !! opened
+[2026-09-30T12:39:01.442+00:00] W (1236688) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:39:10.853+00:00] I (1245917) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-30T12:39:10.853+00:00] W (1245917) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-30T12:39:10.853+00:00] I (1245919) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:39:10.853+00:00] W (1245924) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:39:16.459+00:00] W (1251689) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:39:25.307+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:39:25.307+00:00] !! opened
+[2026-09-30T12:39:46.534+00:00] W (1281690) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:40:00.150+00:00] I (1295300) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:40:11.549+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:40:11.549+00:00] !! opened
+[2026-09-30T12:40:25.265+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:40:25.266+00:00] !! opened
+[2026-09-30T12:40:31.476+00:00] W (1326697) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:40:46.497+00:00] W (1341696) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:41:01.515+00:00] W (1356696) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:41:16.450+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:41:16.451+00:00] !! opened
+[2026-09-30T12:41:25.264+00:00] I (1380497) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:41:25.264+00:00] I (1380498) RouteLoom: owner polls=480260 empty=479918 rxq_max=1 max_us rx=179 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:41:25.264+00:00] I (1380502) RouteLoom: owner expiry_slots=65314952 hop_accept_expired=0
+[2026-09-30T12:41:25.464+00:00] I (1380508) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:41:25.464+00:00] I (1380514) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=136 busy=0 quarantined=0 fenced=0 tx_ok=339 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:41:25.464+00:00] I (1380530) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:41:25.464+00:00] I (1380542) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:41:25.464+00:00] I (1380549) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:41:31.473+00:00] W (1386699) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:41:34.290+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:41:34.290+00:00] !! opened
+[2026-09-30T12:41:34.291+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:41:34.291+00:00] !! opened
+[2026-09-30T12:42:01.528+00:00] W (1416701) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:42:16.548+00:00] W (1431702) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:42:22.557+00:00] I (1437714) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:42:22.557+00:00] W (1437715) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:42:31.457+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:42:31.457+00:00] !! opened
+[2026-09-30T12:42:46.478+00:00] W (1461705) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:42:52.287+00:00] W (1467357) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:43:16.523+00:00] W (1491708) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:43:21.930+00:00] I (1496987) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:43:21.930+00:00] W (1496988) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:43:25.254+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:43:25.255+00:00] !! opened
+[2026-09-30T12:43:25.266+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:43:25.267+00:00] !! opened
+[2026-09-30T12:43:25.467+00:00] I (1500549) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:43:31.475+00:00] W (1506708) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:43:40.686+00:00] I (1515805) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:43:40.686+00:00] W (1515806) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:43:58.839+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:43:58.840+00:00] !! opened
+[2026-09-30T12:44:16.664+00:00] W (1551712) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:44:25.273+00:00] I (1560499) RouteLoom: owner polls=536326 empty=535943 rxq_max=1 max_us rx=179 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:44:25.273+00:00] I (1560503) RouteLoom: owner expiry_slots=72939928 hop_accept_expired=0
+[2026-09-30T12:44:25.473+00:00] I (1560515) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=148 busy=0 quarantined=0 fenced=0 tx_ok=380 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:44:25.473+00:00] I (1560531) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:44:25.473+00:00] I (1560543) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:44:25.473+00:00] I (1560550) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:44:26.074+00:00] I (1561163) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:44:26.074+00:00] W (1561164) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:44:31.479+00:00] W (1566714) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:44:43.017+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:44:43.018+00:00] !! opened
+[2026-09-30T12:44:43.218+00:00] I (1578265) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:44:43.218+00:00] W (1578270) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:45:01.449+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:45:01.449+00:00] !! opened
+[2026-09-30T12:45:16.669+00:00] W (1611720) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:45:25.286+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:45:25.287+00:00] !! opened
+[2026-09-30T12:45:25.304+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:45:25.305+00:00] !! opened
+[2026-09-30T12:45:42.443+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:45:42.444+00:00] !! opened
+[2026-09-30T12:45:42.644+00:00] W (1637691) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:46:08.882+00:00] W (1663985) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:46:25.305+00:00] I (1680501) RouteLoom: owner polls=573692 empty=573274 rxq_max=1 max_us rx=179 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:46:25.305+00:00] I (1680517) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=156 busy=0 quarantined=0 fenced=0 tx_ok=415 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:46:25.506+00:00] I (1680552) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:46:31.514+00:00] W (1686724) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:46:36.153+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:46:36.154+00:00] !! opened
+[2026-09-30T12:47:03.593+00:00] I (1718738) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:47:03.593+00:00] W (1718739) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:47:15.707+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:47:15.708+00:00] !! opened
+[2026-09-30T12:47:15.908+00:00] W (1730955) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:47:25.263+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:47:25.265+00:00] !! opened
+[2026-09-30T12:47:25.465+00:00] I (1740517) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=160 busy=0 quarantined=0 fenced=0 tx_ok=430 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:47:25.466+00:00] I (1740545) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:47:26.266+00:00] W (1741417) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:47:31.673+00:00] W (1746729) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:47:46.495+00:00] W (1761730) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:47:52.904+00:00] W (1768123) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:48:01.584+00:00] W (1776733) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:48:18.813+00:00] I (1793918) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:48:18.813+00:00] W (1793919) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:48:25.258+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:48:25.259+00:00] !! opened
+[2026-09-30T12:48:25.460+00:00] I (1800506) RouteLoom: owner expiry_slots=83104296 hop_accept_expired=0
+[2026-09-30T12:48:25.460+00:00] I (1800518) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=164 busy=0 quarantined=0 fenced=0 tx_ok=443 tx_failed=0 sI (1800534) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:48:25.460+00:00] I (1800546) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:48:46.504+00:00] W (1821732) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:48:49.109+00:00] I (1824162) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:48:49.109+00:00] W (1824163) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:48:58.728+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-30T12:48:58.728+00:00] Build:Sep 19 2022
+[2026-09-30T12:48:58.728+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x16 (DOWNLOAD(USB/UART0/SDIO_REI_FEO))
+[2026-09-30T12:48:58.728+00:00] Saved PC:0x4200febe
+[2026-09-30T12:48:58.728+00:00] waiting for download
+[2026-09-30T12:49:04.860+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:49:04.862+00:00] !! opened
+[2026-09-30T12:49:07.869+00:00] �                        ��
+[2026-09-30T12:51:46.494+00:00]  o��,    �ESP-ROM:esp32c6-20220919
+[2026-09-30T12:51:46.494+00:00] Build:Sep 19 2022
+[2026-09-30T12:51:46.494+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x16 (DOWNLOAD(USB/UART0/SDIO_REI_FEO))
+[2026-09-30T12:51:46.494+00:00] Saved PC:0x4002f454
+[2026-09-30T12:51:46.494+00:00] waiting for download

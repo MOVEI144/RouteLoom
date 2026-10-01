@@ -1,0 +1,40 @@
+{
+  "cell": "local",
+  "target": "esp32c6",
+  "app": "reference_node",
+  "memory": [
+    {
+      "name": "DIRAM",
+      "total": 452112,
+      "used": 358135,
+      "free": 93977,
+      "parts": {
+        ".bss": 240904,
+        ".text": 99128,
+        ".data": 18103
+      }
+    },
+    {
+      "name": "LP SRAM",
+      "total": 16384,
+      "used": 136,
+      "free": 16248,
+      "parts": {
+        ".text": 64,
+        ".force_slow": 36,
+        ".rtc_reserved": 24,
+        ".rtc_noinit": 8,
+        ".force_fast": 4
+      }
+    }
+  ],
+  "guard": {
+    "memory_type": "DIRAM",
+    "static_bss": 240904,
+    "static_data": 18103,
+    "free": 93977,
+    "min_free": 8192,
+    "passed": true
+  },
+  "boot_heap": null
+}

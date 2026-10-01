@@ -1,0 +1,18 @@
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:808: pair.b->engine.take_result(out) (handshake no result)
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:809: out.step == 4 && out.token == m4.token && out.message_size == m4.message_size
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:810: std::memcmp(out.message.data(), m4.message.data(), m4.message_size) == 0
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:813: pair.a->engine.take_result(out) (handshake no result)
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:814: out.event == HandshakeEvent::Established
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:817: roundtrip_ok(*pair.a, *pair.b, out, established_b)
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:818: pair.b->bank.has_authenticated_rx(SecurityScope::Link, kNodeA, established_b.rx_context_id)
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:825: pair.b->engine.take_result(m2c) (handshake no result)
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:826: m2c.event == HandshakeEvent::Send && m2c.step == 2
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:828: c.engine.take_result(out) (handshake no result)
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:830: pair.b->engine.take_result(out) (handshake no result)
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:831: out.step == 4
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:834: c.engine.take_result(out) (handshake no result)
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:835: out.event == HandshakeEvent::Established
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:836: pair.b->sink.installs == 2
+sdkv1 handshake: 15 failures
+edhoc sizes: m1=92 m2=376 m3=390 m4=53
+resume sizes: r1=60 r2=52 r3=16

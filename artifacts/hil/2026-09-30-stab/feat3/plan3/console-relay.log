@@ -1,0 +1,102 @@
+[2026-09-30T12:08:40.835+00:00] !! opened
+[2026-09-30T12:08:42.838+00:00] W (182647) rl_migrate: migration event PHASE_PREPARING peer=0
+[2026-09-30T12:08:42.838+00:00] W (182648) RouteLoomRef: diagnostic reason=PHASE_PREPARING peer=0 message=none
+[2026-09-30T12:08:47.845+00:00] W (187626) rl_migrate: migration event PHASE_COMMITTED peer=0
+[2026-09-30T12:08:47.845+00:00] W (187627) RouteLoomRef: diagnostic reason=PHASE_COMMITTED peer=0 message=none
+[2026-09-30T12:09:12.277+00:00] W (212126) rl_migrate: migration event PHASE_SWITCHING peer=0
+[2026-09-30T12:09:12.278+00:00] W (212126) RouteLoomRef: diagnostic reason=PHASE_SWITCHING peer=0 message=none
+[2026-09-30T12:09:12.278+00:00] I (212136) rl_migrate: radio generation now 1 after verified cutover
+[2026-09-30T12:09:12.278+00:00] W (212137) rl_migrate: migration event PHASE_VERIFYING peer=0
+[2026-09-30T12:09:12.278+00:00] W (212139) RouteLoomRef: diagnostic reason=PHASE_VERIFYING peer=0 message=none
+[2026-09-30T12:09:13.879+00:00] W (213735) rl_migrate: migration event VERIFY_PASSED peer=3
+[2026-09-30T12:09:13.879+00:00] W (213735) RouteLoomRef: diagnostic reason=VERIFY_PASSED peer=3 message=none
+[2026-09-30T12:09:13.879+00:00] W (213738) rl_migrate: migration event PHASE_STABLE peer=0
+[2026-09-30T12:09:13.879+00:00] W (213742) RouteLoomRef: diagnostic reason=PHASE_STABLE peer=0 message=none
+[2026-09-30T12:09:15.481+00:00] I (215220) RouteLoomRef: message origin=1 session=834252834 sequence=12 bytes=6
+[2026-09-30T12:09:16.282+00:00] I (216028) RouteLoomRef: message origin=1 session=834252834 sequence=13 bytes=6
+[2026-09-30T12:09:17.083+00:00] I (216825) RouteLoomRef: message origin=1 session=834252834 sequence=14 bytes=6
+[2026-09-30T12:09:17.884+00:00] I (217628) RouteLoomRef: message origin=1 session=834252834 sequence=15 bytes=6
+[2026-09-30T12:09:18.685+00:00] I (218429) RouteLoomRef: message origin=1 session=834252834 sequence=16 bytes=6
+[2026-09-30T12:09:19.486+00:00] I (219237) RouteLoomRef: message origin=1 session=834252834 sequence=17 bytes=6
+[2026-09-30T12:09:20.287+00:00] I (220029) RouteLoomRef: message origin=1 session=834252834 sequence=18 bytes=6
+[2026-09-30T12:09:21.088+00:00] I (220837) RouteLoomRef: message origin=1 session=834252834 sequence=19 bytes=6
+[2026-09-30T12:09:21.889+00:00] I (221632) RouteLoomRef: message origin=1 session=834252834 sequence=20 bytes=6
+[2026-09-30T12:09:22.690+00:00] I (222434) RouteLoomRef: message origin=1 session=834252834 sequence=21 bytes=6
+[2026-09-30T12:09:23.491+00:00] I (223239) RouteLoomRef: message origin=1 session=834252834 sequence=22 bytes=6
+[2026-09-30T12:09:24.293+00:00] I (224041) RouteLoomRef: message origin=1 session=834252834 sequence=23 bytes=6
+[2026-09-30T12:09:25.094+00:00] I (224841) RouteLoomRef: message origin=1 session=834252834 sequence=24 bytes=6
+[2026-09-30T12:09:25.895+00:00] I (225649) RouteLoomRef: message origin=1 session=834252834 sequence=25 bytes=6
+[2026-09-30T12:09:26.696+00:00] I (226448) RouteLoomRef: message origin=1 session=834252834 sequence=26 bytes=6
+[2026-09-30T12:09:27.497+00:00] I (227253) RouteLoomRef: message origin=1 session=834252834 sequence=27 bytes=6
+[2026-09-30T12:09:28.298+00:00] I (228052) RouteLoomRef: message origin=1 session=834252834 sequence=28 bytes=6
+[2026-09-30T12:09:29.099+00:00] I (228859) RouteLoomRef: message origin=1 session=834252834 sequence=29 bytes=6
+[2026-09-30T12:09:29.899+00:00] I (229661) RouteLoomRef: message origin=1 session=834252834 sequence=30 bytes=6
+[2026-09-30T12:09:30.700+00:00] I (230467) RouteLoomRef: message origin=1 session=834252834 sequence=31 bytes=6
+[2026-09-30T12:09:35.706+00:00] W (235542) RouteLoomRef: diagnostic reason=OP_TX_QUARANTINED peer=3 message=none
+[2026-09-30T12:09:37.308+00:00] W (237100) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-30T12:09:39.311+00:00] W (239099) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-30T12:09:40.713+00:00] I (240486) RouteLoom: stack hwm rl_owner 10360 B
+[2026-09-30T12:09:40.713+00:00] I (240487) RouteLoom: owner polls=59221 empty=58763 rxq_max=1 max_us rx=134305 bootstrap=5056 node=15084 security=696767
+[2026-09-30T12:09:40.713+00:00] I (240490) RouteLoom: owner expiry_slots=21318840 hop_accept_expired=2
+[2026-09-30T12:09:40.713+00:00] I (240497) RouteLoom: HIL HEAP free=91024 largest=75776 min=90152 B
+[2026-09-30T12:09:40.713+00:00] I (240503) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0
+[2026-09-30T12:09:40.713+00:00] I (240512) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=2 stale=0 probes=27 send_failures=31 kind_rejects=0
+[2026-09-30T12:09:40.713+00:00] I (240523) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=90 seq=3
+[2026-09-30T12:09:40.713+00:00] I (240530) RouteLoom: HIL ROUTE peer=3 phase=5 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:09:43.316+00:00] W (243101) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-30T12:09:49.324+00:00] W (249104) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-30T12:09:57.335+00:00] W (257111) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-30T12:10:04.744+00:00] I (264517) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-30T12:10:04.744+00:00] W (264517) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-30T12:10:06.747+00:00] I (266517) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-30T12:10:06.747+00:00] W (266518) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-30T12:10:07.348+00:00] W (267120) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-30T12:10:19.364+00:00] W (279114) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-30T12:10:24.370+00:00] I (284077) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-30T12:10:24.370+00:00] W (284077) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-30T12:10:24.370+00:00] I (284080) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-30T12:10:24.370+00:00] W (284084) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-30T12:10:33.382+00:00] W (293117) RouteLoomRef: diagnostic reason=SEQNO_REQUEST_NO_PATH peer=1 message=present
+[2026-09-30T12:10:40.792+00:00] I (300486) RouteLoom: stack hwm rl_owner 10360 B
+[2026-09-30T12:10:40.792+00:00] I (300487) RouteLoom: owner polls=74088 empty=73554 rxq_max=1 max_us rx=134305 bootstrap=14189 node=15084 security=696767
+[2026-09-30T12:10:40.792+00:00] I (300491) RouteLoom: owner expiry_slots=26670960 hop_accept_expired=2
+[2026-09-30T12:10:40.792+00:00] I (300497) RouteLoom: HIL HEAP free=91072 largest=75776 min=90152 B
+[2026-09-30T12:10:40.792+00:00] I (300503) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0
+[2026-09-30T12:10:40.792+00:00] I (300512) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=2 stale=1 probes=42 send_failures=164 kind_rejects=0
+[2026-09-30T12:10:40.792+00:00] I (300523) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=90 seq=3
+[2026-09-30T12:10:40.792+00:00] I (300530) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:10:51.007+00:00] I (310849) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-30T12:10:51.007+00:00] W (310850) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-30T12:10:56.614+00:00] W (316456) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:11:15.635+00:00] I (335391) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-30T12:11:15.635+00:00] W (335392) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-30T12:11:26.450+00:00] I (346165) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-30T12:11:26.450+00:00] W (346166) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-30T12:11:28.053+00:00] W (347823) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:11:40.668+00:00] I (360487) RouteLoom: stack hwm rl_owner 10360 B
+[2026-09-30T12:11:40.668+00:00] I (360488) RouteLoom: owner polls=89026 empty=88431 rxq_max=1 max_us rx=134305 bootstrap=14189 node=15084 security=696767
+[2026-09-30T12:11:40.668+00:00] I (360492) RouteLoom: owner expiry_slots=32048640 hop_accept_expired=2
+[2026-09-30T12:11:40.668+00:00] I (360498) RouteLoom: HIL HEAP free=91072 largest=75776 min=90152 B
+[2026-09-30T12:11:40.668+00:00] I (360504) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0
+[2026-09-30T12:11:40.668+00:00] I (360513) RouteLoom: HIL DISCOVERY candidates=1 neighbors=2 capacity=0 auth=2 stale=1 probes=47 send_failures=177 kind_rejects=0
+[2026-09-30T12:11:40.668+00:00] I (360524) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=90 seq=3
+[2026-09-30T12:11:40.668+00:00] I (360531) RouteLoom: HIL ROUTE peer=3 phase=7 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:11:44.072+00:00] I (363871) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-30T12:11:44.072+00:00] W (363872) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-30T12:11:44.072+00:00] W (363903) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:11:46.476+00:00] W (366360) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:11:48.279+00:00] W (368120) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:11:50.281+00:00] I (370066) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-30T12:11:50.281+00:00] W (370066) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-30T12:11:50.482+00:00] W (370198) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:11:51.483+00:00] W (371205) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:11:51.483+00:00] W (371212) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:11:51.483+00:00] W (371219) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:11:51.483+00:00] W (371226) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:11:51.483+00:00] W (371233) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:11:51.483+00:00] W (371240) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:11:51.483+00:00] W (371248) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:11:55.288+00:00] W (375023) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!
+[2026-09-30T12:12:13.914+00:00] I (393658) RouteLoomRef: discovery event=REDISCOVERY peer=3
+[2026-09-30T12:12:13.914+00:00] W (393659) RouteLoomRef: diagnostic reason=REDISCOVERY peer=3 message=none
+[2026-09-30T12:12:16.317+00:00] W (396117) ESPNOW: Peer exists. Please call API esp_now_mod_peer()!

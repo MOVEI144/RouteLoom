@@ -35,6 +35,13 @@ struct DeviceChannelPlan final : usb::UsbBridge::ChannelPlanUsbSink {
   bool tried{false};
   std::uint8_t noted_channel{0};
   std::uint32_t noted_generation{0};
+  // Stranded member search: no bound neighbour since `isolated_since`;
+  // `search_channel` is the candidate the radio holds (0 = none) until
+  // `dwell_until`.
+  MonotonicMs isolated_since{0};
+  MonotonicMs dwell_until{0};
+  std::uint8_t search_channel{0};
+  std::uint8_t search_next{0};
 
   Status start(espnow::EspNowRuntime& runtime, const sdkv1::SiteRecord& site,
                const bool gateway) noexcept {
@@ -234,21 +241,105 @@ void Device::poll_channel_plan(const MonotonicMs now_ms) noexcept {
   // Outside Member mode the Owner owns the channel (a re-join scans); the
   // re-adoption returns the radio to the plan channel itself.
   const bool member = owner_->coordinator().mode() == sdkv1::CoordinatorMode::Member;
-  plan.migration->agent().hold_reconcile(!member);
-  // A verified plan switch moved the radio: the coordinator follows it once
-  // the operation settled on the plan's channel.
+  if (member) search_stranded(plan, now_ms);
+  plan.migration->agent().hold_reconcile(!member || plan.search_channel != 0);
+  // A verified plan switch (or a stranded search) moved the radio: the
+  // coordinator follows it once the operation settled.
   if (!member || runtime_->radio_operation_busy()) return;
   const MigrationParticipant& participant = plan.migration->agent().participant();
   const std::uint8_t channel = runtime_->committed_channel();
   const std::uint32_t generation = runtime_->radio_generation().value;
-  if (participant.active_epoch().value == 0 || participant.active_channel() != channel ||
-      (channel == plan.noted_channel && generation == plan.noted_generation)) {
+  const bool followed = plan.search_channel != 0 ? plan.search_channel == channel
+                                                 : participant.active_epoch().value != 0 &&
+                                                       participant.active_channel() == channel;
+  if (!followed || (channel == plan.noted_channel && generation == plan.noted_generation)) {
     return;
   }
   if (owner_->coordinator().note_plan_cutover(channel, generation)) {
     plan.noted_channel = channel;
     plan.noted_generation = generation;
+    // A searched candidate is heard at once, not after the ramped
+    // rediscovery backoff of the channel it left.
+    NeighborDiscovery* discovery = owner_->discovery();
+    if (plan.search_channel != 0 && discovery != nullptr) discovery->rearm_repair();
   }
+}
+
+// A member that missed a plan switch (or holds a plan the site has since
+// replaced) hears no bound neighbour on its channel. After
+// kStrandedDetectMs it listens in turn on the bounded candidates: the
+// SitePackage channel, its active plan channel and the latest plan's
+// channels. It stays where a neighbour binds (the member handshake
+// authenticates the site; an unauthenticated frame never binds) and asks
+// the site for its newest signed plan there; a newer commit replaces the
+// stored plan through the participant's verifier. The site authority
+// never moves.
+void Device::search_stranded(DeviceChannelPlan& plan, const MonotonicMs now_ms) noexcept {
+  constexpr MonotonicMs kStrandedDetectMs = 15000;
+  constexpr MonotonicMs kCandidateDwellMs = 15000;
+  MigrationAgent& agent = plan.migration->agent();
+  const MigrationParticipant& participant = agent.participant();
+  NodeId bound[1]{};
+  const bool live = runtime_->migration_peers(bound, 1) != 0;
+  // A plan in flight owns the radio; a commit waiting for a clock sample
+  // while nothing is heard does not.
+  const bool plan_owns_radio =
+      participant.in_progress() &&
+      !(participant.phase() == ParticipantPhase::Committed && !participant.clock_valid());
+  if (plan.authority || plan_owns_radio || runtime_->radio_operation_busy()) {
+    plan.isolated_since = 0;
+    return;
+  }
+  if (live) {
+    plan.isolated_since = 0;
+    if (plan.search_channel == 0) return;
+    if (participant.active_channel() == plan.search_channel) {
+      ESP_LOGW(tag_, "channel plan: rejoined the site on channel %u (epoch %lu)",
+               static_cast<unsigned>(plan.search_channel),
+               static_cast<unsigned long>(participant.active_epoch().value));
+      plan.search_channel = 0;
+      return;
+    }
+    agent.request_newest_state(now_ms);
+    return;
+  }
+  if (plan.isolated_since == 0) {
+    plan.isolated_since = now_ms;
+    return;
+  }
+  if (now_ms - plan.isolated_since < kStrandedDetectMs || now_ms < plan.dwell_until) return;
+  std::uint8_t candidates[3]{};
+  std::uint8_t count = 0;
+  const auto add = [&](const std::uint8_t channel) {
+    if (channel == 0 || count == 3) return;
+    for (std::uint8_t i = 0; i < count; ++i) {
+      if (candidates[i] == channel) return;
+    }
+    candidates[count++] = channel;
+  };
+  add(stores_->site().site().channel);
+  add(participant.active_channel());
+  if (const MigrationPlan* pending = participant.pending_plan()) {
+    add(pending->new_channel);
+    add(pending->old_channel);
+  }
+  if (count < 2) return;  // no plan: the site channel is the only one
+  const std::uint8_t channel = candidates[plan.search_next % count];
+  plan.search_next = static_cast<std::uint8_t>((plan.search_next + 1) % count);
+  plan.dwell_until = now_ms + kCandidateDwellMs;
+  if (channel == runtime_->committed_channel()) {
+    if (plan.search_channel != 0) plan.search_channel = channel;
+    return;
+  }
+  RadioOperation op{};
+  op.kind = RadioOperationKind::ChannelCutover;
+  op.deadline_ms = now_ms + migration_const::kGuardFloorMs * 20U;
+  op.constraints.channel = channel;
+  op.constraints.outage_permitted = true;
+  if (runtime_->request_radio_operation(op) == kInvalidOperationToken) return;
+  plan.search_channel = channel;
+  ESP_LOGW(tag_, "channel plan: no bound neighbour, listening on channel %u",
+           static_cast<unsigned>(channel));
 }
 
 }  // namespace routeloom

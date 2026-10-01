@@ -1,0 +1,8 @@
+[2026-09-30T11:13:51.944+00:00] !! opened
+[2026-09-30T11:14:06.565+00:00] I (883) RouteLoomRef: sdkv1 identity: node=3 kid=72b2282f385b2d8W (17199) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T11:14:06.565+00:00] W (17335) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T11:14:06.766+00:00] W (17387) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-30T11:14:06.966+00:00] W (17661) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T11:14:06.966+00:00] W (17662) rl_migrate: migration event PHASE_COMMITTED peer=0
+[2026-09-30T11:14:06.966+00:00] W (17662) RouteLoomRef: diagnostic reason=PHASE_COMMITTED peer=0 message=none
+[2026-09-30T11:14:06.966+00:00] W (17689) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present

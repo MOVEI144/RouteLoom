@@ -1,0 +1,5 @@
+[
+  {"board":"bridge","label":"stab-fix-r3-br","flash":{"identity":{"chip":"esp32c3","mac":"94:a9:90:7a:26:ac","log":"flash-bridge-preflight.log","flash_bytes":4194304},"app_sha256":"f109afc34eddfe5d609ee61e0cfd9d892b85ae6523d4d98735fcc6a7311459e6","app_bytes":1268416,"bundle":"hil-stab-fix-r3-br-bridge_node-esp32c3"},"nvs_preserved":true},
+  {"board":"relay","label":"stab-fix-r3-relay","flash":{"identity":{"chip":"esp32c6","mac":"10:bd:a3:ff:fe:b1:48:a8","log":"flash-relay-preflight.log","flash_bytes":4194304},"app_sha256":"0548a053cd6151cccc66d8cdb500f5f52cb67e562c17396f29c08e3a3c6a9875","app_bytes":1352672,"bundle":"hil-stab-fix-r3-relay-reference_node-esp32c6"},"nvs_preserved":true},
+  {"board":"endpoint","label":"stab-fix-r3-ep","flash":{"identity":{"chip":"esp32c6","mac":"10:bd:a3:ff:fe:b1:47:54","log":"flash-endpoint-preflight.log","flash_bytes":4194304},"app_sha256":"7888d849336ea3072312905255bdacce8edbd20dc0bbb3ad48d1dd4e1c14cd2a","app_bytes":1297312,"bundle":"hil-stab-fix-r3-ep-reference_node-esp32c6"},"nvs_preserved":true}
+]

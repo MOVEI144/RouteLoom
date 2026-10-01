@@ -1,0 +1,2 @@
+[2026-09-30T11:15:04.493+00:00] !! opened
+[2026-09-30T11:17:34.294+00:00] W (225051) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present

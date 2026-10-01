@@ -1,0 +1,16 @@
+{
+  "cycles": [
+    {"cycle":0,"delivered":10,"first_delivery_s":0.069,"bound_s":{"3":2.556}},
+    {"cycle":1,"delivered":10,"first_delivery_s":0.127,"bound_s":{"3":2.633,"1":8.058}},
+    {"cycle":2,"delivered":10,"first_delivery_s":0.118,"bound_s":{"1":2.74,"3":3.444}},
+    {"cycle":3,"delivered":10,"first_delivery_s":0.072,"bound_s":{"1":2.076}},
+    {"cycle":4,"delivered":10,"first_delivery_s":0.071,"bound_s":{"3":2.474,"1":3.076}},
+    {"cycle":5,"delivered":10,"first_delivery_s":0.125,"bound_s":{"1":2.415,"3":3.018}},
+    {"cycle":6,"delivered":10,"first_delivery_s":0.068,"bound_s":{"3":2.245}},
+    {"cycle":7,"delivered":10,"first_delivery_s":0.353,"bound_s":{"1":4.395,"3":4.896}},
+    {"cycle":8,"delivered":10,"first_delivery_s":0.067,"bound_s":{"1":2.561,"3":4.869}},
+    {"cycle":9,"delivered":10,"first_delivery_s":0.071,"bound_s":{"3":2.227,"1":2.83}}
+  ],
+  "delivered": 100,
+  "note": "BOUND times use timestamped console observations; delivery offsets use the monotonic clock."
+}

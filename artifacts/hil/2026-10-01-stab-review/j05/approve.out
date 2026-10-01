@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tools/hil/join_approve.py", line 58, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tools/hil/join_approve.py", line 37, in main
+    result = call(args.socket, "join.requests.list", {})
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tools/hil/join_approve.py", line 15, in call
+    conn.connect(path)
+ConnectionRefusedError: [Errno 111] Connection refused

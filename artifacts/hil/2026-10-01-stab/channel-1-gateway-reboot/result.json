@@ -1,0 +1,736 @@
+{
+  "before": {
+    "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00",
+    "connected": true,
+    "session": {
+      "authenticated": true,
+      "id": 17473235368068391320,
+      "node": 1,
+      "boot": 313,
+      "network": 6230945886,
+      "capability": 13895,
+      "version": 2
+    },
+    "credit": {
+      "observed": true,
+      "grant_frames": 143,
+      "grant_bytes": 26345
+    },
+    "rx_frames": 1946,
+    "tx_frames": 481,
+    "tx_bytes": 38184,
+    "protocol_errors": 0,
+    "last_error": "adapter disconnected"
+  },
+  "utc": "2026-09-30T20:15:20.755+00:00",
+  "reauth_s": 2.0259066509315744,
+  "routes_s": 90.35768244497012,
+  "nodes": [
+    {
+      "node": "0000000000000001",
+      "role": "gateway",
+      "connected": true,
+      "connectivity": "reachable",
+      "listed": true,
+      "neighbor": false,
+      "direct": true,
+      "hops": 0,
+      "next_hop": null,
+      "route_metric": null,
+      "link_cost": null,
+      "rssi_dbm": null,
+      "rssi_avg_dbm": null,
+      "telemetry_stale": false,
+      "last_heard_ms": null,
+      "heard_age_ms": null,
+      "updated_ms": 1790799322872,
+      "changed_ms": 1790799322872
+    },
+    {
+      "node": "0000000000000002",
+      "role": "peer",
+      "connected": false,
+      "connectivity": "isolated",
+      "listed": false,
+      "neighbor": false,
+      "direct": false,
+      "hops": null,
+      "next_hop": null,
+      "route_metric": null,
+      "link_cost": null,
+      "rssi_dbm": null,
+      "rssi_avg_dbm": null,
+      "telemetry_stale": false,
+      "last_heard_ms": 1790799028198,
+      "heard_age_ms": 382150,
+      "updated_ms": 1790799314451,
+      "changed_ms": 1790799049724
+    },
+    {
+      "node": "0000000000000003",
+      "role": "peer",
+      "connected": false,
+      "connectivity": "isolated",
+      "listed": false,
+      "neighbor": false,
+      "direct": false,
+      "hops": null,
+      "next_hop": null,
+      "route_metric": null,
+      "link_cost": null,
+      "rssi_dbm": null,
+      "rssi_avg_dbm": null,
+      "telemetry_stale": false,
+      "last_heard_ms": 1790799044273,
+      "heard_age_ms": 366075,
+      "updated_ms": 1790799314451,
+      "changed_ms": 1790799055781
+    }
+  ],
+  "sends": [
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 142
+      },
+      "delivery": {
+        "request": 142,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 1,
+        "updated_ms": 1790799416361
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 143
+      },
+      "delivery": {
+        "request": 143,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 2,
+        "updated_ms": 1790799417168
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 144
+      },
+      "delivery": {
+        "request": 144,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 3,
+        "updated_ms": 1790799417971
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 145
+      },
+      "delivery": {
+        "request": 145,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 4,
+        "updated_ms": 1790799418776
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 146
+      },
+      "delivery": {
+        "request": 146,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 5,
+        "updated_ms": 1790799419577
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 147
+      },
+      "delivery": {
+        "request": 147,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 6,
+        "updated_ms": 1790799420377
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 148
+      },
+      "delivery": {
+        "request": 148,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 7,
+        "updated_ms": 1790799421183
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 149
+      },
+      "delivery": {
+        "request": 149,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 8,
+        "updated_ms": 1790799421985
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 150
+      },
+      "delivery": {
+        "request": 150,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 9,
+        "updated_ms": 1790799422790
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 151
+      },
+      "delivery": {
+        "request": 151,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 10,
+        "updated_ms": 1790799423593
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 152
+      },
+      "delivery": {
+        "request": 152,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 11,
+        "updated_ms": 1790799424398
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 153
+      },
+      "delivery": {
+        "request": 153,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 12,
+        "updated_ms": 1790799425214
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 154
+      },
+      "delivery": {
+        "request": 154,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 13,
+        "updated_ms": 1790799426005
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 155
+      },
+      "delivery": {
+        "request": 155,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 14,
+        "updated_ms": 1790799426808
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 156
+      },
+      "delivery": {
+        "request": 156,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 15,
+        "updated_ms": 1790799427617
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 157
+      },
+      "delivery": {
+        "request": 157,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 16,
+        "updated_ms": 1790799428428
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 158
+      },
+      "delivery": {
+        "request": 158,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 17,
+        "updated_ms": 1790799429227
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 159
+      },
+      "delivery": {
+        "request": 159,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 18,
+        "updated_ms": 1790799430022
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 160
+      },
+      "delivery": {
+        "request": 160,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 19,
+        "updated_ms": 1790799430834
+      }
+    },
+    {
+      "node": 2,
+      "reply": {
+        "accepted": true,
+        "request": 161
+      },
+      "delivery": {
+        "request": 161,
+        "destination": 2,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 20,
+        "updated_ms": 1790799431642
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 162
+      },
+      "delivery": {
+        "request": 162,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 21,
+        "updated_ms": 1790799432439
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 163
+      },
+      "delivery": {
+        "request": 163,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 22,
+        "updated_ms": 1790799433238
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 164
+      },
+      "delivery": {
+        "request": 164,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 23,
+        "updated_ms": 1790799434041
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 165
+      },
+      "delivery": {
+        "request": 165,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 24,
+        "updated_ms": 1790799434846
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 166
+      },
+      "delivery": {
+        "request": 166,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 25,
+        "updated_ms": 1790799435645
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 167
+      },
+      "delivery": {
+        "request": 167,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 26,
+        "updated_ms": 1790799436449
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 168
+      },
+      "delivery": {
+        "request": 168,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 27,
+        "updated_ms": 1790799437254
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 169
+      },
+      "delivery": {
+        "request": 169,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 28,
+        "updated_ms": 1790799438060
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 170
+      },
+      "delivery": {
+        "request": 170,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 29,
+        "updated_ms": 1790799438861
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 171
+      },
+      "delivery": {
+        "request": 171,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 30,
+        "updated_ms": 1790799439667
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 172
+      },
+      "delivery": {
+        "request": 172,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 31,
+        "updated_ms": 1790799440472
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 173
+      },
+      "delivery": {
+        "request": 173,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 32,
+        "updated_ms": 1790799441272
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 174
+      },
+      "delivery": {
+        "request": 174,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 33,
+        "updated_ms": 1790799442077
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 175
+      },
+      "delivery": {
+        "request": 175,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 34,
+        "updated_ms": 1790799442882
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 176
+      },
+      "delivery": {
+        "request": 176,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 35,
+        "updated_ms": 1790799443689
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 177
+      },
+      "delivery": {
+        "request": 177,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 36,
+        "updated_ms": 1790799444493
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 178
+      },
+      "delivery": {
+        "request": 178,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 37,
+        "updated_ms": 1790799445295
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 179
+      },
+      "delivery": {
+        "request": 179,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 38,
+        "updated_ms": 1790799446112
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 180
+      },
+      "delivery": {
+        "request": 180,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 39,
+        "updated_ms": 1790799446903
+      }
+    },
+    {
+      "node": 3,
+      "reply": {
+        "accepted": true,
+        "request": 181
+      },
+      "delivery": {
+        "request": 181,
+        "destination": 3,
+        "state": "expired",
+        "reason": "DEADLINE_EXPIRED",
+        "msg_session": 4179199610,
+        "msg_seq": 40,
+        "updated_ms": 1790799447704
+      }
+    }
+  ],
+  "delivered": {
+    "2": 0,
+    "3": 0
+  }
+}

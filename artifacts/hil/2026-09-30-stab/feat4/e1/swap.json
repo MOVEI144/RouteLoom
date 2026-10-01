@@ -1,0 +1,12 @@
+{
+  "endpoint": {
+    "bundle": "sb-ep-m0",
+    "app_sha256": "bca3072103105167e0f732b1a4dbb47bf35bfc9993d095476a67ec9f9db1a3bf",
+    "app_bytes": 1239728,
+    "nvs_preserved": {
+      "rlcfg": true,
+      "rlkeys": true,
+      "rlsec": true
+    }
+  }
+}

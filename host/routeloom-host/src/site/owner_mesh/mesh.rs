@@ -237,7 +237,9 @@ fn mesh_route_loss_probe_result_survives_callback_delay() {
             world.step(25);
         }
         let probe_index = pending_probe(&world).expect("real gateway Probe captured in flight");
-        world.delayed[probe_index].0 = world.now + 25;
+        // Wait for the real DATA callback before delivering the captured
+        // Probe. A pending session setup is not a DATA send.
+        world.delayed[probe_index].0 = world.now + 30_000;
         world.switch.delay_ms[0][1] = 0;
         let probe_pending = world.probe_while_callback_pending;
         let result_before = world.switch.results_seen;
@@ -245,9 +247,23 @@ fn mesh_route_loss_probe_result_survives_callback_delay() {
         world.switch.callback_delay_ms[1][0] = delay;
         world.switch.callback_delay_kind = Some(WIRE_DATA);
         world.peers[1].app_send(testkit::GATEWAY, b"during-probe");
-        world.step(25);
+        let mut overlap = false;
+        for _ in 0..1000 {
+            world.step(25);
+            if world.callbacks[1].iter().any(|(at, _)| *at > world.now) {
+                let index = pending_probe(&world).expect("captured Probe still held");
+                // Inject on the same tick as the pending callback, before
+                // the harness services that callback (including 20 ms).
+                world.delayed[index].0 = world.now;
+                world.step(0);
+                overlap = world.probe_while_callback_pending > probe_pending;
+                if overlap {
+                    break;
+                }
+            }
+        }
         assert!(
-            world.probe_while_callback_pending > probe_pending,
+            overlap,
             "{delay} ms: Probe RX scheduled with DATA callback pending"
         );
         for _ in 0..1000 {
@@ -577,7 +593,11 @@ fn mesh_route_loss_advertisement_survives_queue_pressure() {
         assert!(ok, "extra route record {index}");
     }
     world.pump_until(200, |snaps| snaps[2].queued >= 16);
-    assert!(world.snaps[2].queued >= 16, "multi-page queue reached 50%");
+    assert!(
+        world.snaps[2].queued >= 16,
+        "multi-page queue reached 50%: {:?}",
+        world.snaps[2]
+    );
     let (accepted, queued) = world.peers[2].app_burst(16, testkit::GATEWAY);
     assert_eq!(accepted, 8, "bounded application admission");
     assert!(queued >= 16);

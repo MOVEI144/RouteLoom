@@ -1,0 +1,130 @@
+[2026-09-30T12:31:44.675+00:00] !! opened
+[2026-09-30T12:32:20.329+00:00] I (1020503) RouteLoom: owner polls=253788 empty=252972 rxq_max=2 max_us rx=8360 bootstrap=16418 node=4181 security=695570
+[2026-09-30T12:33:20.183+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:33:20.184+00:00] !! opened
+[2026-09-30T12:33:20.225+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:33:20.225+00:00] !! opened
+[2026-09-30T12:34:20.173+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:34:20.174+00:00] !! opened
+[2026-09-30T12:34:20.206+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:34:20.206+00:00] !! opened
+[2026-09-30T12:34:20.217+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:34:20.218+00:00] !! opened
+[2026-09-30T12:34:20.418+00:00] I (1140549) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T12:34:20.418+00:00] I (1140556) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:35:20.227+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:35:20.227+00:00] !! opened
+[2026-09-30T12:35:20.427+00:00] I (1200558) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:36:20.188+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:36:20.188+00:00] !! opened
+[2026-09-30T12:36:20.389+00:00] I (1260520) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T12:36:20.389+00:00] I (1260542) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=91 send_failures=49 kind_rejects=0
+[2026-09-30T12:37:20.190+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:37:20.191+00:00] !! opened
+[2026-09-30T12:37:20.207+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:37:20.208+00:00] !! opened
+[2026-09-30T12:37:20.408+00:00] ale=0 send_errors=0 last_error=0x0 rx=728 rx_other_channel=0
+[2026-09-30T12:37:20.408+00:00] I (1320544) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=95 send_failures=50 kind_rejects=0
+[2026-09-30T12:37:20.408+00:00] I (1320556) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T12:37:20.408+00:00] I (1320563) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:38:20.291+00:00] I (1380511) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T12:39:20.380+00:00] I (1440514) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T12:39:20.380+00:00] I (1440514) RouteLoom: owner polls=358616 empty=357584 rxq_max=2 max_us rx=8360 bootstrap=16418 node=4181 security=695570
+[2026-09-30T12:39:20.380+00:00] I (1440525) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T12:40:20.274+00:00] I (1440531) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=285 tx_failed=64 stI (1500517) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T12:40:20.274+00:00] I (1500521) RouteLoom: owner expiry_slots=134492400 hop_accept_expired=1
+[2026-09-30T12:40:20.274+00:00] I (1500528) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T12:40:20.274+00:00] I (1500534) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=292 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=803 rx_other_channel=0
+[2026-09-30T12:41:20.201+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:41:20.202+00:00] !! opened
+[2026-09-30T12:41:20.229+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:41:20.229+00:00] !! opened
+[2026-09-30T12:41:20.430+00:00] I (1560562) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T12:41:20.430+00:00] I (1560569) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:42:20.313+00:00] I (1620517) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T12:42:20.313+00:00] I (1620517) RouteLoom: owner polls=403546 empty=402426 rxq_max=2 max_us rx=8360 bootstrap=16418 node=4181 security=695570
+[2026-09-30T12:42:20.313+00:00] I (1620521) RouteLoom: owner expiry_slots=145275480 hop_accept_expired=1
+[2026-09-30T12:42:20.313+00:00] I (1620528) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T12:42:20.313+00:00] I (1620562) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T12:42:20.313+00:00] I (1620569) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:43:20.185+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:43:20.185+00:00] !! opened
+[2026-09-30T12:43:20.386+00:00] I (1680517) RouteLoom: owner polls=418520 empty=417366 rxq_max=2 max_us rx=8360 bootstrap=16418 node=4181 security=695570
+[2026-09-30T12:43:20.386+00:00] I (1680521) RouteLoom: owner expiry_slots=150666120 hop_accept_expired=1
+[2026-09-30T12:43:20.386+00:00] I (1680528) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T12:43:20.386+00:00] I (1680534) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=311 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=871 rx_other_channel=0
+[2026-09-30T12:43:20.386+00:00] I (1680562) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T12:43:20.386+00:00] I (1680569) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:44:20.197+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:44:20.197+00:00] !! opened
+[2026-09-30T12:44:20.398+00:00] I (1740530) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T12:44:20.398+00:00] I (1740536) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=318 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=894 rx_other_channel=0
+[2026-09-30T12:44:20.398+00:00] I (1740552) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=120 send_failures=54 kind_rejects=0
+[2026-09-30T12:44:20.398+00:00] I (1740564) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T12:44:20.398+00:00] I (1740571) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:45:20.186+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:45:20.187+00:00] !! opened
+[2026-09-30T12:45:20.387+00:00] I (1800519) RouteLoom: owner polls=448472 empty=447258 rxq_max=2 max_us rx=8360 bootstrap=16418 node=4181 security=695570
+[2026-09-30T12:45:20.387+00:00] I (1800523) RouteLoom: owner expiry_slots=161448840 hop_accept_expired=1
+[2026-09-30T12:45:20.387+00:00] I (1800530) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T12:45:20.387+00:00] I (1800536) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=325 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=923 rx_other_channel=0
+[2026-09-30T12:45:20.387+00:00] I (1800552) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=124 send_failures=55 kind_rejects=0
+[2026-09-30T12:45:20.387+00:00] I (1800564) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T12:45:20.387+00:00] I (1800571) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:45:26.472+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:45:26.472+00:00] !! opened
+[2026-09-30T12:45:31.480+00:00] W (1811627) rl_migrate: migration event CHANNEL_NOTICE peer=1
+[2026-09-30T12:45:31.480+00:00] W (1811628) RouteLoomRef: diagnostic reason=CHANNEL_NOTICE peer=1 message=none
+[2026-09-30T12:45:31.480+00:00] W (1811810) rl_migrate: migration event PHASE_COMMITTED peer=0
+[2026-09-30T12:45:31.480+00:00] W (1811811) RouteLoomRef: diagnostic reason=PHASE_COMMITTED peer=0 message=none
+[2026-09-30T12:45:56.714+00:00] W (1836860) rl_migrate: migration event VERIFY_PASSED peer=1
+[2026-09-30T12:45:56.714+00:00] W (1836860) RouteLoomRef: diagnostic reason=VERIFY_PASSED peer=1 message=none
+[2026-09-30T12:45:56.714+00:00] W (1836862) rl_migrate: migration event PHASE_STABLE peer=0
+[2026-09-30T12:45:56.714+00:00] W (1836867) RouteLoomRef: diagnostic reason=PHASE_STABLE peer=0 message=none
+[2026-09-30T12:46:20.350+00:00] I (1860520) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T12:46:20.350+00:00] I (1860520) RouteLoom: owner polls=463396 empty=462132 rxq_max=2 max_us rx=132787 bootstrap=16418 node=15446 security=695570
+[2026-09-30T12:46:20.350+00:00] I (1860525) RouteLoom: owner expiry_slots=166821480 hop_accept_expired=1
+[2026-09-30T12:46:20.350+00:00] I (1860531) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T12:46:20.350+00:00] I (1860537) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=2 busy=0 quarantined=0 fenced=0 tx_ok=341 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=964 rx_other_channel=0
+[2026-09-30T12:46:20.350+00:00] I (1860554) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=127 send_failures=55 kind_rejects=0
+[2026-09-30T12:46:20.350+00:00] I (1860565) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T12:46:20.350+00:00] I (1860572) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:47:20.198+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:47:20.198+00:00] !! opened
+[2026-09-30T12:47:20.399+00:00] I (1920531) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T12:47:20.399+00:00] I (1920537) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=2 busy=0 quarantined=0 fenced=0 tx_ok=347 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=988 rx_other_channel=0
+[2026-09-30T12:47:20.399+00:00] I (1920554) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=130 send_failures=55 kind_rejects=0
+[2026-09-30T12:47:20.399+00:00] I (1920565) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T12:47:20.399+00:00] I (1920572) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:48:20.188+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:48:20.189+00:00] !! opened
+[2026-09-30T12:48:20.389+00:00] I (1980521) RouteLoom: owner polls=493345 empty=492021 rxq_max=2 max_us rx=132787 bootstrap=16418 node=15446 security=695570
+[2026-09-30T12:48:20.389+00:00] I (1980526) RouteLoom: owner expiry_slots=177603120 hop_accept_expired=1
+[2026-09-30T12:48:20.389+00:00] I (1980532) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T12:48:20.389+00:00] I (1980538) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=2 busy=0 quarantined=0 fenced=0 tx_ok=355 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1019 rx_other_channel=0
+[2026-09-30T12:48:20.389+00:00] I (1980555) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=135 send_failures=57 kind_rejects=0
+[2026-09-30T12:48:20.389+00:00] I (1980574) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:49:20.310+00:00] I (2040524) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T12:49:20.310+00:00] I (2040524) RouteLoom: owner polls=508319 empty=506963 rxq_max=2 max_us rx=132787 bootstrap=16418 node=15446 security=695570
+[2026-09-30T12:49:20.310+00:00] I (2040529) RouteLoom: owner expiry_slots=182993760 hop_accept_expired=1
+[2026-09-30T12:49:20.310+00:00] I (2040535) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T12:49:20.310+00:00] I (2040541) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=2 busy=0 quarantined=0 fenced=0 tx_ok=363 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1047 rx_other_channel=0
+[2026-09-30T12:49:20.310+00:00] I (2040558) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=140 send_failures=59 kind_rejects=0
+[2026-09-30T12:49:20.310+00:00] I (2040569) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T12:49:20.310+00:00] I (2040577) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:50:20.198+00:00] I (2100527) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T12:50:20.198+00:00] I (2100527) RouteLoom: owner polls=523296 empty=521912 rxq_max=2 max_us rx=132787 bootstrap=16418 node=15446 security=695570
+[2026-09-30T12:50:20.398+00:00] I (2100532) RouteLoom: owner expiry_slots=188385480 hop_accept_expired=1
+[2026-09-30T12:50:20.398+00:00] I (2100538) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T12:50:20.398+00:00] I (2100544) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=2 busy=0 quarantined=0 fenced=0 tx_ok=369 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1067 rx_other_channel=0
+[2026-09-30T12:50:20.398+00:00] I (2100561) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=143 send_failures=59 kind_rejects=0
+[2026-09-30T12:50:20.398+00:00] I (2100572) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T12:50:20.398+00:00] I (2100580) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:51:20.277+00:00] I (2160527) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T12:51:20.278+00:00] I (2160527) RouteLoom: owner polls=538272 empty=536860 rxq_max=2 max_us rx=132787 bootstrap=16418 node=15446 security=695570
+[2026-09-30T12:51:20.278+00:00] I (2160532) RouteLoom: owner expiry_slots=193776840 hop_accept_expired=1
+[2026-09-30T12:51:20.278+00:00] I (2160538) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T12:51:20.278+00:00] I (2160544) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=2 busy=0 quarantined=0 fenced=0 tx_ok=375 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1087 rx_other_channel=0
+[2026-09-30T12:51:20.278+00:00] I (2160561) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=146 send_failures=59 kind_rejects=0
+[2026-09-30T12:51:20.278+00:00] I (2160572) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T12:51:20.278+00:00] I (2160579) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
