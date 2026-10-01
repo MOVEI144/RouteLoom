@@ -42,6 +42,12 @@
       "budget": {"app_bin_max": 1230000, "static_free_min": 40480, "rtc_used_max": 6632}
     },
     {
+      "id": "bridge_node-esp32c5-normal-off-app_object-small", "app": "bridge_node", "target": "esp32c5",
+      "overlay": ["CONFIG_ROUTELOOM_APP_OBJECT_TRANSFER=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL=y"],
+      "expect": ["CONFIG_ROUTELOOM_APP_OBJECT_RX_SLOTS=2", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL=y", "CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"],
+      "budget": {"app_bin_max": 1393360, "static_free_min": 17163, "rtc_used_max": 9696}
+    },
+    {
       "id": "reference_node-esp32c6-normal-off-app_object", "app": "reference_node", "target": "esp32c6",
       "overlay": ["CONFIG_ROUTELOOM_APP_OBJECT_TRANSFER=y"],
       "expect": ["CONFIG_ROUTELOOM_APP_OBJECT_RX_SLOTS=2", "CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y"],
@@ -116,7 +122,7 @@
       "id": "bench_node-esp32c5-deep_sleep-off-owner_member", "app": "bench_node", "target": "esp32c5",
       "overlay": ["CONFIG_ROUTELOOM_DEEP_SLEEP=y", "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1471568, "static_free_min": 41197, "rtc_used_max": 16056}
+      "budget": {"app_bin_max": 1473632, "static_free_min": 41197, "rtc_used_max": 16056}
     },
     {
       "id": "bridge_node-esp32c3-normal-off-endpoints_on", "app": "bridge_node", "target": "esp32c3",

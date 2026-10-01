@@ -55,17 +55,11 @@ class CellList(unittest.TestCase):
     def test_cells_cover_every_app_and_target_with_a_budget(self):
         data = check.load_cells()
         cells = data["cells"]
-        # 37 cells of the pre-v2 matrix, the 5 C6 cells made required, bench C6,
-        # the C3 gateway-128 and endpoint cells, two release (-Os) comparisons,
-        # the C3/C6 Member maintenance images, the example and the
-        # component-only external consumer (52); V2-08 moved the LegacyFixture
-        # cells onto DevRam and Member, keeping one compatibility cell, and
-        # added the Member channel-plan gateway and participant (50); V2-10
-        # removed that compatibility cell with LegacyFixture itself (49).
-        # V2-17 added the C and standalone-gateway examples and the external
-        # consumer on S3, C5 and C6 (54); V2-19 adds two AppObject ON cells (56).
-        self.assertEqual(len(cells), 56)
+        # Retain every app/target configuration, including the small C5
+        # AppObject gateway whose two RX slots fit the RAM guard.
+        self.assertEqual(len(cells), 57)
         self.assertTrue({
+            "bridge_node-esp32c5-normal-off-app_object-small",
             "bridge_node-esp32c3-normal-off-maintenance_member",
             "reference_node-esp32c6-normal-off-maintenance_member",
             "bridge_node-esp32c6-normal-off-maintenance_member",
