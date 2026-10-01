@@ -489,9 +489,12 @@ class Scenarios(unittest.TestCase):
                       steps[0].require)
         self.assertIn("site::owner_mesh::mesh::mesh_direct_converges_and_delivers",
                       steps[1].require)
-        # The red three-hop row is ignored by the suite, not required.
-        self.assertNotIn("site::owner_mesh::mesh::mesh_line_three_hops_delivers",
-                         steps[1].require)
+        self.assertIn("site::owner_mesh::mesh::mesh_line_three_hops_delivers",
+                      steps[1].require)
+        for profile in ("member", "devram"):
+            for hops in (2, 3, 4):
+                self.assertIn(f"site::owner_mesh::end::mesh_end_{profile}_{hops}_hops_deliver",
+                              steps[1].require)
 
     def test_profile_mesh_requires_every_mixed_case(self):
         step = check.profile_mesh()[-1]

@@ -68,6 +68,7 @@ mod boot;
 mod compat;
 mod cutover;
 mod device;
+mod end;
 mod fault;
 mod join;
 mod membership;

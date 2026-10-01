@@ -851,13 +851,7 @@ pub(super) fn deliver_each(
 /// M01 (T3): G—A—B—C, three hops end to end. Twenty Reliable messages
 /// each way between the gateway and the far leaf arrive exactly once,
 /// and every frame crossed only the chain's legs.
-///
-/// Red today: the three-hop leaf's end-to-end handshake with the
-/// gateway expires (end_last_error Expired) — the chunked m2 needs longer
-/// over three hops than the initiator's resends last — and it never gets
-/// its authority channel (tests/e2e/scenarios.json M01-T3).
 #[test]
-#[ignore = "M01-T3 red: three-hop end-to-end handshake expires"]
 fn mesh_line_three_hops_delivers() {
     let Some(mut world) = MeshWorld::start("line-three-hops", Switch::new(&Topology::line(4)))
     else {
