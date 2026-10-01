@@ -3,6 +3,11 @@
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
+#if CONFIG_IDF_TARGET_ESP32C6
+#include "driver/gpio.h"
+#include "esp_log.h"
+#endif
+
 #include "routeloom/sdkv1_blob_storage.hpp"
 
 namespace routeloom::espnow {
@@ -48,6 +53,28 @@ Status BoardStores::initialize() noexcept {
   const Status config_status = config_.initialize();
   const Status secrets_status = secrets_.initialize();
   return config_status.ok() ? secrets_status : config_status;
+}
+
+Status initialize_board_rf() noexcept {
+#if CONFIG_IDF_TARGET_ESP32C6
+  constexpr gpio_num_t kRfSwitchEnableGpio = GPIO_NUM_3;
+  constexpr gpio_num_t kAntennaSelectGpio = GPIO_NUM_14;
+#if CONFIG_ROUTELOOM_BOARD_C6_EXTERNAL_ANTENNA
+  constexpr int kAntennaLevel = 1;
+#else
+  constexpr int kAntennaLevel = 0;
+#endif
+  // GPIO3 is active-low; GPIO14 selects the internal (0) or external (1) antenna.
+  if (gpio_set_direction(kRfSwitchEnableGpio, GPIO_MODE_OUTPUT) != ESP_OK ||
+      gpio_set_level(kRfSwitchEnableGpio, 0) != ESP_OK ||
+      gpio_set_direction(kAntennaSelectGpio, GPIO_MODE_OUTPUT) != ESP_OK ||
+      gpio_set_level(kAntennaSelectGpio, kAntennaLevel) != ESP_OK) {
+    return Status::error(StatusCode::RadioFailure, "rf switch GPIO setup failed");
+  }
+  ESP_LOGI("RouteLoomBoard", "rf switch: enabled, antenna: %s",
+           kAntennaLevel == 0 ? "internal" : "external");
+#endif
+  return Status::success();
 }
 
 std::uint8_t board_chip() noexcept {

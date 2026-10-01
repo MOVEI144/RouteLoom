@@ -11,6 +11,7 @@
 #include <new>
 
 #include "driver/usb_serial_jtag.h"
+#include "driver/gpio.h"
 #include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -26,6 +27,14 @@
 #include "nvs_flash.h"
 
 namespace {
+
+unsigned g_gpio_calls = 0;
+unsigned g_gpio_fail_call = 0;
+int g_gpio_direction[15]{};
+int g_gpio_level[15]{};
+bool g_wifi_init_called = false;
+bool g_rf_ready_at_wifi = false;
+int g_antenna_at_wifi = -1;
 
 std::int64_t g_now_us = 0;
 std::uint8_t g_channel = 6;
@@ -80,6 +89,13 @@ namespace idf_stub {
 
 void reset() noexcept {
   static const std::uint8_t kDefaultMac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
+  g_gpio_calls = 0;
+  g_gpio_fail_call = 0;
+  std::fill_n(g_gpio_direction, 15, -1);
+  std::fill_n(g_gpio_level, 15, -1);
+  g_wifi_init_called = false;
+  g_rf_ready_at_wifi = false;
+  g_antenna_at_wifi = -1;
   g_now_us = 0;
   g_channel = 6;
   g_send_count = 0;
@@ -103,6 +119,14 @@ void reset() noexcept {
   g_last_peek_ticks = 0;
   g_logs[0] = '\0';
   g_logs_size = 0;
+}
+
+void fail_gpio_call(unsigned call) noexcept { g_gpio_fail_call = call; }
+bool wifi_init_called() noexcept { return g_wifi_init_called; }
+bool board_rf_before_wifi(int antenna_level) noexcept {
+  if (antenna_level < 0) return g_wifi_init_called && g_gpio_calls == 0;
+  return g_rf_ready_at_wifi && g_gpio_calls == 4 &&
+         g_antenna_at_wifi == antenna_level;
 }
 
 void set_receive_hook(void (*hook)(void*), void* context) noexcept {
@@ -451,7 +475,23 @@ esp_err_t esp_now_set_peer_rate_config(const uint8_t* peer_addr,
   return ESP_OK;
 }
 
+esp_err_t gpio_set_direction(gpio_num_t gpio, gpio_mode_t mode) {
+  if (++g_gpio_calls == g_gpio_fail_call) return ESP_FAIL;
+  g_gpio_direction[static_cast<unsigned>(gpio)] = mode;
+  return ESP_OK;
+}
+
+esp_err_t gpio_set_level(gpio_num_t gpio, std::uint32_t level) {
+  if (++g_gpio_calls == g_gpio_fail_call) return ESP_FAIL;
+  g_gpio_level[static_cast<unsigned>(gpio)] = static_cast<int>(level);
+  return ESP_OK;
+}
+
 esp_err_t esp_wifi_init(const wifi_init_config_t* config) {
+  g_wifi_init_called = true;
+  g_antenna_at_wifi = g_gpio_level[14];
+  g_rf_ready_at_wifi = g_gpio_direction[3] == GPIO_MODE_OUTPUT && g_gpio_level[3] == 0 &&
+                       g_gpio_direction[14] == GPIO_MODE_OUTPUT && g_gpio_level[14] >= 0;
   (void)config;
   return ESP_OK;
 }
