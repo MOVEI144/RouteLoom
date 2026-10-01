@@ -151,10 +151,10 @@ Provider変更時は終端contextとdestination bindingを再検証する。Mess
 | CHUNK | schema:u8=1、id:u32、index:u8、length:u8、data:1〜121 B | 7＋data |
 | ACK | schema:u8=1、id:u32、status:u8、missing:u8、bitmap:u64 | 15 |
 
-idはboot内単調で0禁止。totalは1〜4096、chunksはceil(total/121)、最後だけ短く、34chunkまで。digestは本文のSHA-256先頭16 B。manifest metadataはend AEADと同ID照合で保護する。lifetimeは1〜120000 msで、再送STARTでは送信側の残り期限を送る。受信期限は最初の受付で固定し、再送／重複で延ばさない。
+idはboot内単調で0禁止。totalは1〜4096、chunksはceil(total/121)、最後だけ短く、34chunkまで。digestは本文のSHA-256先頭16 B。manifest metadataはend AEADと同ID照合で保護する。lifetimeは1〜120000 msで、再送STARTでは送信側の残り期限を送る。受信期限はSTARTのrouting予算が既に消費した時間を差し引いて最初の受付で固定し、再送／重複で延ばさない。
 
 ACK statusはIncomplete=0、Complete=1、Busy=2、NoBuffer=3、Conflict=4、Expired=5、Cancelled=6（予約）、Unsupported=7、Failed=8。bitmap bit iはchunk i、missingは最初の欠けたindex（全体完了はchunks）。未送信bitを含むACK、別source／boot／contextのACKは転送を完了しない。受信はfull network、双方identity／boot、暗号contextとidを照合する。contextは所属generationに結合する。
 
-送信windowは2、同一frame最大5送信。初回ACK待ちは実送信のhop結果後に開始し、1秒から指数backoff最大4秒、±10% jitter。全体期限と10秒無進捗期限を優先する。各typed frameのTTLは4秒。新Bulkのqueue admissionは既存80% watermarkで拒否する。object START／CHUNK／ACKは全て既存Work ledgerに課金し、送信nodeごとの保守的LRモデルで50 ms/s、burst一frameにpacingする（RF実測のairtimeではない）。
+送信windowは2、同一frame最大5送信。初回ACK待ちは実送信のhop結果後に開始し、1秒から指数backoff最大4秒、±10% jitter。全体期限と10秒無進捗期限を優先する。各typed frameのTTLは最大4秒で、送信側の残りobject期限を超えない。新Bulkのqueue admissionは既存80% watermarkで拒否する。object START／CHUNK／ACKは全て既存Work ledgerに課金し、送信nodeごとの保守的LRモデルで50 ms/s、burst一frameにpacingする。OFF中継とhop再送にも実dispatch時に同じ予算を適用する（RF実測のairtimeではない）。
 
-受付時に完了記録四枠の一つを予約し、最初の期限＋30秒まで保持する。同じSTARTには結果ACKを再返送し、異内容はConflict。sourceごとのboot／context／highest admitted idのfloorは暗号context退役まで保持し、記録のない旧idはExpiredとして再通知しない。receiver再起動を跨ぐexactly-onceはアプリの永続IDが担当する。goldenは[protocol/app-object-golden](../../protocol/app-object-golden)。
+受付時に完了記録四枠の一つを予約し、最初の期限＋30秒まで保持する。同じSTARTには結果ACKを再返送し、異内容はConflict。USBなどの通知先がBusyの間、完成した受信loanは元の期限内で保持し、通知後にComplete ACKを送る。sourceごとのboot／context／highest admitted idのfloorは暗号context退役まで保持し、記録のない旧idはExpiredとして再通知しない。receiver再起動を跨ぐexactly-onceはアプリの永続IDが担当する。goldenは[protocol/app-object-golden](../../protocol/app-object-golden)。

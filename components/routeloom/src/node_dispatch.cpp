@@ -453,6 +453,14 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       retry_or_fail(submitted, status.detail, now_ms);
       continue;
     }
+    const auto& submitted_header = submitted.form == JobForm::Plain ? submitted.plain.header : submitted.forwarded.header;
+    if (submitted_header.type == FrameType::AppObjectStart ||
+        submitted_header.type == FrameType::AppObjectChunk || submitted_header.type == FrameType::AppObjectAck) {
+      // 50,000 us/s with one frame of burst. Charge each physical attempt
+      // using encoded length and fixed PHY cost, independently of service time.
+      const auto cost_us = (tx_encoded_.size + kTxFrameFixedCostBytes) * 32;
+      object_send_after_ms_ = now_ms + (cost_us + 49) / 50;
+    }
     ++submitted.physical_attempts;
     obs_tx_submitted(submitted, token, now_ms);
     physical_.job = std::move(submitted);

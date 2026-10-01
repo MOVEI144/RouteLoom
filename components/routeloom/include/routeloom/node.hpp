@@ -2977,10 +2977,15 @@ class MeshNode {
   CongestionStats budget_stats_{};
   std::int64_t control_budget_tokens_us_{kControlBudgetCapacityUs};
   MonotonicMs control_budget_last_ms_{0};
+  // AppObject radio pacing also applies to opaque OFF relays and hop retries.
+  MonotonicMs object_send_after_ms_{0};
   // Calibrated emission demand: EWMA (alpha 1/8) of measured control-domain
   // driver service, seeded at the pinned max-frame cost so the first
   // emissions gate conservatively until local service is measured.
   std::uint32_t control_service_ewma_us_{kControlBudgetFrameCostUs};
+  // Driver-queue age of the frame currently inside receive_impl — debited
+  // from the forwarding budget by queue_forward (01 §lifetime).
+  std::uint32_t rx_age_ms_{0};
   std::uint64_t control_service_samples_{0};
   bool control_budget_unsat_reported_{false};
   // Dedup capacity counters (sdk-completion/02 §2.4) — admissions, refusals,
@@ -2999,9 +3004,6 @@ class MeshNode {
   // Transit refusals under a disabled/draining relay gate (01 §policy) —
   // counted so relay-off is evidence, not a silent black hole.
   std::uint64_t transit_refused_{0};
-  // Driver-queue age of the frame currently inside receive_impl — debited
-  // from the forwarding budget by queue_forward (01 §lifetime).
-  std::uint32_t rx_age_ms_{0};
   SessionStats session_stats_{};
   // Latest wall time seen on the event path; observation timestamps use it
   // where the call site (e.g. delivery-state transitions) has no clock.

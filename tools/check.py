@@ -265,6 +265,7 @@ def object_mesh() -> list[Step]:
                       "site::owner_mesh::object::mesh_m10_object_reorder_duplicate_and_conflict",
                       "site::owner_mesh::object::mesh_m10_host_usb_object_upload",
                       "site::owner_mesh::object::mesh_m10_c_object_apis",
+                      "site::owner_mesh::object::mesh_m10_concurrent_usb_ingress",
                       "site::owner_mesh::object::mesh_m10_boot_revoke_and_route_repair",
                       "site::owner_mesh::object::mesh_m10_completion_record_pressure",
                       "site::owner_mesh::object::mesh_m10_object_queue_pressure",

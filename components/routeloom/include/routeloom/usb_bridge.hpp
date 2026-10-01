@@ -212,7 +212,6 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
 #if ROUTELOOM_APP_OBJECT_TRANSFER
   Status attach_object(AppObject& object) noexcept;
   bool object_receive_ready() const noexcept override { return state_ == SessionState::Active && object_up_size_ == 0 && object_phase_ != 1 && object_phase_ != 2; }
-  std::size_t object_receive_slots() const noexcept override { return 1; }
   void on_object(const ObjectRxInfo& info, ByteView data) noexcept override;
   void on_object_result(const ObjectResult& result) noexcept override;
 #endif

@@ -318,7 +318,10 @@ MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
           if (!flow->overflow) flows_.release(flow);
           continue;
         }
-        if (head->not_before_ms > now_ms) {
+        const auto& header = head->form == JobForm::Plain ? head->plain.header : head->forwarded.header;
+        const bool object = header.type == FrameType::AppObjectStart ||
+                            header.type == FrameType::AppObjectChunk || header.type == FrameType::AppObjectAck;
+        if (head->not_before_ms > now_ms || (object && now_ms < node.object_send_after_ms_)) {
           // Link-retry jitter hold (radio.md §8): the job waits for its
           // decorrelation delay — skipped like a window-blocked head and
           // revisited on a later pass.

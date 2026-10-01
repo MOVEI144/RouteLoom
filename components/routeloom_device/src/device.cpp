@@ -619,9 +619,6 @@ bool Device::Observer::object_receive_ready() const noexcept {
   return true;
 }
 std::size_t Device::Observer::object_receive_slots() const noexcept {
-#if ROUTELOOM_APP_OBJECT_TRANSFER && ROUTELOOM_PROFILE_HAS_GATEWAY
-  if (device_ != nullptr && device_->bridge_ != nullptr) return 1;
-#endif
   return ROUTELOOM_APP_OBJECT_RX_SLOTS;
 }
 void Device::Observer::on_object(const ObjectRxInfo& info, ByteView data) noexcept {

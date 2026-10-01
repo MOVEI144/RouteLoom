@@ -451,7 +451,8 @@ Status MeshNode::decode_ack_payload(const ByteView payload, AckKey& key) noexcep
   RL_READ(reader.read_u64(key.key.id.sequence));
   RL_READ(reader.read_u8(key.round));
 #undef RL_READ
-  const bool known_type = type == static_cast<std::uint8_t>(FrameType::Data) ||
+  const bool known_type = wire::is_extension_type(static_cast<FrameType>(type)) ||
+      type == static_cast<std::uint8_t>(FrameType::Data) ||
       type == static_cast<std::uint8_t>(FrameType::EndReceipt) ||
       type == static_cast<std::uint8_t>(FrameType::BootstrapAuth) ||
       type == static_cast<std::uint8_t>(FrameType::MembershipResult) ||

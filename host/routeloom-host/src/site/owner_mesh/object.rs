@@ -22,8 +22,25 @@ fn mesh_m10_app_objects() {
             0
         );
         let started = world.now;
+        let mut previous_tx = None;
+        let mut watched = 0;
         loop {
             world.step(25);
+            if size == 4096 {
+                for (from, _, _) in &world.switch.watched[watched..] {
+                    if *from == 1 {
+                        if let Some(previous) = previous_tx {
+                            assert!(
+                                world.now - previous >= 200,
+                                "object airtime includes hop retransmissions: {} ms",
+                                world.now - previous
+                            );
+                        }
+                        previous_tx = Some(world.now);
+                    }
+                }
+                watched = world.switch.watched.len();
+            }
             let (_, results, state, _) = world.peers[1].object_snapshot();
             if results != 0 {
                 assert_eq!(results, 1);
@@ -133,7 +150,7 @@ fn mesh_p04_object_off_terminal() {
 #[test]
 #[ignore = "requires ROUTELOOM_APP_OBJECT_TRANSFER=ON mesh peer"]
 fn mesh_m10_object_reorder_duplicate_and_conflict() {
-    for conflict in [false, true] {
+    for conflict in 0..3 {
         let mut world = mesh::route_loss_world("m10-grid", Switch::direct(), false)
             .expect("M10 requires real Owner peers");
         assert_eq!(world.peers[0].object_buffer(), 0);
@@ -148,7 +165,11 @@ fn mesh_m10_object_reorder_duplicate_and_conflict() {
         start.extend_from_slice(&[2, 0, 7, 0]);
         start.extend_from_slice(&digest[..16]);
         start.extend_from_slice(&5000u32.to_be_bytes());
-        let mut bodies = vec![(64, start)];
+        let mut bodies = vec![(64, start.clone())];
+        if conflict == 2 {
+            start[9] ^= 1; // same transfer, conflicting app tag
+            bodies.push((64, start));
+        }
         for index in [1u8, 1, 0] {
             let part = if index == 1 {
                 &data[121..]
@@ -159,7 +180,7 @@ fn mesh_m10_object_reorder_duplicate_and_conflict() {
             chunk.extend_from_slice(&1u32.to_be_bytes());
             chunk.extend_from_slice(&[index, part.len() as u8]);
             chunk.extend_from_slice(part);
-            if conflict && bodies.len() == 2 {
+            if conflict == 1 && bodies.len() == 2 {
                 chunk[7] ^= 1;
             }
             bodies.push((65, chunk));
@@ -172,8 +193,8 @@ fn mesh_m10_object_reorder_duplicate_and_conflict() {
         }
         world.step(1000);
         let (count, _, _, received) = world.peers[0].object_snapshot();
-        assert_eq!(count, u32::from(!conflict));
-        if !conflict {
+        assert_eq!(count, u32::from(conflict == 0));
+        if conflict == 0 {
             assert_eq!(received, data);
         }
     }
@@ -287,6 +308,7 @@ fn mesh_m10_c_object_apis() {
     let data = vec![0x35; 4096];
     for (from, to) in [(1, 0), (0, 1)] {
         let destination = world.nodes[to];
+        let hop_timeouts: Vec<_> = world.snaps.iter().map(|s| s.hop_accept_expired).collect();
         assert_eq!(world.peers[from].object_send(destination, &data, 30000), 0);
         for _ in 0..1200 {
             world.step(25);
@@ -297,6 +319,16 @@ fn mesh_m10_c_object_apis() {
         assert_eq!(world.peers[from].object_snapshot().2, 1);
         assert_eq!(world.peers[to].object_snapshot().0, 1);
         assert_eq!(world.peers[to].object_snapshot().3, data);
+        world.step(1000);
+        assert_eq!(
+            world
+                .snaps
+                .iter()
+                .map(|s| s.hop_accept_expired)
+                .collect::<Vec<_>>(),
+            hop_timeouts,
+            "AppObject HOP_ACCEPT must resolve on every hop"
+        );
     }
     assert!(world.snaps.iter().all(|s| s.c_check_failures == 0));
 }
@@ -486,4 +518,60 @@ fn mesh_m10_control_p99() {
         world.snaps.iter().map(|s| s.end_failed).collect::<Vec<_>>(),
         failed
     );
+}
+
+#[test]
+#[ignore = "requires ROUTELOOM_APP_OBJECT_TRANSFER=ON mesh peer"]
+fn mesh_m10_concurrent_usb_ingress() {
+    let mut world = mesh::route_loss_world(
+        "m10-rx-slots",
+        Switch::new(&super::switch::Topology {
+            nodes: 3,
+            edges: vec![(0, 1), (0, 2)],
+        }),
+        false,
+    )
+    .expect("M10 requires real Owner peers");
+    assert_eq!(world.peers[0].object_buffer(), 0);
+    for from in [1, 2] {
+        mesh::deliver_each(&mut world, from, 0, 1, b"warm");
+    }
+    // Two authenticated sources occupy the gateway's two registered loans.
+    for kind in [64, 65] {
+        for from in [1usize, 2] {
+            let data = [from as u8];
+            let mut body = vec![1];
+            body.extend_from_slice(&1u32.to_be_bytes());
+            if kind == 64 {
+                body.extend_from_slice(&[0, 1, 1, 0, 0, 0]);
+                body.extend_from_slice(&routeloom_keysched::sha256(&[&data])[..16]);
+                body.extend_from_slice(&5000u32.to_be_bytes());
+            } else {
+                body.extend_from_slice(&[0, 1, data[0]]);
+            }
+            let frame = world.peers[from].craft_frame(
+                testkit::GATEWAY,
+                testkit::GATEWAY,
+                kind,
+                0,
+                1,
+                &body,
+            );
+            world.peers[0].send_rx(&world.macs[from], &world.macs[0], &frame);
+        }
+        world.step(25);
+    }
+    for _ in 0..40 {
+        world.step(25);
+    }
+    assert_eq!(world.peers[0].object_snapshot().0, 2);
+    let mut assembly = crate::objects::IngressAssembly::default();
+    let mut received = Vec::new();
+    for (_, session, body) in world.usb_host.object_frames.drain(..) {
+        if let Some((object, _, _)) = assembly.fragment(session, &body) {
+            received.push(object.payload);
+        }
+    }
+    received.sort();
+    assert_eq!(received, vec![vec![1], vec![2]]);
 }

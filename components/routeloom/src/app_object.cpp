@@ -51,6 +51,12 @@ Status AppObject::register_buffer(MutableByteView buffer) noexcept {
   // Reject overlapping loans, including a repeated registration.
   const auto first = reinterpret_cast<std::uintptr_t>(buffer.data);
   if (buffer.size > UINTPTR_MAX - first) return Status::error(StatusCode::InvalidArgument, "buffer bounds");
+  if (tx_.active) {
+    const auto loan = reinterpret_cast<std::uintptr_t>(tx_.data.data);
+    if (first < loan + tx_.data.size && loan < first + buffer.size) {
+      return Status::error(StatusCode::Conflict, "object loans overlap");
+    }
+  }
   for (const auto& rx : rx_) {
     if (rx.storage.data == nullptr) continue;
     const auto other = reinterpret_cast<std::uintptr_t>(rx.storage.data);
@@ -124,6 +130,14 @@ bool AppObject::live(const Key& k) const noexcept {
          security_.current_rx_epoch(SecurityScope::EndToEnd, k.peer, epoch).ok() && epoch == k.epoch &&
          context_usable(security_.context_state(SecurityScope::EndToEnd, k.peer));
 }
+bool AppObject::live_tx() noexcept {
+  std::uint32_t epoch = node_.config().end_epoch, rx_epoch = 0;
+  return tx_.self == node_.node_id() && tx_.network == node_.config().network &&
+         tx_.self_boot == node_.config().message_session &&
+         security_.tx_epoch(SecurityScope::EndToEnd, tx_.destination, epoch).ok() && epoch == tx_.tx_epoch &&
+         security_.current_rx_epoch(SecurityScope::EndToEnd, tx_.destination, rx_epoch).ok() && rx_epoch == tx_.rx_epoch &&
+         context_usable(security_.context_state(SecurityScope::EndToEnd, tx_.destination));
+}
 std::uint64_t AppObject::bits(const Rx& rx) const noexcept {
   std::uint64_t out = 0;
   for (unsigned i = 0; i < rx.bitmap.size(); ++i) out |= std::uint64_t{rx.bitmap[i]} << (8 * i);
@@ -152,6 +166,9 @@ void AppObject::start_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
   for (auto& record : records_) {
     if (!record.used || !(record.key == k)) continue;
     if (!same_start(record.start, start)) {
+      for (auto& rx : rx_) {
+        if (rx.assembler.active() && rx.key == k) finish_rx(rx, AckStatus::Conflict);
+      }
       queue_ack(k.peer, {k.id, AckStatus::Conflict, 0, 0}, now_ms);
     } else { record.ack_pending = true; }
     return;
@@ -193,11 +210,18 @@ void AppObject::start_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
     queue_ack(k.peer, {k.id, buffer_present ? AckStatus::Busy : AckStatus::NoBuffer, 0, 0}, now_ms); return;
   }
   if (floor == nullptr) { floor = vacant; *floor = {k.peer, k.epoch, 0, k.boot}; }
+  // Routed TTL accounts for time already spent queued and in transit.
+  // The object's remaining lifetime must consume that same elapsed time.
+  const auto elapsed = frame.header.original_lifetime_ms - frame.header.remaining_deadline_ms;
+  if (elapsed >= start.lifetime_ms) {
+    queue_ack(k.peer, {k.id, AckStatus::Expired, 0, 0}, now_ms); return;
+  }
+  const auto deadline = now_ms + start.lifetime_ms - elapsed;
   if (!slot->assembler.begin(slot->storage, {slot->bitmap.data(), slot->bitmap.size()},
-                             start.total, object_wire::kChunkBytes, now_ms + start.lifetime_ms)) return;
+                             start.total, object_wire::kChunkBytes, deadline)) return;
   floor->highest = start.id; floor->boot = k.boot;
   slot->key = k; slot->start = start; slot->progress_ms = now_ms;
-  slot->deadline_ms = now_ms + start.lifetime_ms; slot->record = static_cast<std::uint8_t>(record_index);
+  slot->deadline_ms = deadline; slot->record = static_cast<std::uint8_t>(record_index);
   slot->ready = false;
   records_[record_index] = {k, start, slot->deadline_ms + kRecordSlackMs, AckStatus::Incomplete, 0, true, true};
 }
@@ -235,6 +259,10 @@ void AppObject::ack_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noexce
       frame.header.origin != tx_.destination || frame.header.end_epoch != tx_.rx_epoch ||
       ack.id != tx_.start.id || now_ms >= tx_.deadline_ms ||
       (ack.bitmap & ~tx_.emitted) != 0) return;
+  if (!live_tx()) {
+    finish_tx(ObjectState::Failed, StatusCode::AuthRequired); return;
+  }
+  if (now_ms - tx_.progress_ms >= kNoProgressMs) return;
   if (tx_.destination_boot != 0 && tx_.destination_boot != frame.header.message.session) {
     finish_tx(ObjectState::Failed, StatusCode::AuthRequired); return;
   }
@@ -267,13 +295,11 @@ void AppObject::finish_tx(ObjectState state, StatusCode reason) noexcept {
   tx_ = {};
 }
 bool AppObject::send_frame(FrameType type, NodeId peer, ByteView payload,
-                           MonotonicMs now_ms, MessageId& id) noexcept {
+                           MonotonicMs now_ms, MessageId& id, std::uint32_t lifetime_ms) noexcept {
   if (now_ms < send_after_ms_) return false;
-  if (!node_.send_typed(type, peer, payload, 4000, now_ms, id)) return false;
-  // Conservative LR airtime model: wire envelope + AEAD tags + fixed PHY
-  // cost, at 32 us/byte. Initial app budget is 50 ms/s, burst one frame;
-  // the scheduler charges the same traffic to its existing Work ledger.
-  const MonotonicMs cost_us = (payload.size + 88 + 32 + 96) * 32;
+  if (!node_.send_typed(type, peer, payload, lifetime_ms, now_ms, id)) return false;
+  // Bound queue production as well as physical dispatch, including ACKs.
+  const MonotonicMs cost_us = (payload.size + 88 + 32 + kTxFrameFixedCostBytes) * 32;
   send_after_ms_ = now_ms + (cost_us + 49) / 50;
   return true;
 }
@@ -316,7 +342,8 @@ void AppObject::pump(MonotonicMs now_ms) noexcept {
       (void)object_wire::encode(object_wire::Chunk{tx_.start.id, flight.index, {tx_.data.data + offset, count}},
                                 {bytes.data(), bytes.size()}, size);
     }
-    if (send_frame(type, tx_.destination, {bytes.data(), size}, now_ms, flight.job)) {
+    if (send_frame(type, tx_.destination, {bytes.data(), size}, now_ms, flight.job,
+                   static_cast<std::uint32_t>(std::min<MonotonicMs>(4000, tx_.deadline_ms - now_ms)))) {
       flight.queued = true; ++flight.sends; tx_.ever_sent = true;
       if (flight.index != kManifest) tx_.emitted |= std::uint64_t{1} << flight.index;
     }
@@ -353,7 +380,7 @@ void AppObject::poll(MonotonicMs now_ms) noexcept {
     if (now_ms >= rx.deadline_ms || now_ms - rx.progress_ms >= kNoProgressMs) {
       finish_rx(rx, AckStatus::Expired); continue;
     }
-    if (rx.ready) {
+    if (rx.ready && observer_.object_receive_ready()) {
       const ObjectRxInfo info{rx.key.peer, rx.start.id, rx.key.boot, rx.key.epoch,
                               rx.start.app_tag, rx.start.encoding};
       in_call_ = true; observer_.on_object(info, rx.assembler.data()); in_call_ = false;
@@ -372,12 +399,7 @@ void AppObject::poll(MonotonicMs now_ms) noexcept {
         send_frame(FrameType::AppObjectAck, record.key.peer, {bytes.data(), size}, now_ms, id)) record.ack_pending = false;
   }
   if (tx_.active) {
-    std::uint32_t epoch = node_.config().end_epoch, rx_epoch = 0;
-    if (tx_.self != node_.node_id() || tx_.network != node_.config().network ||
-        tx_.self_boot != node_.config().message_session ||
-        !security_.tx_epoch(SecurityScope::EndToEnd, tx_.destination, epoch) || epoch != tx_.tx_epoch ||
-        !security_.current_rx_epoch(SecurityScope::EndToEnd, tx_.destination, rx_epoch) || rx_epoch != tx_.rx_epoch ||
-        !context_usable(security_.context_state(SecurityScope::EndToEnd, tx_.destination))) {
+    if (!live_tx()) {
       finish_tx(ObjectState::Failed, StatusCode::AuthRequired);
     } else if (now_ms >= tx_.deadline_ms || now_ms - tx_.progress_ms >= kNoProgressMs) {
       finish_tx(ObjectState::Expired, StatusCode::Expired);

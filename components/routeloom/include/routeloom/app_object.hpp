@@ -136,6 +136,7 @@ class AppObject final : public ConfigEndpointSink {
   };
   Key key(const wire::PlainFrame& frame, ObjectId id) const noexcept;
   bool live(const Key& key) const noexcept;
+  bool live_tx() noexcept;
   std::uint64_t bits(const Rx& rx) const noexcept;
   void start_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noexcept;
   void chunk_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noexcept;
@@ -144,7 +145,7 @@ class AppObject final : public ConfigEndpointSink {
   void finish_rx(Rx& rx, object_wire::AckStatus status) noexcept;
   void finish_tx(ObjectState state, StatusCode reason) noexcept;
   bool send_frame(FrameType type, NodeId peer, ByteView payload,
-                  MonotonicMs now_ms, MessageId& id) noexcept;
+                  MonotonicMs now_ms, MessageId& id, std::uint32_t lifetime_ms = 4000) noexcept;
   void pump(MonotonicMs now_ms) noexcept;
 
   MeshNode& node_;
