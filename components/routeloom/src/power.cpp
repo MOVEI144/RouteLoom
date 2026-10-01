@@ -313,6 +313,9 @@ Status PowerCoordinator::begin(const ResetCause cause,
              cause == ResetCause::DeepSleepWake ? "WAKE_DEEP_SLEEP" : "BOOT",
              now_ms);
   resume_flow(cause, elapsed, now_ms);
+  if (storage_impaired_) {
+    return Status::error(StatusCode::RecoveryRequired, "SLEEP_IMAGE_READ_REQUIRED");
+  }
   return Status::success();
 }
 
@@ -320,6 +323,9 @@ Status PowerCoordinator::sleep_prepare(const SleepRequest& request,
                                        const MonotonicMs now_ms) noexcept {
   if (in_callback()) {
     return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
+  }
+  if (storage_impaired_) {
+    return Status::error(StatusCode::RecoveryRequired, "SLEEP_IMAGE_READ_REQUIRED");
   }
   if (!begun_ || !node_.started()) {
     return Status::error(StatusCode::InvalidState, "not running");
@@ -520,6 +526,9 @@ Status PowerCoordinator::wake(const ResetCause cause,
   cause_ = cause;
   transition(PowerState::Resuming, "WAKE", now_ms);
   resume_flow(cause, elapsed, now_ms);
+  if (storage_impaired_) {
+    return Status::error(StatusCode::RecoveryRequired, "SLEEP_IMAGE_READ_REQUIRED");
+  }
   return Status::success();
 }
 
@@ -893,6 +902,9 @@ bool PowerCoordinator::next_image_sequence(std::uint32_t& out) noexcept {
 }
 
 Status PowerCoordinator::commit_image(const PowerImage& image) noexcept {
+  if (storage_impaired_) {
+    return Status::error(StatusCode::RecoveryRequired, "SLEEP_IMAGE_READ_REQUIRED");
+  }
   std::array<std::uint8_t, kPowerImageRecordSize> record{};
   auto status = encode_image(image, record);
   if (!status) {
@@ -900,8 +912,9 @@ Status PowerCoordinator::commit_image(const PowerImage& image) noexcept {
     disk_pending_possible_ = true;
     return status;
   }
-  status = storage_.write(static_cast<std::uint8_t>(image.sequence & 1U),
-                          ByteView{record.data(), record.size()});
+  const std::uint32_t expected_crc = crc32_iso_hdlc(ByteView{record.data(), kImageCrcOffset});
+  const auto slot = static_cast<std::uint8_t>(image.sequence & 1U);
+  status = storage_.write(slot, ByteView{record.data(), record.size()});
   if (!status) {
     // A failed write may still have torn the slot: numbering is consumed so
     // the sequence is never reused, and the slot counts as suspect.
@@ -910,6 +923,15 @@ Status PowerCoordinator::commit_image(const PowerImage& image) noexcept {
     return status;
   }
   image_sequence_ = image.sequence;
+  status = storage_.read(slot, MutableByteView{record.data(), record.size()});
+  std::uint32_t stored_crc = 0;
+  ByteReader crc_reader(ByteView{record.data() + kImageCrcOffset, 4});
+  if (!status || !crc_reader.read_u32(stored_crc) || stored_crc != expected_crc ||
+      crc32_iso_hdlc(ByteView{record.data(), kImageCrcOffset}) != expected_crc) {
+    disk_pending_possible_ = true;
+    storage_impaired_ = true;
+    return status ? Status::error(StatusCode::IntegrityError, "SLEEP_IMAGE_READBACK") : status;
+  }
   image_valid_ = true;
   return Status::success();
 }
@@ -925,6 +947,7 @@ Status PowerCoordinator::load_image(PowerImage& image, bool& found) noexcept {
     const auto status =
         storage_.read(slot, MutableByteView{record.data(), record.size()});
     if (!status) {
+      if (status.code != StatusCode::NotFound) storage_impaired_ = true;
       notify_diagnostic(status.detail);
       continue;
     }
@@ -943,6 +966,10 @@ Status PowerCoordinator::load_image(PowerImage& image, bool& found) noexcept {
       best_sequence = candidate.sequence;
       any = true;
     }
+  }
+  if (storage_impaired_) {
+    disk_pending_possible_ = true;
+    return Status::error(StatusCode::RecoveryRequired, "SLEEP_IMAGE_READ_REQUIRED");
   }
   if (unknown_schema) {
     // An older sibling cannot prove that a newer schema has no pending work.
@@ -981,7 +1008,12 @@ void PowerCoordinator::resume_flow(const ResetCause cause,
 
   PowerImage stored{};
   bool found = false;
-  (void)load_image(stored, found);
+  const Status loaded = load_image(stored, found);
+  if (!loaded && storage_impaired_) {
+    outcome_ = ResumeOutcome::CacheLost;
+    transition(PowerState::Running, "SLEEP_IMAGE_READ_REQUIRED", now_ms);
+    return;
+  }
   const bool usable = found && image_usable(stored);
   if (found && !usable) {
     notify_diagnostic("SLEEP_IMAGE_CONTEXT_MISMATCH");

@@ -130,12 +130,16 @@ Status EspNowPowerPort::enter_sleep() noexcept {
 }
 
 Status EspNowPowerPort::start_discovery(const PowerImage& image) noexcept {
-  (void)image;
-  // Bounded discovery (same channel -> saved candidates -> limited scan) is
-  // not implemented on the ESP-NOW port yet; the failure is explicit so the
-  // coordinator can log it instead of scanning unboundedly.
-  return Status::error(StatusCode::Unsupported,
-                      "bounded discovery not implemented");
+  auto* discovery = runtime_.discovery();
+  if (discovery == nullptr) {
+    return Status::error(StatusCode::Unsupported, "discovery engine not attached");
+  }
+  if (image.channel != 0 && image.channel != runtime_.channel()) {
+    return Status::error(StatusCode::Conflict, "sleep discovery channel changed");
+  }
+  // The existing engine owns the attempt count, backoff and channel scope.
+  // Resume never starts a separate scanner or bypasses authentication.
+  return discovery->begin_discovery(runtime_.now_ms());
 }
 
 }  // namespace routeloom::espnow

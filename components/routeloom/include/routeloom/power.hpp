@@ -403,6 +403,9 @@ class PowerCoordinator {
   // An older slot may still hold pending records (or an uncertain write may
   // have landed): the next phase 1 must dual-write before settling.
   bool disk_pending_possible_{false};
+  // An unread slot may own durable work. Only a fresh boot may retry the
+  // complete read; no sleep image may overwrite it in this incarnation.
+  bool storage_impaired_{false};
   // Settled carry set: previously retained records plus records whose
   // durable ownership this attempt finalized. Independent of the candidate.
   std::array<PendingDeliveryRecord, kPowerPendingCapacity> carry_{};

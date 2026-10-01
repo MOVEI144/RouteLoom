@@ -105,7 +105,7 @@ class MemoryPowerStorage final : public PowerStorage {
         target.size != kPowerImageRecordSize) {
       return Status::error(StatusCode::InvalidArgument, "bad power read");
     }
-    if (read_error) {
+    if (read_error || read_error_slot == slot) {
       return Status::error(StatusCode::StorageFailure, "injected read error");
     }
     std::memcpy(target.data, slots_[slot].data(), target.size);
@@ -169,6 +169,7 @@ class MemoryPowerStorage final : public PowerStorage {
   std::size_t fail_skip_writes{0};
   int last_slot{-1};
   bool read_error{false};
+  int read_error_slot{-1};
 
  private:
   std::array<std::array<std::uint8_t, kPowerImageRecordSize>, kPowerImageSlots>
@@ -5475,9 +5476,58 @@ void test_trusted_sleep_elapsed() {
   CHECK(remaining == 60000 - static_cast<std::uint32_t>(trusted.upper_ms));
 }
 
+void test_unread_sleep_slot_latches_recovery() {
+  for (int failed_slot = 0; failed_slot < kPowerImageSlots; ++failed_slot) {
+    MemoryPowerStorage storage;
+    PowerWorld before(storage);
+    CHECK_OK(before.coordinator.begin(ResetCause::ColdBoot, {}, 0));
+    const MessageId saved = queue_pending(before, 99, true);
+    CHECK_OK(before.coordinator.sleep_prepare(SleepRequest{}, before.now));
+    CHECK(before.pump_until(PowerState::ReadyToSleep));
+    CHECK(std::strcmp(before.node.delivery(saved).reason, "SLEEP_SAVED") == 0);
+    const auto writes = storage.write_calls;
+    storage.read_error_slot = failed_slot;
+    PowerWorld after(storage);
+    CHECK(after.coordinator.begin(ResetCause::DeepSleepWake, {10, 10, true}, 0).code ==
+          StatusCode::RecoveryRequired);
+    storage.read_error_slot = -1;
+    CHECK(after.coordinator.sleep_prepare(SleepRequest{}, 1).code == StatusCode::RecoveryRequired);
+    after.pump(1000);
+    CHECK(storage.write_calls == writes);
+    CHECK(after.events.pending_results.empty());
+    PowerWorld retry(storage);
+    CHECK_OK(retry.coordinator.begin(ResetCause::DeepSleepWake, {10, 10, true}, 0));
+    CHECK(retry.events.pending_results.size() == 1);
+    if (retry.events.pending_results.size() == 1) {
+      CHECK(retry.events.pending_results[0].first == saved);
+      CHECK(retry.events.pending_results[0].second == StatusCode::Ok);
+    }
+  }
+}
+
+void test_sleep_image_readback_failure_refuses_ticket() {
+  MemoryPowerStorage storage;
+  PowerWorld world(storage);
+  CHECK_OK(world.coordinator.begin(ResetCause::ColdBoot, {}, 0));
+  const MessageId pending = queue_pending(world, 99, true);
+  storage.read_error = true;
+  CHECK_OK(world.coordinator.sleep_prepare(SleepRequest{}, world.now));
+  world.pump(1000);
+  CHECK(world.coordinator.state() == PowerState::Running);
+  CHECK(!world.coordinator.ticket().issued);
+  CHECK(std::strcmp(world.node.delivery(pending).reason, "SLEEP_SAVED") != 0);
+  const auto writes = storage.write_calls;
+  storage.read_error = false;
+  CHECK(world.coordinator.sleep_prepare(SleepRequest{}, world.now).code ==
+        StatusCode::RecoveryRequired);
+  CHECK(storage.write_calls == writes);
+}
+
 }  // namespace
 
 int main() {
+  test_unread_sleep_slot_latches_recovery();
+  test_sleep_image_readback_failure_refuses_ticket();
   test_send_lifetime_ceiling();
   test_power_stats_accumulate();
   test_cold_boot_and_errors();
