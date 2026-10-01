@@ -10,8 +10,8 @@
 
 using namespace routeloom;
 namespace {
-// Endpoint boundary tests enter after End verification; actual crypto and
-// radio delivery are covered by the Owner mesh scenarios.
+// Endpoint boundaries include one authenticated driver-queue handoff; radio
+// delivery is covered by the Owner mesh scenarios.
 class Security final : public SecurityProvider {
  public:
   bool ready() const noexcept override { return true; }
@@ -90,21 +90,38 @@ void loan_registration() {
   assert(f.object->register_buffer({f.storage.data(), f.storage.size()}));
 }
 void received_deadline() {
-  Fixture f;
-  assert(f.object->register_buffer({f.storage.data(), f.storage.size()}));
-  const std::uint8_t byte = 0x93;
-  object_wire::Start start{}; start.id = 1; start.total = 1; start.chunks = 1;
-  start.lifetime_ms = 1500;
-  ScopeDigest digest{}; sha256({&byte, 1}, digest);
-  std::copy_n(digest.begin(), start.digest.size(), start.digest.begin());
-  const auto manifest = frame(FrameType::AppObjectStart, start);
-  f.object->on_config_frame(2, manifest, 1000);
-  const auto chunk = frame(FrameType::AppObjectChunk, object_wire::Chunk{1, 0, {&byte, 1}});
-  // The manifest spent 1000 ms in the routed lane: 500 ms remain.
-  f.object->on_config_frame(2, chunk, 1500);
-  f.object->poll(1500);
-  assert(f.observer.received == 0);
-  assert(f.object->quiescent());
+  for (const bool driver_queue : {false, true}) {
+    Fixture f;
+    assert(f.object->register_buffer({f.storage.data(), f.storage.size()}));
+    const std::uint8_t byte = 0x93;
+    object_wire::Start start{}; start.id = 1; start.total = 1; start.chunks = 1;
+    start.lifetime_ms = 1500;
+    ScopeDigest digest{}; sha256({&byte, 1}, digest);
+    std::copy_n(digest.begin(), start.digest.size(), start.digest.begin());
+    auto manifest = frame(FrameType::AppObjectStart, start);
+    const MonotonicMs now = driver_queue ? 1001 : 1000;
+    if (driver_queue) {
+      manifest.header.network = 7;
+      manifest.header.previous_hop = 2; manifest.header.next_hop = 1;
+      manifest.header.message.sequence = 1;
+      manifest.header.remaining_deadline_ms = 4000;
+      wire::EncodedFrame encoded{};
+      assert(wire::encode_new(manifest, f.security, encoded));
+      auto metadata = routeloom_test::sim_rx_metadata(&f.reply, 2);
+      metadata.received_us = 1000;
+      assert(f.node->on_radio_receive(2, encoded.view(), metadata, now));
+      ComponentEvent event{};
+      assert(f.node->take_component_event(event));
+      manifest = event.frame;
+    }
+    f.object->on_config_frame(2, manifest, now);
+    const auto chunk = frame(FrameType::AppObjectChunk, object_wire::Chunk{1, 0, {&byte, 1}});
+    // A 1000 ms delay in either queue leaves 500 ms of object lifetime.
+    f.object->on_config_frame(2, chunk, now + 500);
+    f.object->poll(now + 500);
+    assert(f.observer.received == 0);
+    assert(f.object->quiescent());
+  }
 }
 void terminal_ack_guard() {
   for (int boundary : {0, 1, 2}) {
