@@ -7,6 +7,7 @@ mod group;
 #[cfg(test)]
 mod manifest_check;
 mod nodes;
+mod objects;
 mod observation;
 mod radio_budget;
 mod receive_log;
@@ -929,6 +930,9 @@ struct State {
     /// api1 `group.send`/`group.get` submit and read here, the group lane
     /// thread drives the device exchange and emits `group_settled`.
     group_ops: group::GroupOps,
+    object_ops: objects::ObjectOps,
+    object_log: Mutex<ReceiveLog>,
+    object_ingress: Mutex<objects::IngressAssembly>,
     /// The single owned rollcall run (design-devflow §6.4, D09): the
     /// rollcall lane drives it through `group_ops`; api1 `lab.rollcall.*`
     /// starts, steers and reads it. A State singleton, so a disconnected
@@ -1615,6 +1619,31 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
         // the bounded ring — the lane publishes the transitions instead.
         // group_delivery_v1 0x51 statuses belong to the group lane (same
         // no-mirroring rule: the lane publishes `group_settled` instead).
+        FrameKind::HostOps if body.get(..2) == Some(&[1, 0x86]) => {
+            if let Ok(mut assembly) = state.object_ingress.lock() {
+                if let Some((mut ingress, tag, encoding)) = assembly.fragment(frame.session, body) {
+                    let Ok(session) = state.session.lock() else {
+                        return;
+                    };
+                    if !session.authenticated || session.id != Some(frame.session) {
+                        return;
+                    }
+                    let Some(network) = session.network.filter(|network| *network != 0) else {
+                        return;
+                    };
+                    ingress.network = network;
+                    ingress.gateway = session.node;
+                    drop(session);
+                    if let Ok(mut log) = state.object_log.lock() {
+                        log.ingest_object(ingress, tag, encoding, ms);
+                    }
+                    state.subscriptions.notify();
+                }
+            }
+        }
+        FrameKind::HostOps if body.get(..2) == Some(&[1, 0x84]) => {
+            state.object_ops.reply(frame.request, frame.session, body);
+        }
         FrameKind::HostOps if group::owns(body) => {
             if !state.group_ops.post_status(frame.request, body.to_vec()) {
                 push_event(
@@ -2625,6 +2654,8 @@ fn serve_client(
                 node_table: &state.node_table,
                 config_ops: &state.config_ops,
                 group_ops: &state.group_ops,
+                object_ops: &state.object_ops,
+                object_log: &state.object_log,
                 rollcall: &state.rollcall,
                 telemetry_ops: &state.telemetry_ops,
                 observation_ops: &state.observation_ops,
@@ -3333,6 +3364,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // different op minted by the new boot (RAM-only ids).
         config_ops: dispatch::ConfigOps::with_boot(host_boot),
         group_ops: group::GroupOps::with_boot(host_boot),
+        object_ops: objects::ObjectOps::with_boot(host_boot),
+        object_log: Mutex::new(ReceiveLog::objects(mint_id128())),
+        object_ingress: Mutex::new(objects::IngressAssembly::default()),
         subscriptions: subscribe::SubscriptionHub::with_boot(host_boot),
         config_authority: args.config_authority,
         config_authority_generation: args.config_authority_generation,
