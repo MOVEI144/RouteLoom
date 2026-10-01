@@ -57,13 +57,15 @@ cmake --build build-san
 ctest --test-dir build-san --output-on-failure
 ```
 
-ESP-IDF：
+ESP-IDF（配布既定の MemberEdhoc を build）：
 
 ```bash
 cd firmware/reference_node
-idf.py set-target esp32c3  # or esp32s3 / esp32c5
+idf.py set-target esp32c3  # or esp32s3 / esp32c5 / esp32c6
 idf.py build
 ```
+
+DevRam で試すときは、`set-target` の後、`build` の前に `idf.py menuconfig` を実行し、Security mode を DevRam に変更する。機器固有 identity の provision を省略する場合は開発専用の `CONFIG_ROUTELOOM_DEV_KCONFIG_IDENTITY=y` も明示選択する。起動 log の `security profile: Development` を確認する。
 
 Host：
 
