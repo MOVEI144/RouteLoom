@@ -24,8 +24,9 @@ CI成功はhost/build evidence。実機起動、空中通信、到達距離、�
 
 ## 明示的な非保証
 
-reference／bridge firmware の既定は DevRam（Development）。製品 image の MemberEdhoc（Candidate）既定化は V2-17b で H2 合格の記録を得てから行う。bench firmware は従来どおり MemberEdhoc。起動 log と capabilities は選択された profile を表示する。
-DevRamは共有鍵から導くRAM sessionの開発profileで、機器固有IdentityやEDHOC/RPKを置き換えない。reference firmwareの既定keyを配備に使ってはいけない。
+reference（relay／endpoint）・bridge の配布 image は MemberEdhoc（Candidate）が既定。bench firmware も MemberEdhoc。事務所で機器固有 identity を provision し、Site Authority（`routeloom-host`）の承認を得て参加する。手順は [保守 console と provision](../../host/routeloom-provision/README.md) と [Site Authority](../design/sdk-v1/07-host-api-tooling.md) を読む。この既定化の merge には H2 の Member 全回帰合格記録が必要であり、build 成功だけでは条件を満たさない。
+
+quick start と `examples/` は DevRam（Development）が既定。reference／bridge を quick start に使うときは、`idf.py menuconfig` で `CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y` を明示選択する。DevRam は共有鍵から導く RAM session の開発 profile で、機器固有 Identity や EDHOC/RPK を置き換えない。既定の開発鍵を配備に使ってはいけない。起動 log・Device capabilities・Owner の security profile は DevRam を Development、MemberEdhoc を Candidate と表示し、Production と認定しない。CI は Member image の開発鍵と開発 provider の混入を拒否する。
 
 Wire v2の数値IDとbyte layoutはtest cipher vector付きで凍結済み（v1からepochを32bit、crypto counterを48bitへ改訂。v1で書き込んだ機器はNVS消去が必要）。本番Security Profileとその適用後vectorは未凍結（G-SEC）。
 

@@ -522,8 +522,9 @@ def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
         return [f"missing {p}" for p in missing]
     errors = []
     app_bin = files["bin"].stat().st_size
-    if "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y" in (
-            cell.get("overlay", []) + cell.get("expect", [])):
+    member = "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y" in (
+        cell.get("overlay", []) + cell.get("expect", []))
+    if member:
         # Inspect the linked image, including constants; the quick-start
         # key can survive even when no development symbol is referenced.
         kconfig = (ROOT / "components/routeloom_device/Kconfig").read_text(encoding="utf-8")
@@ -566,6 +567,9 @@ def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
         errors.append(f"RTC/LP RAM used {rtc} B > budget {budget['rtc_used_max']} B "
                       f"(+{RTC_DRIFT} B drift)")
     patterns = data.get("symbols_absent", []) + cell.get("symbols_absent", [])
+    if member:
+        patterns += ["DevGroupProvider", "DevGroupSender", "DevScopeProvider",
+                     "DevMembershipHooks", "DevelopmentPskSecurityProvider", "DevPskAuthenticator"]
     if patterns:
         try:
             symbols = elf_symbols(files["elf"])

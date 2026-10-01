@@ -1795,9 +1795,8 @@ Status EspNowSecurityOwner::send_relay_abort_to_host(
 }
 
 SecurityProfile EspNowSecurityOwner::security_profile() const noexcept {
-  // EXPERIMENTAL until P8 declares production (§15): the node surfaces
-  // SECURITY_PROFILE_EXPERIMENTAL and nothing claims production status.
-  return SecurityProfile::Development;
+  // MemberEdhoc remains Candidate until all production gates are met.
+  return dev_adopted() ? SecurityProfile::Development : SecurityProfile::Candidate;
 }
 
 bool EspNowSecurityOwner::binds_scope() const noexcept {

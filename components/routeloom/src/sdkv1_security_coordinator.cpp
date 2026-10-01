@@ -12,6 +12,11 @@
 #include "routeloom/sdkv1_session_wire.hpp"  // own RLD1 capability word
 #include "routeloom/secure_clear.hpp"
 
+// The firmware build selects one mode; portable host tests retain both.
+#ifndef ROUTELOOM_DEV_RAM
+#define ROUTELOOM_DEV_RAM 1
+#endif
+
 namespace routeloom::sdkv1 {
 namespace {
 
@@ -65,11 +70,15 @@ SecurityCoordinator::SecurityCoordinator(const Deps& deps) noexcept
 }
 
 SecurityCoordinator::~SecurityCoordinator() noexcept {
+#if ROUTELOOM_DEV_RAM
   if (mode_ == CoordinatorMode::Dev) {
     destroy_dev();
   } else {
+#endif
     destroy_small();
+#if ROUTELOOM_DEV_RAM
   }
+#endif
   destroy_workspace();
   if (deps_.sleep_image != nullptr) {
     secure_clear(deps_.sleep_image, sizeof(*deps_.sleep_image));
@@ -81,6 +90,7 @@ SecurityCoordinator::MemberSmallSide::MemberSmallSide(
     rlres1::Environment& rlres1_env, GroupKeyState* group) noexcept
     : authority(aead, port, observer, rlres1_env, group) {}
 
+#if ROUTELOOM_DEV_RAM
 SecurityCoordinator::DevSide::DevSide(const RevocationStore& revocations,
                                        const LocalRevocationStore& local_revocation,
                                        const AuthenticatedPeerView* peers) noexcept
@@ -99,6 +109,7 @@ SecurityCoordinator::DevSide::~DevSide() noexcept {
 DevGroupProvider& SecurityCoordinator::DevSide::group() noexcept {
   return *reinterpret_cast<DevGroupProvider*>(group_box.data());
 }
+#endif
 
 void SecurityCoordinator::destroy_small() noexcept {
   sides_.small.~MemberSmallSide();
@@ -110,6 +121,7 @@ void SecurityCoordinator::create_small() noexcept {
                                       &group_keys_);
 }
 
+#if ROUTELOOM_DEV_RAM
 void SecurityCoordinator::create_dev() noexcept {
   new (&sides_.dev)
       DevSide(*deps_.revocations, *deps_.local_revocation, this);
@@ -121,6 +133,7 @@ void SecurityCoordinator::destroy_dev() noexcept {
 }
 
 DevGroupProvider& SecurityCoordinator::dev_group() noexcept { return dev().group(); }
+#endif
 
 bool SecurityCoordinator::SessionProviderMux::ready() const noexcept {
   return pairwise_.ready() && group().ready();
@@ -357,6 +370,7 @@ Status SecurityCoordinator::step(const CoordinatorEvent& event) noexcept {
 
 Status SecurityCoordinator::adopt_dev(const CoordinatorDevConfig& config,
                                      const MonotonicMs now) noexcept {
+#if ROUTELOOM_DEV_RAM
   if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
   if (mode_ != CoordinatorMode::Fresh) {
     return Status::error(StatusCode::InvalidState, "coordinator already running");
@@ -370,6 +384,11 @@ Status SecurityCoordinator::adopt_dev(const CoordinatorDevConfig& config,
   const Status status = install_dev_config(config, now);
   in_port_ = false;
   return status;
+#else
+  (void)config;
+  (void)now;
+  return Status::error(StatusCode::Unsupported, "DevRam not in this image");
+#endif
 }
 
 Status SecurityCoordinator::take_action(CoordinatorAction& out) noexcept {
@@ -603,6 +622,7 @@ Status SecurityCoordinator::member_discovery_config(DiscoveryConfig& out) noexce
   out.mac = deps_.local_mac;
   out.network = adopted_.network;
   out.network_hint = static_cast<std::uint32_t>(adopted_.network);
+#if ROUTELOOM_DEV_RAM
   if (mode_ == CoordinatorMode::Dev) {
     // Dev-only bit, no member bits: the engine refuses any member/dev
     // mix as Unsupported (never a downgrade), and the Required dev
@@ -612,11 +632,14 @@ Status SecurityCoordinator::member_discovery_config(DiscoveryConfig& out) noexce
     out.scope_provider = &dev().scope;
     out.scope = kDevScopeRef;
   } else {
+#endif
     out.capability_bits = kRld1CapMemberEdhocV1 | kRld1CapMemberResumeV1;
     out.scope_mode = ScopeMode::Required;
     out.scope_provider = &member_scope_;
     out.scope = kMemberScopeRef;
+#if ROUTELOOM_DEV_RAM
   }
+#endif
   out.cookie_bucket_ms = static_cast<std::uint32_t>(MemberCookie::kBucketMs);
   return Status::success();
 }
@@ -3197,6 +3220,7 @@ void SecurityCoordinator::emit_member_action() noexcept {
   emit_action(action);
 }
 
+#if ROUTELOOM_DEV_RAM
 void SecurityCoordinator::abandon_dev_adoption(JoinRecoveryReason reason) noexcept {
   // The member side exists (create_member ran); stop_traffic scrubs the
   // bank and destroys the partially adopted dev side, then the workspace
@@ -3344,6 +3368,8 @@ Status SecurityCoordinator::install_dev_config(const CoordinatorDevConfig& confi
   return Status::success();
 }
 
+#endif
+
 // --- Joiner legs -------------------------------------------------------------------------------
 
 void SecurityCoordinator::drain_joiner(const MonotonicMs now) noexcept {
@@ -3477,13 +3503,17 @@ void SecurityCoordinator::stop_traffic(const bool clear_resume) noexcept {
   sleep_guard_.disarm();
   provider_mux_.set_dev(false);
   provider_mux_.set_dev_group(nullptr);
+#if ROUTELOOM_DEV_RAM
   if (mode_ == CoordinatorMode::Dev) {
     destroy_dev();
   } else {
+#endif
     if (deps_.sleep_image != nullptr) {
       secure_clear(deps_.sleep_image, sizeof(*deps_.sleep_image));
     }
+#if ROUTELOOM_DEV_RAM
   }
+#endif
   restore_holding_ = false;
   restore_done_ = false;
   restore_failed_ = false;
