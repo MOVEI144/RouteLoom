@@ -550,7 +550,8 @@ class SecurityCoordinator final : public BootstrapSink,
   // The site's durable ProxyPolicySet (RLPP1, #176): applied to the member
   // proxy now when it serves `site_id`, and at every adoption of that
   // site before the proxy starts. Another site's proxy stays open.
-  void set_proxy_policy(std::uint64_t site_id, bool zero_touch_open) noexcept;
+  void set_proxy_policy(std::uint64_t site_id, bool zero_touch_open,
+                        const ExpectedJoinList* expected = nullptr, MonotonicMs now = 0) noexcept;
   // Wipes the member site trust held outside the stores (GK scope,
   // discovery membership) and verifies it is gone. Idempotent: safe to
   // re-assert after traffic already stopped.
@@ -1119,6 +1120,9 @@ class SecurityCoordinator final : public BootstrapSink,
   MonotonicMs removal_holdoff_at_{0};
   std::uint64_t removal_watermark_site_id_{0};
   // The site whose stored ProxyPolicySet is closed (0: every proxy open).
+  ExpectedJoinList proxy_expected_{};
+  MonotonicMs proxy_expected_expires_{0};
+  std::uint64_t proxy_expected_site_{0};
   std::uint64_t proxy_closed_site_id_{0};
   std::uint32_t removal_watermark_generation_{0};
   bool cutover_intent_{false};

@@ -216,6 +216,7 @@ class ZtJoinerLink {
   void send_due_chunks(MonotonicMs now_ms, bool bill_round = true) noexcept;
   bool from_proxy(const MacAddress& source, const autonomy::Rld1Envelope& env) const noexcept;
 
+  bool smart_discover_{false};
   ZtJoinerConfig config_{};
   ZtRld1Port& port_;
   EntropySource& entropy_;
@@ -326,6 +327,11 @@ class JoinProxy {
   // hint is unauthenticated: a forged one only reaches the authority,
   // which still decides.
   Status set_zero_touch_open(bool open) noexcept;
+  void set_expected(const ExpectedJoinList* list, MonotonicMs expires) noexcept {
+    offers_.clear();
+    expected_ = list;
+    expected_expires_ = expires;
+  }
   Status set_authority(bool reachable, std::uint8_t hops, MonotonicMs now_ms) noexcept;
   Status set_membership(MembershipState state, MonotonicMs now_ms) noexcept;
 
@@ -350,7 +356,10 @@ class JoinProxy {
   struct PendingOffer {
     MacAddress mac{};
     JoinNonce nonce{};
+    bool smart{false};
+    bool expected{false};
     bool retained{false};  // the DISCOVER preferred this site
+    bool offered{false};   // one positive smart offer holds this bounded row until m1 or expiry
     MonotonicMs due_ms{0};
   };
 
@@ -413,7 +422,7 @@ class JoinProxy {
   void forward_up(JoinAuthPhase phase, std::uint8_t step, std::size_t offset, std::size_t size,
                   MonotonicMs now_ms) noexcept;
   void deliver_down(const RelayObject& object, MonotonicMs now_ms) noexcept;
-  void send_offer(const PendingOffer& offer, MonotonicMs now_ms) noexcept;
+  void send_offer(PendingOffer& offer, MonotonicMs now_ms) noexcept;
   void send_relay_status(const MacAddress& mac, const JoinNonce& nonce, RelayStatusCode status,
                          std::uint32_t retry_after_ms) noexcept;
   void send_rld1_reply(const JoinReply& reply) noexcept;
@@ -441,6 +450,8 @@ class JoinProxy {
   JoinCookieSealer& cookie_;
   EntropySource& entropy_;
   bool open_{false};
+  const ExpectedJoinList* expected_{nullptr};
+  MonotonicMs expected_expires_{0};
   bool zero_touch_open_{true};
   bool reachable_{false};
   std::uint8_t hops_{kZtHopsUnknown};

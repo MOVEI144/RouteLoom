@@ -1955,7 +1955,8 @@ void test_q116_size_budgets() {
   current = "q116_size_budgets";
   // #116 §4.1: the RelayBook stays bounded on every target.
   CHECK(sizeof(JoinRelayGateway) <= 8192);
-  CHECK(sizeof(JoinProxy) <= 1792);
+  // Smart selection adds a borrowed list and its monotonic freshness deadline.
+  CHECK(sizeof(JoinProxy) <= 1816);
   CHECK(sizeof(JoinObjectSlot) <= 1120);
   std::printf("q116 sizes: gateway=%zu proxy=%zu slot=%zu\n", sizeof(JoinRelayGateway),
               sizeof(JoinProxy), sizeof(JoinObjectSlot));

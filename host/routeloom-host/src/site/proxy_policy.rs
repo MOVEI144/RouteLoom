@@ -5,7 +5,8 @@
 //! role (Relay or Gateway) over its authority channel until that member
 //! acknowledges the generation durable, and keeps the acknowledgements in
 //! the site store (`policy_acks`). No lease: a proxy offline keeps its last
-//! applied policy and is sent the current one when its channel returns.
+//! applied open/closed policy and is sent the current one when its channel returns.
+//! Expected-device marks expire unless renewed over the authority channel.
 //! Only an acknowledged generation counts; a sent but unanswered policy is
 //! pending, a proxy without a channel is unknown.
 
@@ -17,6 +18,98 @@ use super::records::{h16, ROLE_GATEWAY, ROLE_RELAY};
 use super::revocation::DISTRIBUTION_BACKOFF_S;
 use super::store::Batch;
 use super::SiteAuthority;
+
+/// Private installation marks, bounded by the existing 64-byte policy TLV.
+#[derive(Default, Eq, PartialEq)]
+pub struct ExpectedJoins {
+    pub marks: [[u8; 16]; 3],
+    pub count: u8,
+    pub ttl_s: u32,
+}
+
+impl std::fmt::Debug for ExpectedJoins {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExpectedJoins")
+            .field("count", &self.count)
+            .field("ttl_s", &self.ttl_s)
+            .finish()
+    }
+}
+
+impl Drop for ExpectedJoins {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.marks.zeroize();
+    }
+}
+
+impl ExpectedJoins {
+    pub(super) fn snapshot(&self) -> Self {
+        Self {
+            marks: self.marks,
+            count: self.count,
+            ttl_s: self.ttl_s,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.count > 3 || self.ttl_s > 86400 || (self.count != 0 && self.ttl_s == 0) {
+            return Err("expected_devices: at most 3 marks, ttl 1..=86400 seconds");
+        }
+        for i in 0..usize::from(self.count) {
+            if self.marks[i] == [0; 16] || self.marks[..i].contains(&self.marks[i]) {
+                return Err("expected_devices: zero or duplicate mark");
+            }
+        }
+        if self.marks[usize::from(self.count)..]
+            .iter()
+            .any(|mark| *mark != [0; 16])
+        {
+            return Err("expected_devices: unused marks must be zero");
+        }
+        Ok(())
+    }
+
+    pub fn tlv(&self) -> Vec<u8> {
+        if self.ttl_s == 0 {
+            return Vec::new();
+        }
+        let mut out = vec![0x18, 6 + 16 * self.count, 1, self.count];
+        out.extend_from_slice(&self.ttl_s.to_be_bytes());
+        for mark in self.marks.iter().take(usize::from(self.count)) {
+            out.extend_from_slice(mark);
+        }
+        out
+    }
+
+    pub fn decode(tlv: &[u8]) -> Option<Self> {
+        if tlv.is_empty() {
+            return Some(Self::default());
+        }
+        if tlv.len() < 8
+            || tlv[0] != 0x18
+            || usize::from(tlv[1]) != tlv.len() - 2
+            || tlv[2] != 1
+            || tlv[3] > 3
+            || tlv.len() != 8 + 16 * usize::from(tlv[3])
+        {
+            return None;
+        }
+        let mut out = Self {
+            count: tlv[3],
+            ttl_s: u32::from_be_bytes(tlv[4..8].try_into().ok()?),
+            ..Self::default()
+        };
+        if out.ttl_s == 0 {
+            return None;
+        }
+        for (i, mark) in tlv[8..].chunks_exact(16).enumerate() {
+            out.marks[i].copy_from_slice(mark);
+        }
+        out.validate().ok()?;
+        Some(out)
+    }
+}
 
 /// Resend spacing while a proxy has not acknowledged the current policy.
 const POLICY_RESEND_MS: u64 = 5_000;
@@ -56,16 +149,20 @@ impl SiteAuthority {
         let Ok(tail) = (ProxyPolicySet {
             generation,
             zero_touch_open: self.policy.zero_touch_open,
-            tlv: Vec::new(),
+            tlv: self.policy.expected.tlv(),
         })
         .encode() else {
             return;
         };
+        let tail = zeroize::Zeroizing::new(tail);
         let due: Vec<u64> = self
             .devices
             .values()
             .filter(|row| row.member && is_proxy(row.role))
-            .filter(|row| self.policy_applied.get(&row.node).copied().unwrap_or(0) < generation)
+            .filter(|row| {
+                self.policy.expected.ttl_s != 0
+                    || self.policy_applied.get(&row.node).copied().unwrap_or(0) < generation
+            })
             .filter(|row| {
                 self.policy_retry
                     .get(&row.node)
@@ -84,7 +181,13 @@ impl SiteAuthority {
             let sent = transport.send_policy(node, &tail);
             let attempts = self.policy_retry.get(&node).map_or(0, |(_, n)| *n);
             let wait = if sent {
-                POLICY_RESEND_MS
+                if self.policy_applied.get(&node).copied() == Some(generation)
+                    && self.policy.expected.ttl_s != 0
+                {
+                    (u64::from(self.policy.expected.ttl_s) * 500).max(1)
+                } else {
+                    POLICY_RESEND_MS
+                }
             } else {
                 let level = (attempts as usize).min(DISTRIBUTION_BACKOFF_S.len() - 1);
                 DISTRIBUTION_BACKOFF_S[level].saturating_mul(1000)
@@ -151,7 +254,13 @@ impl SiteAuthority {
             );
         }
         if ack.generation >= self.policy.policy_generation {
-            self.policy_retry.remove(&device);
+            if self.policy.expected.ttl_s == 0 {
+                self.policy_retry.remove(&device);
+            } else {
+                let wait = (u64::from(self.policy.expected.ttl_s) * 500).max(1);
+                self.policy_retry
+                    .insert(device, (self.join_mono_ms.saturating_add(wait), 0));
+            }
         }
     }
 

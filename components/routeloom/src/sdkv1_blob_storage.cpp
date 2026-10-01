@@ -172,17 +172,19 @@ Status ProxyPolicyStore::load(const std::uint64_t site_id, ProxyPolicyRecord& ou
   Status status = blobs_.blob_size(kProxyPolicyKey, size, present);
   if (!status) return status;
   if (!present) return Status::success();
-  if (size != kProxyPolicyRecordLen) {
+  if (size != 60 && size != kProxyPolicyRecordLen) {
     return Status::error(StatusCode::IntegrityError, "rlpp1 size");
   }
   std::array<std::uint8_t, kProxyPolicyRecordLen> bytes{};
   std::size_t read_len = 0;
-  status = blobs_.blob_read(kProxyPolicyKey, MutableByteView{bytes.data(), bytes.size()}, read_len);
-  if (!status) return status;
-  if (read_len != bytes.size()) {
+  status = blobs_.blob_read(kProxyPolicyKey, MutableByteView{bytes.data(), size}, read_len);
+  if (!status) { secure_clear(bytes); return status; }
+  if (read_len != size) {
+    secure_clear(bytes);
     return Status::error(StatusCode::IntegrityError, "rlpp1 read length");
   }
-  status = proxy_policy_record_decode(ByteView{bytes.data(), bytes.size()}, out);
+  status = proxy_policy_record_decode(ByteView{bytes.data(), size}, out);
+  secure_clear(bytes);
   if (!status) return status;
   found = out.site_id == site_id;
   if (!found) out = ProxyPolicyRecord{};
@@ -192,14 +194,17 @@ Status ProxyPolicyStore::load(const std::uint64_t site_id, ProxyPolicyRecord& ou
 Status ProxyPolicyStore::commit(const ProxyPolicyRecord& record) noexcept {
   std::array<std::uint8_t, kProxyPolicyRecordLen> bytes{};
   Status status = proxy_policy_record_encode(record, bytes);
-  if (!status) return status;
+  if (!status) { secure_clear(bytes); return status; }
   status = blobs_.blob_write(kProxyPolicyKey, ByteView{bytes.data(), bytes.size()});
+  secure_clear(bytes);
   if (!status) return status;
   // Success only once the readback matches what was written.
   ProxyPolicyRecord stored{};
   bool found = false;
   if (!load(record.site_id, stored, found) || !found || stored.generation != record.generation ||
-      stored.zero_touch_open != record.zero_touch_open || stored.content != record.content) {
+      stored.zero_touch_open != record.zero_touch_open || stored.content != record.content ||
+      stored.expected.count != record.expected.count || stored.expected.ttl_s != record.expected.ttl_s ||
+      stored.expected.marks != record.expected.marks) {
     return Status::error(StatusCode::StorageFailure, "rlpp1 readback");
   }
   return Status::success();
@@ -223,13 +228,13 @@ Status JoinPolicyStore::load(JoinPolicy& out, std::uint32_t& revision) noexcept 
   bool present = false;
   Status status = blobs_.blob_size(kJoinPolicyKey, size, present);
   if (!status || !present) return status;
-  if (size != kJoinPolicyRecordLen) return Status::error(StatusCode::IntegrityError, "rljp1 size");
+  if (size != 40 && size != kJoinPolicyRecordLen) return Status::error(StatusCode::IntegrityError, "rljp1 size");
   std::array<std::uint8_t, kJoinPolicyRecordLen> bytes{};
   std::size_t read_len = 0;
-  status = blobs_.blob_read(kJoinPolicyKey, MutableByteView{bytes.data(), bytes.size()}, read_len);
+  status = blobs_.blob_read(kJoinPolicyKey, MutableByteView{bytes.data(), size}, read_len);
   if (!status) return status;
-  if (read_len != bytes.size()) return Status::error(StatusCode::IntegrityError, "rljp1 read length");
-  return join_policy_record_decode(ByteView{bytes.data(), bytes.size()}, out, revision);
+  if (read_len != size) return Status::error(StatusCode::IntegrityError, "rljp1 read length");
+  return join_policy_record_decode(ByteView{bytes.data(), size}, out, revision);
 }
 
 Status JoinPolicyStore::commit(const JoinPolicy& policy, const std::uint32_t revision) noexcept {

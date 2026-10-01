@@ -68,7 +68,7 @@ class CallbackScope {
 };
 
 // A request_join ends here at the latest (a join attempt and its retries).
-constexpr std::uint32_t kJoinOperationMs = 60000;
+
 
 std::uint16_t membership_cause(const MembershipStage stage) noexcept {
   switch (stage) {
@@ -774,6 +774,15 @@ void Device::on_restart(void* self, const bool leave) noexcept {
   if (device.operation_ == Operation::Leave) device.finish_operation(ROUTELOOM_REASON_LEFT);
 }
 
+Status Device::join_mark(sdkv1::JoinMark& out) noexcept {
+  out = {};
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (stores_ == nullptr || !stores_->identity().has_identity()) {
+    return Status::error(StatusCode::InvalidState, "identity unavailable");
+  }
+  return sdkv1::identity_join_mark(stores_->identity().identity(), out);
+}
+
 Status Device::request_join(OperationId& operation) noexcept {
   operation = 0;
   if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
@@ -793,7 +802,7 @@ Status Device::request_join(OperationId& operation) noexcept {
   operation_denies_ = joiner.counters.denies;
   operation_pendings_ = joiner.counters.pendings;
   operation_left_member_ = owner_->coordinator().mode() != sdkv1::CoordinatorMode::Member;
-  operation_deadline_ms_ = now_ms + kJoinOperationMs;
+  operation_deadline_ms_ = now_ms + search_ms_;
   if (++operation_id_ == 0) ++operation_id_;
   operation_ = Operation::Join;
   operation = operation_id_;
@@ -828,8 +837,17 @@ Status Device::apply_join_policy(const JoinPolicy& policy) noexcept {
   timing.avoid_blocked_ms = policy.avoid_blocked_s * 1000U;
   timing.retry_max_ms = policy.retry_max_s * 1000U;
   timing.start_jitter_ms = policy.start_jitter_ms;
+  timing.smart_join = policy.smart_join;
+  timing.boot_join = policy.boot_join;
+  timing.same_site_only = policy.same_site_only;
+  timing.listen_ms = policy.listen_ms;
+  timing.search_ms = policy.search_ms;
   const Status status = owner_->apply_join_policy(timing, policy.removal_holdoff_s * 1000U);
-  if (status) isolation_notice_ms_ = policy.isolation_notice_s * 1000U;
+  if (status) {
+    isolation_notice_ms_ = policy.isolation_notice_s * 1000U;
+    smart_join_ = policy.smart_join;
+    search_ms_ = policy.search_ms;
+  }
   return status;
 }
 
@@ -974,7 +992,12 @@ void Device::update_connectivity(const MonotonicMs now_ms) noexcept {
     }
   } else if (state == Connectivity::Isolated && isolation_notice_ms_ != 0 && !isolation_noticed_ &&
              now_ms - connectivity_since_ms_ >= isolation_notice_ms_) {
-    // JoinPolicy: a long isolation is reported once; it never leaves.
+    // An isolation trigger only verifies the retained site; automatic
+    // switching while retaining membership requires A2 (#196b).
+    if (smart_join_ && operation_ == Operation::None) {
+      OperationId operation = 0;
+      (void)request_join(operation);
+    }
     isolation_noticed_ = true;
     if (device_observer_ != nullptr) {
       ConnectivitySnapshot snapshot = connectivity();

@@ -1,0 +1,15 @@
+{
+  "avoid0": 0,
+  "avoid1": 0,
+  "body_hex": "040300000000000149746ee20000000000000000000000002ba5e460cd3b818348abba42e668e2f3",
+  "claimed_node": 1736447835066146335,
+  "codec": "zt_discover_frame",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "frame_hex": "524c44310101002c005400000000000018191a1b1c1d1e1f101112131415161718191a1b1c1d1e1f00000000040300000000000149746ee20000000000000000000000002ba5e460cd3b818348abba42e668e2f3",
+  "name": "zt_smart_discover",
+  "nonce_hex": "101112131415161718191a1b1c1d1e1f",
+  "org_hint": 1232367330,
+  "preferred_site_hint": 0,
+  "profile_bits": 1
+}

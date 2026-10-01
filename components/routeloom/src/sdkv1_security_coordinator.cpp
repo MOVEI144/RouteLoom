@@ -1060,7 +1060,7 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
     sat_inc(counters_.demux_drops);
     return Status::success();
   }
-  // Discover/Offer split by body version: ZT v3 to the Joiner (ZT mode
+  // Discover/Offer split by body version: ZT v3/v4 to the Joiner (ZT mode
   // only), member scope to discovery (member mode only).
   if (env.kind == FrameType::Discover || env.kind == FrameType::Offer) {
     if (zt_rld1_frame(env)) {
@@ -2425,6 +2425,9 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
     stop.op = GroupKeyState::Op::Stop;
     (void)group_keys_.advance(stop, now);
   }
+  secure_clear(&proxy_expected_, sizeof(proxy_expected_));
+  proxy_expected_expires_ = 0;
+  proxy_expected_site_ = 0;
   destroy_workspace();  // wipes the live side (joiner or member)
   // Leaving Dev rebuilds the small side (stop_traffic above destroyed
   // the dev side); everywhere else it never left.
@@ -2465,11 +2468,19 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
 // --- Authority channel (G-SEC P5) ----------------------------------------------------------------
 
 void SecurityCoordinator::set_proxy_policy(const std::uint64_t site_id,
-                                           const bool zero_touch_open) noexcept {
+                                           const bool zero_touch_open, const ExpectedJoinList* expected,
+                                           const MonotonicMs now) noexcept {
+  secure_clear(&proxy_expected_, sizeof(proxy_expected_));
+  if (expected != nullptr) proxy_expected_ = *expected;
+  proxy_expected_site_ = site_id;
+  const MonotonicMs lifetime = proxy_expected_.ttl_s * 1000ULL;
+  proxy_expected_expires_ = expected == nullptr ? 0 :
+      (now > UINT64_MAX - lifetime ? UINT64_MAX : now + lifetime);
   proxy_closed_site_id_ = zero_touch_open ? 0 : site_id;
   if (mode_ == CoordinatorMode::Member && member_valid_ && deps_.site != nullptr &&
       deps_.site->has_site() && deps_.site->site().site_id == site_id) {
     (void)member().proxy.set_zero_touch_open(zero_touch_open);
+    member().proxy.set_expected(&proxy_expected_, proxy_expected_expires_);
   }
 }
 
@@ -3170,6 +3181,12 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
   member().proxy.set_policy(profile::kJoinProxy &&
                             (site.role & (kMemberRoleRelay | kMemberRoleGateway)) != 0);
   member().proxy.set_zero_touch_open(proxy_closed_site_id_ != site.site_id);
+  if (proxy_expected_site_ != site.site_id) {
+    secure_clear(&proxy_expected_, sizeof(proxy_expected_));
+    proxy_expected_expires_ = 0;
+    proxy_expected_site_ = 0;
+  }
+  member().proxy.set_expected(&proxy_expected_, proxy_expected_expires_);
   member().gateway_active = profile::kGateway && (site.role & kMemberRoleGateway) != 0;
   if (member().gateway_active) {
     member().proxy.set_authority(true, 0, now);
@@ -3533,6 +3550,11 @@ Status SecurityCoordinator::apply_join_policy(const JoinerConfig& policy,
   next.avoid_blocked_ms = policy.avoid_blocked_ms;
   next.retry_max_ms = policy.retry_max_ms;
   next.start_jitter_ms = policy.start_jitter_ms;
+  next.smart_join = policy.smart_join;
+  next.boot_join = policy.boot_join;
+  next.same_site_only = policy.same_site_only;
+  next.listen_ms = policy.listen_ms;
+  next.search_ms = policy.search_ms;
   if (mode_ == CoordinatorMode::ZeroTouch) {
     const Status applied = joiner().apply_policy(next);
     if (!applied) return applied;
