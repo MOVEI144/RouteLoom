@@ -203,6 +203,8 @@ RTC_DATA_ATTR routeloom::sdkv1::RtcSessionImage s_rtc_hold{};
 class FailStreakClearOnSleep final : public routeloom::espnow::PreSleepHook {
  public:
   void on_pre_sleep() noexcept override {
+    s_sleep_marker = kSleepMarkerValue;
+    s_sleep_programmed_ms = CONFIG_ROUTELOOM_SLEEP_DURATION_MS;
     routeloom::fail_streak_pre_sleep(s_fail);
   }
 };
@@ -716,8 +718,17 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   static EspNowPowerPort owner_power_port(runtime);
   static FailStreakClearOnSleep owner_streak_clear;
   owner_power_port.set_pre_sleep_hook(&owner_streak_clear);
-  bool owner_restore_settled = false;
-  bool owner_sleep_parked = false;
+  bool owner_restore_settled = config.security == DeviceSecurity::DevRam;
+  bool power_bound = false;
+  bool sleep_requested = false;
+  static espnow::NvsBlobNamespace power_namespace;
+  const Status power_open = power_namespace.open(espnow::kSecurityNvsPartition, "rlpower");
+  if (!power_open) fail(power_open.detail);
+  static sdkv1::BlobPowerStorage power_storage(power_namespace);
+  static NullPowerEvents power_events;
+  static PowerCoordinator power(PowerConfig{30000}, node, owner_power_port, power_storage,
+                                power_events);
+  owner_power_port.bind_owner(*owner_, &owner_rtc_port);
   const std::int64_t owner_prepare_at_us =
       esp_timer_get_time() + static_cast<std::int64_t>(CONFIG_ROUTELOOM_SLEEP_AFTER_MS) * 1000LL;
   const std::int64_t owner_stop_at_us = owner_prepare_at_us + 30000000LL;
@@ -746,7 +757,9 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   }
 #endif
   // Boot complete: every fallible startup allocation precedes this mark.
+#if !CONFIG_ROUTELOOM_DEEP_SLEEP
   fail_streak_runtime_started(s_fail);
+#endif
 #if CONFIG_ROUTELOOM_TRACE && CONFIG_ROUTELOOM_ROLE_GATEWAY
   MonotonicMs last_usb_trace_ms = 0;
 #endif
@@ -795,50 +808,37 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
         }
       }
     }
-    // Sleep entry: park the security leg, save the retained image over the
-    // live parent binding, then enter deep sleep through the power port
-    // (radio stop + pre-sleep hook). Busy re-pumps against the drain
-    // deadline; a save refusal without an image sleeps cold with the marker
-    // clear. The Owner admits sleep only after node deliveries, group holds
-    // and radio work drained as well as its security workspace.
-    if (esp_timer_get_time() >= owner_prepare_at_us) {
-      if (!owner_sleep_parked &&
-          owner_->prepare_sleep(monotonic_now_ms(), esp_timer_get_time() >= owner_stop_at_us)) {
-        owner_sleep_parked = true;
+    if (!power_bound && owner_restore_settled && node.started()) {
+      const MonotonicMs awake_ms = monotonic_now_ms();
+      const std::uint32_t awake32 =
+          awake_ms > UINT32_MAX ? UINT32_MAX : static_cast<std::uint32_t>(awake_ms);
+      const auto elapsed = classify_sleep_elapsed(
+          owner_deep_wake, owner_timer_wake, owner_boot_marked, owner_programmed_ms,
+          bound_sleep_elapsed_upper_ms(owner_deep_wake, owner_timer_wake, owner_boot_marked,
+                                       owner_programmed_ms, awake32));
+      const Status bound = bind_sleep(power, owner_boot_cause, elapsed, awake_ms);
+      if (!bound) fail(bound.detail);
+      power_bound = true;
+    }
+    // The demo has a finite radio-on window even when no parent/adoption
+    // completes. A failed drain or commit takes the bounded fault backoff.
+    if (esp_timer_get_time() >= owner_stop_at_us) fail("sleep radio-on budget exhausted");
+    if (power_bound && esp_timer_get_time() >= owner_prepare_at_us) {
+      if (!sleep_requested) {
+        SleepRequest request{};
+        request.wake.wake_after_ms = CONFIG_ROUTELOOM_SLEEP_DURATION_MS;
+        const Status prepared = prepare_sleep(request);
+        if (!prepared) fail(prepared.detail);
+        sleep_requested = true;
+      } else if (power.state() == PowerState::Running) {
+        fail(power.stats().last_abort);
       }
-      if (owner_sleep_parked) {
-        NodeId parent = kInvalidNodeId;
-        routeloom::MacAddress parent_mac{};
-        BindingId parent_binding{kInvalidBindingId};
-        Status saved = Status::error(StatusCode::NotFound, "no parent link");
-        if (node.sleep_work_pending()) {
-          saved = Status::error(StatusCode::Busy, "node has sleep work");
-        } else if (coordinator.first_live_peer(SecurityScope::Link, parent) &&
-                   owner_->discovery() != nullptr &&
-                   owner_->discovery()->binding_of(parent, parent_binding) &&
-                   owner_->discovery()->mac_of(parent, parent_mac)) {
-          saved = coordinator.save_sleep_image(owner_rtc_port, parent, parent_mac,
-                                               parent_binding.value, monotonic_now_ms());
-        }
-        if (saved.code == StatusCode::Busy) {
-          // New work landed after the park: unpark and keep pumping.
-          owner_sleep_parked = false;
-          (void)owner_->wake(monotonic_now_ms());
-        } else {
-          if (saved) {
-            s_sleep_marker = kSleepMarkerValue;
-            s_sleep_programmed_ms = CONFIG_ROUTELOOM_SLEEP_DURATION_MS;
-          }
-          WakePlan plan{};
-          plan.wake_after_ms = CONFIG_ROUTELOOM_SLEEP_DURATION_MS;
-          if (!owner_power_port.configure_wake(plan)) fail("owner sleep wakeup refused");
-          (void)owner_power_port.enter_sleep();
-          // enter_sleep does not return on silicon; a return means no sleep
-          // happened — never leave the marker armed for the reset path.
-          s_sleep_marker = 0;
-          s_sleep_programmed_ms = 0;
-          fail("owner sleep entry returned");
-        }
+      const SleepTicket ticket = sleep_ticket();
+      if (ticket.issued) {
+        const Status entered = enter_sleep(ticket);
+        s_sleep_marker = 0;
+        s_sleep_programmed_ms = 0;
+        fail(entered ? "sleep entry returned" : entered.detail);
       }
     }
 #endif

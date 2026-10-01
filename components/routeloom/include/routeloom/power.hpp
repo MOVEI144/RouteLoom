@@ -130,6 +130,11 @@ struct WakePlan {
 class PowerPort {
  public:
   virtual ~PowerPort() = default;
+  // Park non-node work before persistence. Busy retains the drain until
+  // its deadline; an error aborts without settling any live delivery.
+  virtual Status prepare_sleep(MonotonicMs) noexcept { return Status::success(); }
+  // Undo the park on every aborted attempt, including a failed commit.
+  virtual void abort_sleep(MonotonicMs) noexcept {}
   // Fill peers[] and channel with the platform's current peer cache.
   virtual Status capture_cache(PowerImage& image) noexcept = 0;
   // Stop the radio driver so no new TX/RX can start. MeshNode work has
@@ -295,6 +300,7 @@ class PowerCoordinator {
               MonotonicMs now_ms) noexcept;
 
   void poll(MonotonicMs now_ms) noexcept;
+  MonotonicMs next_deadline(MonotonicMs now_ms) const noexcept;
 
   // Application events (GPIO, sensor work, host request) invalidate tickets
   // and abort an active sleep attempt at once; without an attempt only the
@@ -310,6 +316,7 @@ class PowerCoordinator {
   ResumeOutcome resume_outcome() const noexcept { return outcome_; }
   const SleepTicket& ticket() const noexcept { return ticket_; }
   bool ticket_valid(const SleepTicket& ticket) const noexcept;
+  bool owns_node(const MeshNode& node) const noexcept { return &node == &node_; }
 
  private:
   // Marks one PowerEvents notification on the stack: mutating calls made

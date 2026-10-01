@@ -4,8 +4,11 @@
 
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/power.hpp"
+#include "routeloom/sdkv1_session_rtc.hpp"
 
 namespace routeloom::espnow {
+
+class EspNowSecurityOwner;
 
 // Point-of-no-return notification inside EspNowPowerPort::enter_sleep():
 // fired after the Wi-Fi driver is stopped, immediately before
@@ -28,6 +31,10 @@ class PreSleepHook {
 class EspNowPowerPort final : public PowerPort {
  public:
   explicit EspNowPowerPort(EspNowRuntime& runtime) noexcept : runtime_(runtime) {}
+  void bind_owner(EspNowSecurityOwner& owner, sdkv1::RtcSessionPort* rtc = nullptr) noexcept {
+    owner_ = &owner;
+    rtc_ = rtc;
+  }
 
   // Optional last-instant observer; see PreSleepHook. Not owned.
   void set_pre_sleep_hook(PreSleepHook* hook) noexcept {
@@ -35,6 +42,8 @@ class EspNowPowerPort final : public PowerPort {
   }
 
   Status capture_cache(PowerImage& image) noexcept override;
+  Status prepare_sleep(MonotonicMs now_ms) noexcept override;
+  void abort_sleep(MonotonicMs now_ms) noexcept override;
   Status quiesce_radio() noexcept override;
   Status start_radio(const PowerImage* image) noexcept override;
   Status configure_wake(const WakePlan& plan) noexcept override;
@@ -44,6 +53,9 @@ class EspNowPowerPort final : public PowerPort {
  private:
   EspNowRuntime& runtime_;
   PreSleepHook* pre_sleep_hook_{nullptr};
+  EspNowSecurityOwner* owner_{nullptr};
+  sdkv1::RtcSessionPort* rtc_{nullptr};
+  bool parked_{false};
   bool quiesced_{false};
 };
 

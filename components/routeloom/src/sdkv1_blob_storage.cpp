@@ -5,6 +5,31 @@
 #include <cstring>
 
 namespace routeloom::sdkv1 {
+
+Status BlobPowerStorage::read(const std::uint8_t slot, const MutableByteView target) noexcept {
+  if (slot >= kPowerImageSlots || target.data == nullptr || target.size != kPowerImageRecordSize) {
+    return Status::error(StatusCode::InvalidArgument, "power slot shape");
+  }
+  const char* key = slot == 0 ? "p0" : "p1";
+  std::size_t size = 0;
+  bool found = false;
+  Status status = blobs_.blob_size(key, size, found);
+  if (!status) return status;
+  if (!found) return Status::error(StatusCode::NotFound, "power slot absent");
+  if (size != target.size) return Status::error(StatusCode::IntegrityError, "power slot size");
+  std::size_t read = 0;
+  status = blobs_.blob_read(key, target, read);
+  if (!status) return status;
+  return read == target.size ? Status::success()
+                             : Status::error(StatusCode::IntegrityError, "power slot short read");
+}
+
+Status BlobPowerStorage::write(const std::uint8_t slot, const ByteView data) noexcept {
+  if (slot >= kPowerImageSlots || data.data == nullptr || data.size != kPowerImageRecordSize) {
+    return Status::error(StatusCode::InvalidArgument, "power slot shape");
+  }
+  return blobs_.blob_write(slot == 0 ? "p0" : "p1", data);
+}
 namespace {
 
 constexpr std::uint8_t kErasedFill = 0xFFU;

@@ -1,5 +1,6 @@
 #include "routeloom/power.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
@@ -565,7 +566,12 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
     case PowerState::Draining: {
       node_.poll(now_ms);
       if (node_.quiesced() || now_ms >= drain_deadline_ms_) {
-        settle_current_attempt(now_ms);
+        const Status ready = port_.prepare_sleep(now_ms);
+        if (ready) {
+          settle_current_attempt(now_ms);
+        } else if (ready.code != StatusCode::Busy || now_ms >= drain_deadline_ms_) {
+          abort_to_running(ready.detail, ready.code, now_ms);
+        }
       }
       break;
     }
@@ -600,11 +606,28 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
   }
 }
 
+MonotonicMs PowerCoordinator::next_deadline(const MonotonicMs now_ms) const noexcept {
+  if (!begun_) return UINT64_MAX;
+  if (state_ == PowerState::ReadyToSleep) return ticket_valid(ticket_) ? UINT64_MAX : now_ms;
+  if (state_ == PowerState::Sleeping || state_ == PowerState::Persisting) return UINT64_MAX;
+  MonotonicMs due = node_.next_deadline(now_ms);
+  if (state_ == PowerState::Draining) {
+    // The platform park may be waiting for an engine without a deadline.
+    const MonotonicMs retry = now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2;
+    due = std::min(due, std::min(drain_deadline_ms_, retry));
+  } else if (state_ == PowerState::Resuming) {
+    due = std::min(due, resume_deadline_ms_);
+  }
+  return std::max(due, now_ms);
+}
+
 void PowerCoordinator::start_prepare(const SleepRequest& request,
                                      const MonotonicMs start_at) noexcept {
   request_ = request;
   node_.set_draining(true);
-  drain_deadline_ms_ = start_at + config_.drain_timeout_ms;
+  drain_deadline_ms_ = start_at > UINT64_MAX - config_.drain_timeout_ms
+                           ? UINT64_MAX
+                           : start_at + config_.drain_timeout_ms;
   sleep_image_armed_ = false;
   transition(PowerState::Draining, "SLEEP_PREPARE", start_at);
 }
@@ -1010,6 +1033,12 @@ void PowerCoordinator::resume_flow(const ResetCause cause,
   bool found = false;
   const Status loaded = load_image(stored, found);
   if (!loaded && storage_impaired_) {
+    // Recovery refuses the image, not the live radio. An in-process wake
+    // must undo quiescence without installing any unread cache or pending.
+    const Status radio = port_.start_radio(nullptr);
+    if (!radio) notify_diagnostic(radio.detail);
+    if (!node_.started()) (void)node_.start(now_ms);
+    (void)node_.set_draining(false);
     outcome_ = ResumeOutcome::CacheLost;
     transition(PowerState::Running, "SLEEP_IMAGE_READ_REQUIRED", now_ms);
     return;
@@ -1088,7 +1117,9 @@ void PowerCoordinator::resume_flow(const ResetCause cause,
     return;
   }
   confirm_baseline_ = node_.rx_generation();
-  resume_deadline_ms_ = now_ms + config_.resume_confirm_ms;
+  resume_deadline_ms_ = now_ms > UINT64_MAX - config_.resume_confirm_ms
+                            ? UINT64_MAX
+                            : now_ms + config_.resume_confirm_ms;
   // Stay RESUMING: poll() confirms saved peers inside the window or starts
   // bounded discovery on expiry.
 }
@@ -1195,6 +1226,7 @@ void PowerCoordinator::abort_to_running(const char* reason, const StatusCode cod
     radio_quiesced_ = false;
   }
   node_.set_draining(false);
+  port_.abort_sleep(now_ms);
   const PowerState from = state_;
   state_ = PowerState::Running;
   awake_entered_ms_ = now_ms;

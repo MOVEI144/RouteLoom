@@ -52,6 +52,9 @@ ESP-IDF の機器は `components/routeloom_device` の `routeloom::Device` を�
 | `request_join(op)` | 未所属：zero-touch の scan の待ちを今終える（避ける一覧は守る）。所属済み：既存の所属を site に再検証させる。結果は `on_operation`（JOINED／JOIN_DENIED／JOIN_PENDING／JOIN_TIMEOUT（60 s）／RECOVERY_REQUIRED）。DevRam は Unsupported |
 | `leave(op)` | RLX1 に LocalLeave の意図（schema 2）を書いてから消す。消すのは rlsite・rlrevo・rlres2・受付方針と RAM の session、残すのは本人（RLI1）・rlboot・rlcfg・rlkeys・JoinPolicy。自分から離れたので holdoff も RLV1 も残さない。意図の保存後は戻る前に新規受付と送信を止める。消去の失敗は Recovery と RECOVERY_REQUIRED で通知し、耐久 intent は再起動から再開できる。未送信の仕事は `CANCELLED_LEAVE`、送信済みは Indeterminate で終わる。どの段で電源が切れても次の起動で先へ進めて完了する。完了すると `on_membership(LEFT)` と `on_operation(LEFT)` を出して未所属で再起動する。旧現場への通知はしない（host の台帳は変えない） |
 | `set_join_policy(policy, expected_revision, revision)`／`join_policy(policy, revision)` | 下の JoinPolicy。範囲外は InvalidArgument、revision の不一致は Conflict。RLJP1（rlmaint の `j0`）に書いて読み戻してから次の判断に効かせる。再起動と leave の後も残る |
+| `bind_sleep(power, cause, elapsed, now)` | firmware は ROUTELOOM_DEEP_SLEEP の構成のみ有効。`mesh()` と同じ MeshNode を持つ caller-owned PowerCoordinator を adoption 後に一度だけ接続する。Owner-aware PowerPort と耐久 PowerStorage／PowerEvents は呼出元が保有し、Device より長く生存させる。未読 slot の RecoveryRequired は接続を解除せず保持する |
+| `prepare_sleep(request)`／`sleep_ticket()`／`enter_sleep(ticket)`／`abort_sleep()` | DevRam／Member 共通の二段階 sleep。step が security park と耐久 pending の精算を駆動し、commit／readback と radio quiesce 後に ticket を返す。post／受信待ち／radio 世代変更は entry 前に ticket を無効化する。未接続は Unsupported |
+| `wake(cause, elapsed, now)`／`wake_info()` | simulation の in-process wake と ResumeOutcome。実機の再起動では bind_sleep の begin 経路を使う。Member の RTC session image と耐久 pending image の形式は変えない |
 | `capabilities()` | 役割、MemberEdhoc か、`security_profile`（DevRam は Development、MemberEdhoc は Candidate）、USB gateway、payload の上限など |
 
 `DeviceObserver` の `on_membership(snapshot, cause)` と `on_connectivity(snapshot)` は、変化ごとに 1 回だけ Owner task で呼ぶ。起動時の最初の状態は変化ではないので通知しない。JoinPolicy の孤立の通知時間を過ぎて Isolated が続くと、理由 ISOLATION_NOTICE で `on_connectivity` を 1 回出す（自動では離脱しない）。受信の `DeliveryAssurance` には、送信元の検証結果に加えて、MemberEdhoc では送信元の資格が認める役割（`source_role`）が入る。
@@ -66,7 +69,7 @@ C++ の各関数に対応する `rl_dev_*` を置く（`rl_dev_send`、`rl_dev_s
 - APPLIED の受信側は常に非同期：`on_applied_request` で ticket を受け、callback の後で `rl_dev_complete_applied` を呼ぶ。`on_applied_request` が NULL なら NoEndpoint で拒否する。
 - 他の task からは `rl_dev_post(job, ctx)` だけ（8 件、満杯は `RL_STATUS_BUSY`）。
 - 全 struct の先頭に `{struct_size, version}`。version は `RL_DEV_API_VERSION`（1）、struct_size は header の宣言以上でなければ `RL_STATUS_INVALID_ARGUMENT`。大きい struct_size は受けて末尾を無視する。1.x は末尾の追加と関数の追加だけで、layout は `protocol/abi-golden/device-api1.json`（ILP32 と LP64）で固定する。共通の値の型（`rl_message_id_t`、`rl_delivery_result_t`、`rl_applied_*_t`、`rl_group_send_options_t`）は core ABI 3 のものを使い、version は `RL_ABI_VERSION`。
-- sleep の C 版は Device の sleep API（V2-15）と同時に足す。
+- sleep の C wrapper は V2-17 の対象であり、まだ提供しない。
 
 ### JoinPolicy
 

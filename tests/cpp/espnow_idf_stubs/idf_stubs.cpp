@@ -36,6 +36,7 @@ unsigned g_send_count = 0;
 unsigned g_del_peer_count = 0;
 bool g_fail_del_peer = false;
 bool g_fail_add_peer = false;
+bool g_fail_wifi_stop = false;
 constexpr std::size_t kPeerTableMax = 32;
 std::uint8_t g_peer_macs[kPeerTableMax][6] = {};
 std::size_t g_peer_count = 0;
@@ -92,6 +93,7 @@ void reset() noexcept {
   g_del_peer_count = 0;
   g_fail_del_peer = false;
   g_fail_add_peer = false;
+  g_fail_wifi_stop = false;
   g_peer_count = 0;
   g_peer_limit = 0;
   g_send_cb = nullptr;
@@ -151,6 +153,7 @@ bool last_send_to(const std::uint8_t mac[6]) noexcept {
 unsigned del_peer_count() noexcept { return g_del_peer_count; }
 void fail_del_peer(const bool fail) noexcept { g_fail_del_peer = fail; }
 void fail_add_peer(const bool fail) noexcept { g_fail_add_peer = fail; }
+void fail_wifi_stop(const bool fail) noexcept { g_fail_wifi_stop = fail; }
 void set_peer_limit(const std::size_t limit) noexcept { g_peer_limit = limit; }
 std::size_t peer_count() noexcept { return g_peer_count; }
 
@@ -494,7 +497,7 @@ esp_err_t esp_wifi_set_bandwidth(const wifi_interface_t ifx,
 }
 
 esp_err_t esp_wifi_start(void) { return ESP_OK; }
-esp_err_t esp_wifi_stop(void) { return ESP_OK; }
+esp_err_t esp_wifi_stop(void) { return g_fail_wifi_stop ? ESP_FAIL : ESP_OK; }
 
 esp_err_t esp_wifi_set_channel(const uint8_t primary,
                                const wifi_second_chan_t second) {

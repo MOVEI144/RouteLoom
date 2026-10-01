@@ -1288,6 +1288,15 @@ void EspNowRuntime::notify_owner() noexcept {
   if (task != nullptr) xTaskNotifyGive(task);
 }
 
+bool EspNowRuntime::sleep_quiescent() const noexcept {
+  portENTER_CRITICAL(&callback_lock_);
+  const bool quiet = !pending_tx_ && raw_tx_count_ == 0 && lost_tx_count_ == 0 &&
+                     !lost_node_tx_valid_ && !fenced_outstanding_ && expired_tx_count_ == 0;
+  portEXIT_CRITICAL(&callback_lock_);
+  return quiet && (event_queue_ == nullptr || uxQueueMessagesWaiting(event_queue_) == 0) &&
+         (bootstrap_queue_ == nullptr || uxQueueMessagesWaiting(bootstrap_queue_) == 0);
+}
+
 void EspNowRuntime::wait_for_event(const MonotonicMs timeout_ms) noexcept {
   if (timeout_ms == 0) return;
   if (wake_task_.load() == nullptr) bind_wake_task(xTaskGetCurrentTaskHandle());

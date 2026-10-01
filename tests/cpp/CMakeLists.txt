@@ -306,8 +306,9 @@ if(ROUTELOOM_RESOURCE_PROFILE STREQUAL "endpoint")
       COMMAND routeloom_espnow_role_mismatch_tests)
 endif()
 
-add_executable(routeloom_espnow_owner_reapply_tests test_espnow_owner_reapply.cpp
+add_executable(routeloom_espnow_owner_reapply_tests test_espnow_owner_reapply.cpp device_sleep_scenarios.cpp
     espnow_idf_stubs/idf_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_power.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp

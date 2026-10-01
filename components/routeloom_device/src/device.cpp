@@ -497,6 +497,17 @@ void Device::step(const MonotonicMs now_ms) noexcept {
 #endif
   runtime_->poll_once();
   if (owner_ != nullptr) owner_->poll(now_ms);
+#if ROUTELOOM_DEVICE_SLEEP
+  if (power_ != nullptr) {
+    CallbackScope scope(in_callback_);
+    if (runtime_->radio_generation() != sleep_radio_generation_) {
+      sleep_radio_generation_ = runtime_->radio_generation();
+      (void)power_->notify_radio_reset(now_ms);
+    }
+    if (posted_budget != 0) (void)power_->notify_app_event(now_ms);
+    power_->poll(now_ms);
+  }
+#endif
 #if ROUTELOOM_DEVICE_REMOTE_CONFIG
   if (remote_config_ != nullptr) poll_remote_config(now_ms);
 #endif
@@ -520,6 +531,9 @@ MonotonicMs Device::next_deadline(const MonotonicMs now_ms) const noexcept {
   };
   if (runtime_ != nullptr) sooner(runtime_->next_deadline(now_ms));
   if (owner_ != nullptr) sooner(owner_->next_deadline(now_ms));
+#if ROUTELOOM_DEVICE_SLEEP
+  if (power_ != nullptr) sooner(power_->next_deadline(now_ms));
+#endif
   // Application hooks, USB and optional configuration ports have no
   // deadline callback yet, so preserve their documented cadence.
   if (bridge_ != nullptr || poll_hook_ != nullptr || operation_ != Operation::None) {
@@ -576,6 +590,87 @@ void Device::update_observation_remote() noexcept {
   }
 #endif
 }
+
+#if ROUTELOOM_DEVICE_SLEEP
+Status Device::bind_sleep(PowerCoordinator& power, const ResetCause cause,
+                          const ElapsedInterval elapsed, const MonotonicMs now_ms) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (runtime_ == nullptr || !runtime_->node().started() || power_ != nullptr ||
+      !power.owns_node(runtime_->node())) {
+    return Status::error(StatusCode::InvalidState, "sleep coordinator binding");
+  }
+  power_ = &power;
+  sleep_radio_generation_ = runtime_->radio_generation();
+  CallbackScope scope(in_callback_);
+  return power.begin(cause, elapsed, now_ms);
+}
+
+Status Device::prepare_sleep(const SleepRequest& request) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (power_ == nullptr) return Status::error(StatusCode::Unsupported, "sleep not bound");
+  CallbackScope scope(in_callback_);
+  return power_->sleep_prepare(request, runtime_->now_ms());
+}
+
+Status Device::enter_sleep(const SleepTicket& ticket) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (power_ == nullptr) return Status::error(StatusCode::Unsupported, "sleep not bound");
+  CallbackScope scope(in_callback_);
+  portENTER_CRITICAL(&posted_lock_);
+  const bool posted = posted_count_ != 0;
+  portEXIT_CRITICAL(&posted_lock_);
+  const MonotonicMs now = runtime_->now_ms();
+  if (posted || !runtime_->sleep_quiescent()) (void)power_->notify_app_event(now);
+  if (runtime_->radio_generation() != sleep_radio_generation_) {
+    (void)power_->notify_radio_reset(now);
+  }
+  return power_->sleep_enter(ticket, now);
+}
+
+Status Device::abort_sleep() noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (power_ == nullptr) return Status::error(StatusCode::Unsupported, "sleep not bound");
+  CallbackScope scope(in_callback_);
+  return power_->sleep_abort(nullptr, runtime_->now_ms());
+}
+
+Status Device::wake(const ResetCause cause, const ElapsedInterval elapsed,
+                    const MonotonicMs now_ms) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (power_ == nullptr) return Status::error(StatusCode::Unsupported, "sleep not bound");
+  CallbackScope scope(in_callback_);
+  const Status status = power_->wake(cause, elapsed, now_ms);
+  sleep_radio_generation_ = runtime_->radio_generation();
+  return status;
+}
+
+SleepTicket Device::sleep_ticket() const noexcept {
+  return power_ == nullptr ? SleepTicket{} : power_->ticket();
+}
+
+ResumeOutcome Device::wake_info() const noexcept {
+  return power_ == nullptr ? ResumeOutcome::None : power_->resume_outcome();
+}
+
+#else
+Status Device::bind_sleep(PowerCoordinator&, ResetCause, ElapsedInterval, MonotonicMs) noexcept {
+  return Status::error(StatusCode::Unsupported, "sleep not compiled");
+}
+Status Device::prepare_sleep(const SleepRequest&) noexcept {
+  return Status::error(StatusCode::Unsupported, "sleep not compiled");
+}
+Status Device::enter_sleep(const SleepTicket&) noexcept {
+  return Status::error(StatusCode::Unsupported, "sleep not compiled");
+}
+Status Device::abort_sleep() noexcept {
+  return Status::error(StatusCode::Unsupported, "sleep not compiled");
+}
+Status Device::wake(ResetCause, ElapsedInterval, MonotonicMs) noexcept {
+  return Status::error(StatusCode::Unsupported, "sleep not compiled");
+}
+SleepTicket Device::sleep_ticket() const noexcept { return {}; }
+ResumeOutcome Device::wake_info() const noexcept { return ResumeOutcome::None; }
+#endif
 
 // --- Facade ---------------------------------------------------------------------
 
@@ -927,7 +1022,13 @@ void Device::update_connectivity(const MonotonicMs now_ms) noexcept {
                       ((stage_ == MembershipStage::Joining ||
                         stage_ == MembershipStage::PendingAuthority) &&
                        stores_->site().has_site());
-  if (!member) {
+#if ROUTELOOM_DEVICE_SLEEP
+  if (power_ != nullptr && power_->state() == PowerState::Sleeping) {
+    state = Connectivity::Sleeping;
+    reason = 0;
+  } else
+#endif
+      if (!member) {
     contact_valid_ = false;
   } else if (security_ == DeviceSecurity::DevRam
                  ? role_ == profile::Role::Gateway

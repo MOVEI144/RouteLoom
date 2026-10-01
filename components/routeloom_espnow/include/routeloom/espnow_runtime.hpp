@@ -145,6 +145,7 @@ class EspNowRuntime final : public RadioPort,
   // notifications only wake their single consumer (including staged TX).
   void bind_wake_task(TaskHandle_t task) noexcept { wake_task_.store(task); }
   void notify_owner() noexcept;
+  bool sleep_quiescent() const noexcept;
   void wait_for_event(MonotonicMs timeout_ms) noexcept;
 
   // Attach the autonomy stack: `engine` must be constructed with this

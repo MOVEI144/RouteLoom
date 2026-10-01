@@ -23,6 +23,7 @@ bool last_send_to(const std::uint8_t mac[6]) noexcept;
 unsigned del_peer_count() noexcept;
 void fail_del_peer(bool fail) noexcept;
 void fail_add_peer(bool fail) noexcept;
+void fail_wifi_stop(bool fail) noexcept;
 // Opt-in physical ESP-NOW table for the Owner mesh harness. Other stub
 // tests keep the historical permissive driver unless they set a limit.
 void set_peer_limit(std::size_t limit) noexcept;

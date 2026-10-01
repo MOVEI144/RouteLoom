@@ -5505,6 +5505,21 @@ void test_unread_sleep_slot_latches_recovery() {
   }
 }
 
+void test_unread_wake_reopens_radio_without_consuming_image() {
+  MemoryPowerStorage storage;
+  PowerWorld world(storage);
+  CHECK_OK(world.coordinator.begin(ResetCause::ColdBoot, {}, 0));
+  const auto ticket = reach_ready(world);
+  CHECK_OK(world.coordinator.sleep_enter(ticket, world.now));
+  CHECK(world.port.radio_quiesced);
+  storage.read_error = true;
+  CHECK(world.coordinator.wake(ResetCause::DeepSleepWake, {10, 10, true}, world.now + 10).code ==
+        StatusCode::RecoveryRequired);
+  CHECK(!world.node.draining());
+  CHECK(!world.port.radio_quiesced);
+  CHECK(world.events.pending_results.empty());
+}
+
 void test_sleep_image_readback_failure_refuses_ticket() {
   MemoryPowerStorage storage;
   PowerWorld world(storage);
@@ -5527,6 +5542,7 @@ void test_sleep_image_readback_failure_refuses_ticket() {
 
 int main() {
   test_unread_sleep_slot_latches_recovery();
+  test_unread_wake_reopens_radio_without_consuming_image();
   test_sleep_image_readback_failure_refuses_ticket();
   test_send_lifetime_ceiling();
   test_power_stats_accumulate();

@@ -25,12 +25,23 @@
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/key_schedule.hpp"
 #include "routeloom/node.hpp"
+#include "routeloom/power.hpp"
 #include "routeloom/profile.hpp"
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_store.hpp"
 #include "routeloom/types.hpp"
 #include "routeloom/usb_bridge.hpp"
 #include "sdkconfig.h"
+
+// Firmware reserves sleep state only in its explicit deep-sleep build.
+// Host harnesses exercise the same API with caller-owned storage.
+#ifndef ROUTELOOM_DEVICE_SLEEP
+#if defined(ESP_PLATFORM)
+#define ROUTELOOM_DEVICE_SLEEP CONFIG_ROUTELOOM_DEEP_SLEEP
+#else
+#define ROUTELOOM_DEVICE_SLEEP 1
+#endif
+#endif
 
 // Remote-config target of a DevRam or Member node (V2-08, issue #17): the
 // SDK-namespace journal on the node's routed config lane. Firmware images
@@ -280,6 +291,16 @@ class Device {
   // Minimum component deadline bounded by the role ceiling (endpoint
   // 1000 ms, relay 100 ms, gateway 20 ms); unsupported work keeps 2 ms.
   MonotonicMs next_deadline(MonotonicMs now_ms) const noexcept;
+  // Caller-owned coordinator over mesh(), with an Owner-aware PowerPort.
+  // Bind once after adoption; all sleep work then runs through step().
+  Status bind_sleep(PowerCoordinator& power, ResetCause cause, ElapsedInterval elapsed,
+                    MonotonicMs now_ms) noexcept;
+  Status prepare_sleep(const SleepRequest& request) noexcept;
+  Status enter_sleep(const SleepTicket& ticket) noexcept;
+  Status abort_sleep() noexcept;
+  Status wake(ResetCause cause, ElapsedInterval elapsed, MonotonicMs now_ms) noexcept;
+  SleepTicket sleep_ticket() const noexcept;
+  ResumeOutcome wake_info() const noexcept;
   // Gateway USB input for the next step().
   void usb_receive(ByteView bytes, MonotonicMs now_ms) noexcept;
 
@@ -400,6 +421,10 @@ class Device {
   espnow::EspNowSecurityOwner* owner_{nullptr};
   usb::UsbBridge* bridge_{nullptr};
   GatewayDelivery* gateway_{nullptr};
+#if ROUTELOOM_DEVICE_SLEEP
+  PowerCoordinator* power_{nullptr};
+  RadioGeneration sleep_radio_generation_{};
+#endif
 #if ROUTELOOM_DEVICE_REMOTE_CONFIG
   DeviceRemoteConfig* remote_config_{nullptr};
 #endif

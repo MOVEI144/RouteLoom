@@ -1,4 +1,5 @@
 #include "routeloom/espnow_power.hpp"
+#include "routeloom/espnow_security_owner.hpp"
 
 #include <algorithm>
 
@@ -9,6 +10,27 @@
 #include "soc/soc_caps.h"
 
 namespace routeloom::espnow {
+
+Status EspNowPowerPort::prepare_sleep(const MonotonicMs now_ms) noexcept {
+  if (!runtime_.sleep_quiescent()) return Status::error(StatusCode::Busy, "radio has sleep work");
+  if (owner_ == nullptr || parked_) return Status::success();
+  sdkv1::CoordinatorEvent event{};
+  event.kind = sdkv1::CoordinatorEventKind::PrepareSleep;
+  event.now = now_ms;
+  const Status status = owner_->coordinator().step(event);
+  if (status) parked_ = true;
+  return status;
+}
+
+void EspNowPowerPort::abort_sleep(const MonotonicMs now_ms) noexcept {
+  const Status radio = start_radio(nullptr);
+  if (!radio) runtime_.note_diagnostic(radio.detail, kInvalidNodeId);
+  if (rtc_ != nullptr) (void)rtc_->invalidate();
+  if (parked_) {
+    (void)owner_->wake(now_ms);
+    parked_ = false;
+  }
+}
 
 Status EspNowPowerPort::capture_cache(PowerImage& image) noexcept {
   image.channel = runtime_.channel();
@@ -50,11 +72,27 @@ Status EspNowPowerPort::quiesce_radio() noexcept {
   // The driver itself is stopped later by enter_sleep()'s esp_wifi_stop().
   const esp_err_t rx = esp_now_unregister_recv_cb();
   const esp_err_t tx = esp_now_unregister_send_cb();
+  // An abort must repair even a partially unregistered callback pair.
+  quiesced_ = true;
   if (rx != ESP_OK || tx != ESP_OK) {
     return Status::error(StatusCode::RadioFailure,
                         "ESP-NOW callback unregister failed");
   }
-  quiesced_ = true;
+  if (!runtime_.sleep_quiescent()) return Status::error(StatusCode::Busy, "queued sleep ingress");
+  if (parked_ && rtc_ != nullptr &&
+      owner_->coordinator().mode() == sdkv1::CoordinatorMode::Member) {
+    NodeId parent = kInvalidNodeId;
+    routeloom::MacAddress mac{};
+    BindingId binding{kInvalidBindingId};
+    if (owner_->coordinator().first_live_peer(SecurityScope::Link, parent) &&
+        owner_->discovery() != nullptr && owner_->discovery()->binding_of(parent, binding) &&
+        owner_->discovery()->mac_of(parent, mac)) {
+      return owner_->coordinator().save_sleep_image(*rtc_, parent, mac, binding.value,
+                                                    runtime_.now_ms());
+    }
+    // Isolation is a cold sleep; no old parent/session image may survive.
+    return rtc_->invalidate();
+  }
   return Status::success();
 }
 
@@ -76,10 +114,18 @@ Status EspNowPowerPort::start_radio(const PowerImage* image) noexcept {
     if (!status) return status;
     quiesced_ = false;
   }
+  if (parked_) {
+    const Status status = owner_->wake(runtime_.now_ms());
+    if (!status) return status;
+    parked_ = false;
+  }
   return Status::success();
 }
 
 Status EspNowPowerPort::configure_wake(const WakePlan& plan) noexcept {
+  if (plan.wake_after_ms > UINT64_MAX / 1000ULL) {
+    return Status::error(StatusCode::InvalidArgument, "timer wakeup overflow");
+  }
   if (plan.wake_after_ms != 0) {
     const esp_err_t error =
         esp_sleep_enable_timer_wakeup(plan.wake_after_ms * 1000ULL);
@@ -113,7 +159,9 @@ Status EspNowPowerPort::enter_sleep() noexcept {
   // sleep-current and resume side effects. The stop lives here rather than
   // in quiesce_radio() because the coordinator's abort path
   // (start_radio() -> runtime_.recover()) never restarts Wi-Fi.
-  (void)esp_wifi_stop();
+  if (esp_wifi_stop() != ESP_OK) {
+    return Status::error(StatusCode::RadioFailure, "sleep radio stop failed");
+  }
   // Point of no return: every fallible step of the sleep path (image
   // commits, ticket validation, wake configuration) is already behind
   // this call, so the hook is the firmware's proof that a coordinated

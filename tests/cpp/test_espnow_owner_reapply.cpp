@@ -536,6 +536,12 @@ void test_device_begin_clears_key_on_failure() {
   for (const std::uint8_t byte : config.dev_psk) CHECK(byte == 0);
 }
 
+void bind_device_sleep_runtime(routeloom::Device& device,
+                               routeloom::espnow::EspNowRuntime& runtime) noexcept {
+  routeloom::DeviceTestAccess::attach_runtime(device, runtime);
+}
+int run_device_sleep_scenarios();
+
 int main() {
   test_usb_network_after_cutover();
   test_same_boot_reapply(false);
@@ -544,6 +550,7 @@ int main() {
   test_member_root_mapping(true);
   test_connectivity_uses_granted_gateway_role();
   test_member_adoption_restores_group_capability();
+  failures += run_device_sleep_scenarios();
   test_device_post_bound();
   test_device_begin_clears_key_on_failure();
   return failures == 0 ? 0 : 1;

@@ -615,7 +615,27 @@ void test_join_policy_store() {
   CHECK(!reboot.load(loaded, revision).ok() && revision == 0 && loaded == JoinPolicy{});
 }
 
+void test_power_slots_preserve_read_failures() {
+  FakeNvs nvs;
+  BlobPowerStorage storage(nvs);
+  std::array<std::uint8_t, kPowerImageRecordSize> bytes{};
+  const MutableByteView target{bytes.data(), bytes.size()};
+  CHECK(storage.read(0, target).code == StatusCode::NotFound);
+  CHECK(storage.write(1, ByteView{bytes.data(), bytes.size()}));
+  CHECK(nvs.blobs.count("p1") == 1 && nvs.blobs.count("p0") == 0);
+  CHECK(storage.read(1, target));
+  nvs.read_error = true;
+  CHECK(storage.read(1, target).code == StatusCode::StorageFailure);
+  nvs.disarm();
+  nvs.short_read = true;
+  CHECK(storage.read(1, target).code == StatusCode::IntegrityError);
+  nvs.disarm();
+  nvs.blobs["p1"].resize(0);
+  CHECK(storage.read(1, target).code == StatusCode::IntegrityError);
+}
+
 int main() {
+  test_power_slots_preserve_read_failures();
   test_read_contract();
   test_record_storage_mapping();
   test_resume_keys();
