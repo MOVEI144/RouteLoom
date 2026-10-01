@@ -162,6 +162,7 @@ Status EspNowPowerPort::configure_wake(const WakePlan& plan) noexcept {
                         "GPIO deep-sleep wakeup unsupported on this target");
 #endif
   }
+  wake_after_ms_ = plan.wake_after_ms;
   return Status::success();
 }
 
@@ -179,7 +180,7 @@ Status EspNowPowerPort::enter_sleep() noexcept {
   // this call, so the hook is the firmware's proof that a coordinated
   // sleep is actually entering.
   if (pre_sleep_hook_ != nullptr) {
-    pre_sleep_hook_->on_pre_sleep();
+    pre_sleep_hook_->on_pre_sleep(wake_after_ms_);
   }
   esp_deep_sleep_start();
   // esp_deep_sleep_start does not return on success; if it did, no sleep

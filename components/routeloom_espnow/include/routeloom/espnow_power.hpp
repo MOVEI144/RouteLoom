@@ -22,6 +22,12 @@ class PreSleepHook {
  public:
   virtual ~PreSleepHook() = default;
   virtual void on_pre_sleep() noexcept = 0;
+  // Actual successfully configured timer, not a firmware default. A zero
+  // or unrepresentable RTC duration must never be treated as elapsed proof.
+  virtual void on_pre_sleep(std::uint64_t timer_ms) noexcept {
+    (void)timer_ms;
+    on_pre_sleep();
+  }
 };
 
 // PowerPort implementation for EspNowRuntime. Peer capture/restore goes
@@ -56,6 +62,7 @@ class EspNowPowerPort final : public PowerPort {
   PreSleepHook* pre_sleep_hook_{nullptr};
   EspNowSecurityOwner* owner_{nullptr};
   sdkv1::RtcSessionPort* rtc_{nullptr};
+  std::uint64_t wake_after_ms_{0};
   bool parked_{false};
   bool quiesced_{false};
 };

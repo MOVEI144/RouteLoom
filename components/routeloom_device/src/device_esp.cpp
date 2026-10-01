@@ -202,9 +202,10 @@ RTC_DATA_ATTR routeloom::sdkv1::RtcSessionImage s_rtc_hold{};
 // re-arming the fast restart every ~40 s cycle.
 class FailStreakClearOnSleep final : public routeloom::espnow::PreSleepHook {
  public:
-  void on_pre_sleep() noexcept override {
+  void on_pre_sleep() noexcept override { on_pre_sleep(0); }
+  void on_pre_sleep(const std::uint64_t timer_ms) noexcept override {
     s_sleep_marker = kSleepMarkerValue;
-    s_sleep_programmed_ms = CONFIG_ROUTELOOM_SLEEP_DURATION_MS;
+    s_sleep_programmed_ms = timer_ms <= UINT32_MAX ? static_cast<std::uint32_t>(timer_ms) : 0;
     routeloom::fail_streak_pre_sleep(s_fail);
   }
 };

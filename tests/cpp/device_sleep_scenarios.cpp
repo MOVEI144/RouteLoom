@@ -34,7 +34,12 @@ int failures = 0;
 class Hook final : public espnow::PreSleepHook {
  public:
   void on_pre_sleep() noexcept override { ++calls; }
+  void on_pre_sleep(std::uint64_t timer_ms) noexcept override {
+    last_timer_ms = timer_ms;
+    on_pre_sleep();
+  }
   unsigned calls{0};
+  std::uint64_t last_timer_ms{0};
 };
 
 class Storage final : public PowerStorage {
@@ -142,6 +147,16 @@ int run_device_sleep_scenarios() {
   WakePlan too_long{};
   too_long.wake_after_ms = UINT64_MAX;
   CHECK(adapter.configure_wake(too_long).code == StatusCode::InvalidArgument);
+  WakePlan custom_wake{};
+  custom_wake.wake_after_ms = 1234567;
+  CHECK(adapter.configure_wake(custom_wake));
+  CHECK(adapter.enter_sleep().code == StatusCode::InternalError);
+  CHECK(hook.calls == 1 && hook.last_timer_ms == custom_wake.wake_after_ms);
+  custom_wake.wake_after_ms = static_cast<std::uint64_t>(UINT32_MAX) + 1;
+  CHECK(adapter.configure_wake(custom_wake));
+  CHECK(adapter.enter_sleep().code == StatusCode::InternalError);
+  CHECK(hook.calls == 2 && hook.last_timer_ms == custom_wake.wake_after_ms);
+
   Device device;
   bind_device_sleep_runtime(device, runtime);
   Storage storage;
