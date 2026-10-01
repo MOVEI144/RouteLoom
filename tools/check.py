@@ -39,7 +39,7 @@ SCENARIO_KEYS = ("id", "family", "variant", "tier", "layer", "topology", "faults
 REQUIRED_V2_PRS = {f"V2-{number:02d}" for number in range(1, 23)}
 JOBS = str(min(os.cpu_count() or 2, 8))
 FUZZ_TARGETS = ("wire_frame", "usb_codec", "autonomy", "endpoint", "host_ops", "migration",
-                "cose", "rlres1", "sdkv1", "sdkv1_ead", "sdkv1_join")
+                "cose", "rlres1", "sdkv1", "sdkv1_ead", "sdkv1_join", "app_object")
 # Generated-vector directories: diff catches changed bytes, porcelain catches
 # a generator that starts emitting an unreviewed (untracked) vector.
 GENERATED_GOLDENS = (
@@ -243,12 +243,45 @@ def profile_mesh() -> list[Step]:
     return steps
 
 
+def object_mesh() -> list[Step]:
+    build = "build-object-mesh"
+    peer = "tests/cpp/routeloom_owner_mesh_peer"
+    env = {"ROUTELOOM_MESH_PEER": str(ROOT / build / peer),
+           "ROUTELOOM_OWNER_PEER": str(ROOT / build / "tests/cpp/routeloom_joiner_interop_peer"),
+           "ROUTELOOM_MESH_PEER_B": str(ROOT / "build" / peer),
+           "UBSAN_OPTIONS": "halt_on_error=1"}
+    return [
+        Step(["cmake", "-S", ".", "-B", "build", "-DROUTELOOM_ENABLE_SANITIZERS=ON",
+              "-DCMAKE_BUILD_TYPE=Debug", "-DROUTELOOM_APP_OBJECT_TRANSFER=OFF"]),
+        Step(["cmake", "--build", "build", "--parallel", JOBS, "--target", "routeloom_owner_mesh_peer"]),
+        Step(["cmake", "-S", ".", "-B", build, "-DROUTELOOM_ENABLE_SANITIZERS=ON",
+              "-DCMAKE_BUILD_TYPE=Debug", "-DROUTELOOM_APP_OBJECT_TRANSFER=ON", "-DROUTELOOM_DEDUP_PROFILE=leaf"]),
+        Step(["cmake", "--build", build, "--parallel", JOBS, "--target",
+              "routeloom_owner_mesh_peer", "routeloom_joiner_interop_peer"]),
+        Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::owner_mesh::object::mesh_m10",
+              "--", "--ignored", "--nocapture", "--skip", "mesh_m10_three_hop_with_control"], cwd="host", env=env, forbid=SKIP_MARK,
+             require=("site::owner_mesh::object::mesh_m10_app_objects",
+                      "site::owner_mesh::object::mesh_m10_object_deadline_busy_and_cancel",
+                      "site::owner_mesh::object::mesh_m10_object_reorder_duplicate_and_conflict",
+                      "site::owner_mesh::object::mesh_m10_host_usb_object_upload",
+                      "site::owner_mesh::object::mesh_m10_c_object_apis",
+                      "site::owner_mesh::object::mesh_m10_boot_revoke_and_route_repair",
+                      "site::owner_mesh::object::mesh_m10_completion_record_pressure",
+                      "site::owner_mesh::object::mesh_m10_object_queue_pressure",
+                      "site::owner_mesh::object::mesh_m10_control_p99")),
+        Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::owner_mesh::object::mesh_p04_object_off_terminal",
+              "--", "--ignored", "--nocapture"], cwd="host",
+             env={**env, "ROUTELOOM_MESH_PEER_GW": str(ROOT / "build" / peer)}, forbid=SKIP_MARK,
+             require=("site::owner_mesh::object::mesh_p04_object_off_terminal",)),
+    ]
+
+
 def fuzz() -> list[Step]:
     # Bounded CI-time fuzzing (60 s per target over the seed corpus), not
     # continuous fuzzing.
     steps = [
         Step(["cmake", "-S", ".", "-B", "build-fuzz", "-DROUTELOOM_BUILD_TESTS=ON",
-              "-DROUTELOOM_BUILD_FUZZERS=ON", "-DROUTELOOM_ENABLE_SANITIZERS=ON",
+              "-DROUTELOOM_BUILD_FUZZERS=ON", "-DROUTELOOM_APP_OBJECT_TRANSFER=ON", "-DROUTELOOM_ENABLE_SANITIZERS=ON",
               "-DCMAKE_BUILD_TYPE=Debug"], env={"CC": "clang", "CXX": "clang++"}),
         Step(["cmake", "--build", "build-fuzz", "--parallel", JOBS, "--target",
               *(f"fuzz_{t}" for t in FUZZ_TARGETS)]),
@@ -661,7 +694,7 @@ def stream(step: Step, cwd: Path, env: dict) -> tuple[int, str, set[str]]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="stage", required=True)
-    for name in ("quick", "ci", "docs", "golden", "rust", "interop", "profile-mesh", "fuzz"):
+    for name in ("quick", "ci", "docs", "golden", "rust", "interop", "profile-mesh", "object-mesh", "fuzz"):
         sub.add_parser(name).add_argument("--dry-run", action="store_true")
     p_profiles = sub.add_parser("profiles")
     p_profiles.add_argument("--dry-run", action="store_true")
@@ -719,10 +752,10 @@ def main(argv: list[str] | None = None) -> int:
     stages = {"core": lambda: core(getattr(args, "sanitizers", "ON")), "docs": docs,
               "golden": golden, "rust": rust, "interop": interop,
               "profiles": lambda: profiles(getattr(args, "build", None)),
-              "profile-mesh": profile_mesh, "fuzz": fuzz,
+              "profile-mesh": profile_mesh, "object-mesh": object_mesh, "fuzz": fuzz,
               "firmware": lambda: [s for c in data["cells"] for s in firmware_steps(c)]}
     order = {"quick": ("docs", "core"),
-             "ci": ("docs", "core", "golden", "rust", "interop", "profiles", "profile-mesh",
+             "ci": ("docs", "core", "golden", "rust", "interop", "profiles", "profile-mesh", "object-mesh",
                     "fuzz", "firmware")}
     for name in order.get(args.stage, (args.stage,)):
         print(f"=== {name}", flush=True)

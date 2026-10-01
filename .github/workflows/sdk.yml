@@ -195,9 +195,11 @@ jobs:
         working-directory: host
         run: cargo --version
       - run: python3 tools/check.py profile-mesh
+      - name: AppObject ON, dedup32 and OFF relay/terminal (a skip fails)
+        run: python3 tools/check.py object-mesh
   fuzz:
     runs-on: ubuntu-latest
-    # 11 targets x 60 s plus the build.
+    # 12 targets x 60 s plus the build.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262

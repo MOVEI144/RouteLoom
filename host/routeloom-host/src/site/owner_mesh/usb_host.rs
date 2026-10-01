@@ -38,6 +38,7 @@ pub(super) struct UsbHost {
     pub(super) join_ups_seen: u64,
     pub(super) join_downs_sent: u64,
     pub(super) other_host_ops: u64,
+    pub(super) object_frames: Vec<(u64, u64, Vec<u8>)>,
     pub(super) data_frames: u64,
     pub(super) gateway_payloads: Vec<Vec<u8>>,
     pub(super) gateway_registering: bool,
@@ -95,6 +96,7 @@ impl UsbHost {
             join_ups_seen: 0,
             join_downs_sent: 0,
             other_host_ops: 0,
+            object_frames: Vec::new(),
             data_frames: 0,
             gateway_payloads: Vec::new(),
             gateway_registering: false,
@@ -356,6 +358,12 @@ impl UsbHost {
                             },
                             join_note: None,
                         });
+                    } else if inner.get(..2) == Some(&[1, 0x84])
+                        || inner.get(..2) == Some(&[1, 0x86])
+                    {
+                        assert!(self.object_frames.len() < 64);
+                        self.object_frames
+                            .push((request, self.session.session_id, inner.to_vec()));
                     } else if self.watch == Some(request) {
                         self.watch = None;
                         self.watched = Some(inner.to_vec());

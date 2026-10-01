@@ -32,7 +32,20 @@
       "id": "bridge_node-esp32c3-normal-off-off", "app": "bridge_node", "target": "esp32c3",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL=y"],
+      "symbols_absent": ["9AppObject", "11object_wire"],
       "budget": {"app_bin_max": 1216976, "static_free_min": 51192, "rtc_used_max": 6632}
+    },
+    {
+      "id": "bridge_node-esp32c3-normal-off-app_object", "app": "bridge_node", "target": "esp32c3",
+      "overlay": ["CONFIG_ROUTELOOM_APP_OBJECT_TRANSFER=y"],
+      "expect": ["CONFIG_ROUTELOOM_APP_OBJECT_RX_SLOTS=1", "CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL=y"],
+      "budget": {"app_bin_max": 1230000, "static_free_min": 40480, "rtc_used_max": 6632}
+    },
+    {
+      "id": "reference_node-esp32c6-normal-off-app_object", "app": "reference_node", "target": "esp32c6",
+      "overlay": ["CONFIG_ROUTELOOM_APP_OBJECT_TRANSFER=y"],
+      "expect": ["CONFIG_ROUTELOOM_APP_OBJECT_RX_SLOTS=2", "CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y"],
+      "budget": {"app_bin_max": 1252784, "static_free_min": 154341, "rtc_used_max": 164}
     },
     {
       "id": "bench_node-esp32c3-normal-off-off", "app": "bench_node", "target": "esp32c3",

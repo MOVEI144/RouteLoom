@@ -1064,6 +1064,52 @@ impl MeshPeer {
         self.send(&command);
     }
 
+    pub(super) fn object_buffer(&mut self) -> u8 {
+        self.send(&[b'o', 0]);
+        let reply = self.recv().expect("object buffer reply");
+        assert_eq!(reply[0], b'o');
+        reply[1]
+    }
+
+    pub(super) fn object_send(&mut self, dst: u64, bytes: &[u8], deadline: u32) -> u8 {
+        let mut command = vec![b'o', 1];
+        command.extend_from_slice(&dst.to_le_bytes());
+        command.extend_from_slice(&deadline.to_le_bytes());
+        command.extend_from_slice(bytes);
+        self.send(&command);
+        let reply = self.recv().expect("object send reply");
+        assert_eq!(reply[0], b'o');
+        reply[1]
+    }
+
+    pub(super) fn object_fill_queue(&mut self, destination: u64) -> (u8, u8) {
+        let mut command = vec![b'o', 4];
+        command.extend_from_slice(&destination.to_le_bytes());
+        self.send(&command);
+        let reply = self.recv().expect("object queue reply");
+        assert_eq!(reply[0], b'o');
+        (reply[1], reply[2])
+    }
+
+    pub(super) fn object_cancel(&mut self) -> u8 {
+        self.send(&[b'o', 3]);
+        let reply = self.recv().expect("object cancel reply");
+        assert_eq!(reply[0], b'o');
+        reply[1]
+    }
+
+    pub(super) fn object_snapshot(&mut self) -> (u32, u32, u8, Vec<u8>) {
+        self.send(&[b'o', 2]);
+        let reply = self.recv().expect("object snapshot");
+        assert_eq!(reply[0], b'o');
+        (
+            u32::from_le_bytes(reply[1..5].try_into().unwrap()),
+            u32::from_le_bytes(reply[5..9].try_into().unwrap()),
+            reply[9],
+            reply[10..].to_vec(),
+        )
+    }
+
     pub(super) fn app_send(&mut self, dst: u64, payload: &[u8]) {
         assert!((1..=128).contains(&payload.len()), "app payload bound");
         let mut command = vec![b'S'];

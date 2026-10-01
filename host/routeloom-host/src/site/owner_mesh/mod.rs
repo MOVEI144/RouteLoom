@@ -72,6 +72,7 @@ mod fault;
 mod join;
 mod membership;
 mod mesh;
+mod object;
 mod peer;
 mod product;
 mod recovery;

@@ -63,8 +63,8 @@ class CellList(unittest.TestCase):
         # added the Member channel-plan gateway and participant (50); V2-10
         # removed that compatibility cell with LegacyFixture itself (49).
         # V2-17 added the C and standalone-gateway examples and the external
-        # consumer on S3, C5 and C6 (54).
-        self.assertEqual(len(cells), 54)
+        # consumer on S3, C5 and C6 (54); V2-19 adds two AppObject ON cells (56).
+        self.assertEqual(len(cells), 56)
         self.assertTrue({
             "bridge_node-esp32c3-normal-off-maintenance_member",
             "reference_node-esp32c6-normal-off-maintenance_member",
@@ -135,7 +135,7 @@ class CellList(unittest.TestCase):
     def test_workflow_runs_every_ci_stage(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         for stage in ("core --sanitizers", "docs", "golden", "rust", "interop",
-                      "profiles --build", "profile-mesh", "fuzz"):
+                      "profiles --build", "profile-mesh", "object-mesh", "fuzz"):
             self.assertIn(f"python3 tools/check.py {stage}", workflow)
 
     def test_ci_requires_e2e_report_artifact(self):
@@ -146,7 +146,7 @@ class CellList(unittest.TestCase):
     def test_ci_dry_run_lists_every_stage_and_cell(self):
         code, out, _ = run_main(["ci", "--dry-run"])
         self.assertEqual(code, 0)
-        for stage in ("docs", "core", "golden", "rust", "interop", "profiles", "profile-mesh",
+        for stage in ("docs", "core", "golden", "rust", "interop", "profiles", "profile-mesh", "object-mesh",
                       "fuzz", "firmware"):
             self.assertIn(f"=== {stage}\n", out)
         for cell in check.load_cells()["cells"]:
