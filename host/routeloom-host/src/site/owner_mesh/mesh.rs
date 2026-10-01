@@ -602,7 +602,7 @@ fn mesh_route_loss_advertisement_survives_queue_pressure() {
     let (accepted, queued) = world.peers[2].app_burst(16, testkit::GATEWAY);
     assert_eq!(accepted, 8, "bounded application admission");
     assert!(queued >= 16);
-    world.step(5000);
+    world.pump_until(200, |snaps| snaps[2].queued >= 26);
     assert!(
         world.snaps[2].queued >= 26,
         "queue reached 80%: {:?}",

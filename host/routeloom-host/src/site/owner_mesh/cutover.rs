@@ -362,17 +362,12 @@ pub(super) fn c1_once(tag: &str, switch: Switch, gate: usize, leaf: usize, relay
     // COMMIT dispatch at full resolution: send ticks (a target
     // leaving Prepared post-commit), stored ticks (verified
     // COMMIT_STORED), and the applied count at each parent send.
-    // The last 70 s run at 100 ms: the RouteState query round trip
-    // (down, relay, answer, forward, up) needs several TX
-    // opportunities inside its 4 s routed lifetime, and 1 s steps
-    // starve the relay queue behind routine chatter — the tree would
-    // stay unknown and leaf-first would never gate.
+    // Keep the radio's normal resolution throughout the window. A coarse
+    // clock jump also ages queued control frames and delayed callbacks;
+    // silence in the previous step does not prove the next step is idle.
     let window_end = staged_at + crate::site::cutover::CUTOVER_PREPARE_WINDOW_MS;
-    while world.now + 70_000 < window_end {
-        world.step(1000);
-    }
     while world.now + 10_000 < window_end {
-        world.step(100);
+        world.step(25);
     }
     let mut send_tick = [None::<u64>; 3];
     let mut stored_tick = [None::<u64>; 3];
