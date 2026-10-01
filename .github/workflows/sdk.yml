@@ -125,6 +125,19 @@ jobs:
             ${{ matrix.dir }}/build/log/*
             ${{ matrix.dir }}/sdkconfig
           retention-days: 30
+      - name: Build DevRam sleep and check the static RAM floor
+        if: always() && matrix.id == 'reference_node-esp32c3-normal-off-off'
+        shell: bash
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh"
+          cd firmware/reference_node
+          printf '\nCONFIG_ROUTELOOM_DEEP_SLEEP=y\n' >> sdkconfig
+          idf.py build
+          grep -q '^CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y$' sdkconfig
+          grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y$' sdkconfig
+          idf.py size --format json2 --output-file build/dev-sleep-size.json
+          python3 ../../tools/firmware_ram_report.py build/dev-sleep-size.json --target esp32c3 --app reference_node --cell dev-sleep --json-out build/dev-sleep-ram.json
   rust:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
