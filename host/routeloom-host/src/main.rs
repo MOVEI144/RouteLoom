@@ -986,7 +986,8 @@ impl State {
 fn queued_diagnostic_is_live(state: &State, request: u64) -> bool {
     let telemetry = telemetry::owns_request(request);
     let observation = remote_observation::owns_request(request);
-    if !telemetry && !observation {
+    let object = objects::owns_request(request);
+    if !telemetry && !observation && !object {
         return true;
     }
     let session = state.session.lock().expect("session poisoned");
@@ -997,7 +998,9 @@ fn queued_diagnostic_is_live(state: &State, request: u64) -> bool {
     };
     let Some(id) = id else { return false };
     drop(session);
-    if telemetry {
+    if object {
+        state.object_ops.request_pending_in_session(request, id)
+    } else if telemetry {
         state.telemetry_ops.request_pending_in_session(request, id)
     } else {
         state

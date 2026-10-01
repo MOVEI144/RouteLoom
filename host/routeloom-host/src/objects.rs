@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 pub const CAP: u32 = routeloom_protocol::host_ops::CAP_APP_OBJECT_V1;
 const REQUEST_BASE: u64 = 0x4f54_0000_0000_0000;
 const RECORDS: usize = 64;
+pub fn owns_request(request: u64) -> bool {
+    request & 0xffff_0000_0000_0000 == REQUEST_BASE
+}
 #[derive(Clone, PartialEq, Eq)]
 pub struct Request {
     pub node: u64,
@@ -171,6 +174,17 @@ impl ObjectOps {
         }
         true
     }
+    pub fn request_pending_in_session(&self, request: u64, session: u64) -> bool {
+        self.lock().records.iter().any(|record| {
+            !record.terminal()
+                && record.session == session
+                && record.created.elapsed()
+                    < Duration::from_millis(u64::from(record.request.deadline_ms))
+                && record.pending.is_some_and(|(id, queued, _, _)| {
+                    id == request && queued.elapsed() < Duration::from_secs(3)
+                })
+        })
+    }
     pub fn reply(&self, request: u64, session: u64, bytes: &[u8]) {
         if bytes.len() != 13 || bytes[..2] != [1, 0x84] {
             return;
@@ -315,7 +329,7 @@ impl ObjectOps {
             .try_send(Outbound::Seal(Frame {
                 kind: FrameKind::HostOps,
                 flags: 0,
-                session: 0,
+                session,
                 request,
                 body,
             }))
@@ -528,6 +542,7 @@ mod tests {
             let Outbound::Seal(frame) = receiver.recv().unwrap() else {
                 panic!("sealed object request");
             };
+            assert_eq!(frame.session, 10, "bind the admitted HostLink session");
             let mut bytes = vec![1, 0x84];
             bytes.extend_from_slice(&record.id.to_be_bytes());
             bytes.push(3);
@@ -560,5 +575,52 @@ mod tests {
             assert!(decode_base64(invalid).is_err());
         }
         assert!(decode_base64(&crate::receive_log::base64_encode(&vec![1; 4097])).is_err());
+    }
+    #[test]
+    fn writer_rejects_expired_object_commands() {
+        for boundary in ["deadline", "reply_timeout", "session_lost"] {
+            let state = State::default();
+            {
+                let mut session = state.session.lock().unwrap();
+                session.authenticated = true;
+                session.id = Some(10);
+            }
+            state
+                .object_ops
+                .submit(
+                    Principal::UnixUid(1),
+                    3,
+                    [1; 16],
+                    Request {
+                        node: 2,
+                        data: vec![1],
+                        deadline_ms: 30000,
+                        app_tag: 0,
+                        encoding: 0,
+                    },
+                )
+                .unwrap();
+            let (sender, receiver) = mpsc::sync_channel(1);
+            state.object_ops.step(10, 3, true, &sender);
+            let Outbound::Seal(frame) = receiver.recv().unwrap() else {
+                panic!("sealed object request");
+            };
+            assert!(crate::queued_diagnostic_is_live(&state, frame.request));
+            {
+                let mut inner = state.object_ops.lock();
+                let record = &mut inner.records[0];
+                match boundary {
+                    "deadline" => record.created = Instant::now() - Duration::from_secs(30),
+                    "reply_timeout" => {
+                        record.pending.as_mut().unwrap().1 = Instant::now() - Duration::from_secs(3)
+                    }
+                    _ => record.state = "INDETERMINATE",
+                }
+            }
+            assert!(
+                !crate::queued_diagnostic_is_live(&state, frame.request),
+                "{boundary}"
+            );
+        }
     }
 }
