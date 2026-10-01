@@ -7,7 +7,7 @@ use std::sync::{mpsc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 pub const CAP: u32 = routeloom_protocol::host_ops::CAP_APP_OBJECT_V1;
-const REQUEST_BASE: u64 = 0x4f42_0000_0000_0000;
+const REQUEST_BASE: u64 = 0x4f54_0000_0000_0000;
 const RECORDS: usize = 64;
 #[derive(Clone, PartialEq, Eq)]
 pub struct Request {
@@ -533,6 +533,10 @@ mod tests {
             bytes.push(3);
             bytes.extend_from_slice(&reason.to_be_bytes());
             bytes.extend_from_slice(&1u32.to_be_bytes());
+            assert!(!crate::observation::owns_request(frame.request));
+            assert!(!crate::remote_observation::owns_request(frame.request));
+            assert!(!crate::telemetry::owns_request(frame.request));
+            assert!(!crate::group::owns_request(frame.request));
             ops.reply(frame.request, 11, &bytes);
             ops.reply(frame.request + 1, 10, &bytes);
             assert_eq!(ops.get(&principal, record.id).unwrap().state, "UPLOADING");
