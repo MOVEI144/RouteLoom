@@ -44,6 +44,8 @@ menu "RouteLoom device"
             from ROUTELOOM_DEVELOPMENT_KEY_HEX instead of the provisioned
             BoardConfig (rlcfg/rlkeys). For a first two-board test without
             provisioning; field images leave it off.
+            Gateway USB requires the provisioned BoardConfig secret; this
+            quick start cannot boot a gateway with an attached USB bridge.
 
     config ROUTELOOM_TX_POWER_QDBM
         int "Approved test profile TX power, quarter-dBm"

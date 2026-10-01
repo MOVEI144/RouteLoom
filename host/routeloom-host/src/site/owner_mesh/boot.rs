@@ -55,6 +55,16 @@ fn mesh_m06_gateway_power_cut_resumes() {
     let auth_before = world.usb_auth_total();
 
     world.peers[0].power_cut();
+    // The next tick reaches a closed pipe; recovery must also work when
+    // the gateway exits before the host writes that tick.
+    assert_eq!(
+        world.peers[0]
+            .child
+            .wait()
+            .expect("gateway powered off")
+            .code(),
+        Some(42)
+    );
     step_until_reboots(&mut world, 0, 1, 1000);
     let rebooted_at = world.now;
     let mut next_send = world.now;

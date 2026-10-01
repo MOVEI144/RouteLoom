@@ -24,6 +24,7 @@ CI成功はhost/build evidence。実機起動、空中通信、到達距離、�
 
 ## 明示的な非保証
 
+reference／bridge firmware の既定は DevRam（Development）。製品 image の MemberEdhoc（Candidate）既定化は V2-17b で H2 合格の記録を得てから行う。bench firmware は従来どおり MemberEdhoc。起動 log と capabilities は選択された profile を表示する。
 DevRamは共有鍵から導くRAM sessionの開発profileで、機器固有IdentityやEDHOC/RPKを置き換えない。reference firmwareの既定keyを配備に使ってはいけない。
 
 Wire v2の数値IDとbyte layoutはtest cipher vector付きで凍結済み（v1からepochを32bit、crypto counterを48bitへ改訂。v1で書き込んだ機器はNVS消去が必要）。本番Security Profileとその適用後vectorは未凍結（G-SEC）。

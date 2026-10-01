@@ -62,7 +62,9 @@ class CellList(unittest.TestCase):
         # cells onto DevRam and Member, keeping one compatibility cell, and
         # added the Member channel-plan gateway and participant (50); V2-10
         # removed that compatibility cell with LegacyFixture itself (49).
-        self.assertEqual(len(cells), 49)
+        # V2-17 added the C and standalone-gateway examples and the external
+        # consumer on S3, C5 and C6 (54).
+        self.assertEqual(len(cells), 54)
         self.assertTrue({
             "bridge_node-esp32c3-normal-off-maintenance_member",
             "reference_node-esp32c6-normal-off-maintenance_member",
@@ -78,7 +80,7 @@ class CellList(unittest.TestCase):
             self.assertEqual(set(cell["budget"]), {"app_bin_max", "static_free_min",
                                                    "rtc_used_max"}, cell["id"])
         pairs = {(c["app"], c["target"]) for c in cells}
-        for app in ("reference_node", "bridge_node", "bench_node"):
+        for app in ("reference_node", "bridge_node", "bench_node", "idf_consumer"):
             for target in ("esp32c3", "esp32s3", "esp32c5", "esp32c6"):
                 self.assertIn((app, target), pairs)
 
@@ -110,7 +112,7 @@ class CellList(unittest.TestCase):
         # Artifacts come from each cell's own project directory.
         self.assertIn("${{ matrix.dir }}/build/*.bin", workflow)
         dirs = {c["id"]: c["dir"] for c in include}
-        self.assertEqual(dirs["espnow_node-esp32c3-example"], "examples/espnow_node")
+        self.assertEqual(dirs["endpoint_cpp-esp32c3-example"], "examples/endpoint_cpp")
         self.assertEqual(dirs["bridge_node-esp32c3-normal-off-off"], "firmware/bridge_node")
 
     def test_existing_c6_artifact_names_are_preserved(self):
@@ -167,7 +169,8 @@ class Sdkconfig(unittest.TestCase):
     def test_project_rejects_retired_mode_before_idf_rewrites_sdkconfig(self):
         guard = ROOT / "components/routeloom_device/retired_mode_guard.cmake"
         for project in ("firmware/reference_node", "firmware/bridge_node",
-                        "firmware/bench_node", "examples/espnow_node"):
+                        "firmware/bench_node", "examples/endpoint_cpp", "examples/endpoint_c",
+                        "examples/standalone_gateway"):
             lines = (ROOT / project / "CMakeLists.txt").read_text(encoding="utf-8")
             self.assertLess(lines.index("retired_mode_guard.cmake"),
                             lines.index("project.cmake"), project)
@@ -358,6 +361,46 @@ class Budget(unittest.TestCase):
         code, _, err = self.size("a")
         self.assertEqual(code, 1)
         self.assertIn("legacy_psk_load", err)
+
+    def test_member_image_refuses_development_key(self):
+        data = json.loads(self.cells.read_text())
+        data["cells"][0]["expect"] = ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"]
+        self.cells.write_text(json.dumps(data))
+        key_hex = re.search(
+            r'config ROUTELOOM_DEVELOPMENT_KEY_HEX\s+string[^\n]*\n\s+default "([0-9a-fA-F]+)"',
+            (ROOT / "components/routeloom_device/Kconfig").read_text()).group(1)
+        image = self.dir / "a" / "routeloom_bench_node.bin"
+        self.assertEqual(self.size("a")[0], 0)
+        for key in (bytes.fromhex(key_hex), key_hex.encode(), key_hex.upper().encode()):
+            image.write_bytes(bytes(100) + key + bytes(1000 - 100 - len(key)))
+            code, _, err = self.size("a")
+            self.assertEqual(code, 1)
+            self.assertIn("development key", err)
+        # The explicit development profile still admits its quick-start key.
+        data["cells"][0]["expect"] = ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"]
+        self.cells.write_text(json.dumps(data))
+        self.assertEqual(self.size("a")[0], 0)
+
+    def test_member_image_refuses_configured_development_key(self):
+        key_hex = bytes(range(32)).hex()
+        setting = f'CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX="{key_hex}"'
+        image = self.dir / "a" / "routeloom_bench_node.bin"
+        config = self.dir / "sdkconfig"
+        for source in ("overlay", "sdkconfig"):
+            data = json.loads(self.cells.read_text())
+            data["cells"][0]["expect"] = ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"]
+            data["cells"][0]["overlay"] = [setting] if source == "overlay" else []
+            config.write_text(setting if source == "sdkconfig" else "")
+            self.cells.write_text(json.dumps(data))
+            image.write_bytes(bytes(1000))
+            self.assertEqual(self.size("a")[0], 0)
+            for key in (bytes.fromhex(key_hex), key_hex.encode(), key_hex.upper().encode()):
+                with self.subTest(source=source, encoding=key == bytes.fromhex(key_hex)):
+                    image.write_bytes(bytes(100) + key + bytes(1000 - 100 - len(key)))
+                    code, _, err = self.size("a")
+                    self.assertEqual(code, 1)
+                    self.assertIn("development key", err)
+                    self.assertNotIn(key_hex, err)
 
     def test_symbols_absent_requires_a_symbol_table(self):
         data = json.loads(self.cells.read_text())

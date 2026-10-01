@@ -58,6 +58,9 @@
 #endif
 #endif
 
+struct rl_dev;
+struct rl_dev_observer;
+
 namespace routeloom {
 
 class EntropySource;
@@ -98,7 +101,8 @@ struct DeviceConfig {
   keys::Secret dev_psk{};
   // Gateway role: the USB byte stream, the session secret (outlives the
   // device), the HelloAck capability bitmap and the device nonce (0 draws
-  // one from the radio RNG after RF start).
+  // one from the radio RNG after RF start). An attached stream with an
+  // unset secret is rejected by begin() before Owner/radio startup.
   usb::ByteStream* usb{nullptr};
   ByteView usb_secret{};
   std::uint32_t usb_capability{0};
@@ -222,6 +226,15 @@ inline NetworkId usb_boot_network(const sdkv1::SiteStore& site, NetworkId bootst
 DeviceConfig device_config_from_kconfig() noexcept;
 #endif
 
+class Device;
+// The C API handle (device.h) over `device`, for an application that boots
+// the Device itself with begin() and step(). One handle per image: it
+// takes over observe(), observe_device() and on_poll(), and copies
+// `observer` (may be null). rl_dev_start() is the Kconfig boot path.
+// Returns null for an invalid observer header or a second binding, without
+// changing the existing observer or starting a task.
+rl_dev* device_c_bind(Device& device, const rl_dev_observer* observer) noexcept;
+
 class Device {
  public:
   using Job = void (*)(Device& device, void* ctx);
@@ -323,6 +336,7 @@ class Device {
   GatewayDelivery* gateway() noexcept;
 
  private:
+  friend struct ::rl_dev;
   friend struct DeviceTestAccess;
   class Observer final : public NodeObserver {
    public:
@@ -353,7 +367,7 @@ class Device {
   enum class Operation : std::uint8_t { None = 0, Join, Leave };
 
   bool callback_active() const noexcept;
-  void run_posted() noexcept;
+  void run_posted(std::uint8_t budget) noexcept;
   void update_observation_remote() noexcept;
   Status apply_join_policy(const JoinPolicy& policy) noexcept;
   MembershipStage current_stage() const noexcept;

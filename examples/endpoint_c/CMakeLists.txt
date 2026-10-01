@@ -16,4 +16,4 @@ if(EXISTS "${_routeloom_repo_components}/routeloom_device/retired_mode_guard.cma
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(routeloom_espnow_node)
+project(routeloom_endpoint_c)
