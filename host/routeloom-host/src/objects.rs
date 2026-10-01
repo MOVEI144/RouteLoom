@@ -200,6 +200,9 @@ impl ObjectOps {
         else {
             return;
         };
+        if record.terminal() {
+            return;
+        }
         let Some((pending, _, sub, count)) = record.pending else {
             return;
         };
@@ -622,5 +625,46 @@ mod tests {
                 "{boundary}"
             );
         }
+    }
+    #[test]
+    fn late_upload_reply_cannot_restart_terminal_operation() {
+        let ops = ObjectOps::with_boot(17);
+        let principal = Principal::UnixUid(1);
+        let record = ops
+            .submit(
+                principal.clone(),
+                3,
+                [1; 16],
+                Request {
+                    node: 2,
+                    data: vec![1],
+                    deadline_ms: 30000,
+                    app_tag: 0,
+                    encoding: 0,
+                },
+            )
+            .unwrap();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        ops.step(10, 3, true, &sender);
+        let Outbound::Seal(frame) = receiver.recv().unwrap() else {
+            panic!("sealed object request");
+        };
+        ops.lock().records[0].pending.as_mut().unwrap().1 = Instant::now() - Duration::from_secs(3);
+        ops.step(10, 3, true, &sender);
+        assert_eq!(
+            ops.get(&principal, record.id).unwrap().state,
+            "INDETERMINATE"
+        );
+        let mut bytes = vec![1, 0x84];
+        bytes.extend_from_slice(&record.id.to_be_bytes());
+        bytes.push(1);
+        bytes.extend_from_slice(&[0; 6]);
+        ops.reply(frame.request, 10, &bytes);
+        assert_eq!(
+            ops.get(&principal, record.id).unwrap().state,
+            "INDETERMINATE"
+        );
+        ops.step(10, 3, true, &sender);
+        assert!(receiver.try_recv().is_err());
     }
 }
