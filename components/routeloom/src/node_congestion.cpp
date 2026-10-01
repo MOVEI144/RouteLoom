@@ -31,8 +31,16 @@ void MeshNode::refresh_link_cost(Neighbor& neighbor, const MonotonicMs now_ms) n
   // invented). A dirty window (sdk-completion/03 §3.3 — some attempt resolved
   // Unknown) may still count work toward worsening but must never let the
   // measured ratio improve the base off nominal.
+  // Submission work precedes its authenticated accept. Sampling while
+  // an exchange is unresolved would turn one healthy in-flight attempt
+  // into apparent loss; keep the ratio and its relaxation at a settled boundary.
+  bool exchange_pending = physical_.active && physical_.job.requires_hop_accept &&
+                          physical_.job.peer == neighbor.node;
+  awaiting_hop_.for_each([&](const AwaitingHop& value) {
+    if (value.job.peer == neighbor.node) exchange_pending = true;
+  });
   RouteMetric base = neighbor.metric;
-  if (neighbor.exchange_accepts >= kExchangeMinAccepts) {
+  if (!exchange_pending && neighbor.exchange_accepts >= kExchangeMinAccepts) {
     const RouteMetric measured = measured_link_base(
         neighbor.metric, neighbor.exchange_work, neighbor.exchange_accepts);
     if (!neighbor.metric_window_dirty || measured >= base) base = measured;
@@ -70,7 +78,7 @@ void MeshNode::refresh_link_cost(Neighbor& neighbor, const MonotonicMs now_ms) n
   RouteMetric cost = neighbor.link_cost;
   if (target >= cost) {
     cost = target;
-  } else if (!neighbor.metric_window_dirty &&
+  } else if (!exchange_pending && !neighbor.metric_window_dirty &&
              now_ms - neighbor.last_cost_relax_ms >= kLinkCostRelaxWindowMs) {
     cost = relax_link_cost(cost, target, base);
     neighbor.last_cost_relax_ms = now_ms;

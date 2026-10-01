@@ -475,6 +475,41 @@ void test_queue_penalty_ownership() {
 
 // ----------------------- node: measured exchange ratio (D4-05)
 
+void test_unresolved_exchange_keeps_nominal_cost() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  MeshNode* b = h.add(2);
+  h.link(1, 2);
+  const auto tick = [&] {
+    h.now += 5;
+    CHECK_OK(a->poll(h.now));
+    CHECK_OK(b->poll(h.now));
+    h.net.flush(h.now);
+  };
+  for (int i = 0; i < 20; ++i) tick();
+  for (int send = 0; send < 5; ++send) {
+    MessageId id{};
+    CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, id));
+    for (int i = 0; i < 20; ++i) tick();
+  }
+  CHECK(a->peer_link_cost(2) == 1);
+  MessageId id{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, id));
+  CHECK_OK(a->poll(h.now + 5));
+  // Physical completion is pending: the new work has no accept yet.
+  CHECK_OK(a->poll(h.now + 10));
+  CHECK(a->peer_link_cost(2) == 1);
+  h.now += 10;
+  h.net.flush(h.now);
+  // MAC completion arrived, but the receiver has not emitted HOP_ACCEPT.
+  CHECK_OK(a->poll(h.now + 5));
+  CHECK(a->peer_link_cost(2) == 1);
+  CHECK_OK(b->poll(h.now + 5));
+  h.net.flush(h.now + 5);
+  CHECK_OK(a->poll(h.now + 10));
+  CHECK(a->peer_link_cost(2) == 1);
+}
+
 void test_exchange_ratio_cost() {
   // D4-05: every-other physical attempt fails at the driver; the measured
   // ratio is eligible attempt work / authenticated accepts (2/1 here).
@@ -843,6 +878,7 @@ int main() {
   test_severe_busy_and_switch_hold();
   test_improvement_ad_gap();
   test_queue_penalty_ownership();
+  test_unresolved_exchange_keeps_nominal_cost();
   test_exchange_ratio_cost();
   test_sustained_load_switches_route();
   test_sustained_busy_switches_route();
