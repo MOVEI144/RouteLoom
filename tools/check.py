@@ -569,7 +569,8 @@ def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
     patterns = data.get("symbols_absent", []) + cell.get("symbols_absent", [])
     if member:
         patterns += ["DevGroupProvider", "DevGroupSender", "DevScopeProvider",
-                     "DevMembershipHooks", "DevelopmentPskSecurityProvider", "DevPskAuthenticator"]
+                     "DevMembershipHooks", "DevelopmentPskSecurityProvider", "DevPskAuthenticator",
+                     "DevConfigAuthorityVerifier"]
     if patterns:
         try:
             symbols = elf_symbols(files["elf"])

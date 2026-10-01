@@ -402,7 +402,7 @@ class Budget(unittest.TestCase):
         self.assertEqual(self.size("a")[0], 0)
         for provider in ("DevGroupProvider", "DevGroupSender", "DevScopeProvider",
                          "DevMembershipHooks", "DevelopmentPskSecurityProvider",
-                         "DevPskAuthenticator"):
+                         "DevPskAuthenticator", "DevConfigAuthorityVerifier"):
             with self.subTest(provider=provider):
                 self.build("a", 1000, 500, 40, symbols=("app_main", provider))
                 code, _, err = self.size("a")
