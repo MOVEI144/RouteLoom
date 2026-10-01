@@ -20,6 +20,8 @@
 - A completed link's quiet m4 retry no longer delays a new cookie-verified
   discovery carrier from the same peer; unauthenticated carriers cannot
   supersede it.
+- An EDHOC initiator awaiting m4 retries m3 instead of the obsolete m1
+  cache, so lost m3/m4 can complete without restarting the exchange.
 - Cached channel-plan blobs obey the same site and structural checks as
   refetched blobs, including after a restart.
 - A fresh scoped neighbor binding exchanges current self/gateway route

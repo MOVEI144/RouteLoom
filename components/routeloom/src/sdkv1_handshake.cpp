@@ -1866,6 +1866,10 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
     std::memcpy(big_tx_.data(), m3.data(), m3_size);
     big_tx_size_ = m3_size;
     big_tx_owner_ = record->token;
+    // M3 replaces M1 as the initiator's retry evidence. Keeping the small
+    // cache live would make poll() resend M1 while awaiting M4.
+    secure_clear(record->last_tx);
+    record->last_tx_size = 0;
     record->state = RecordState::EdhocWaitM4;
     record->retransmit_at = now + kEdhocRetransmitMs;
     record->retransmits = 0;

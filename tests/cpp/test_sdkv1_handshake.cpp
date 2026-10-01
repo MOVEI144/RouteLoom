@@ -675,6 +675,39 @@ void test_link_edhoc_full() {
   CHECK(result.m1_size + 6 + 16 <= 116);  // object header + cookie, §13.1
 }
 
+void test_initiator_retries_m3_until_m4_arrives() {
+  Pair pair = Pair::make();
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  HandshakeResult m1{}, m2{}, m3{}, retry{}, m4{}, result{};
+  CHECK_OK(pair.a->engine.take_result(m1));
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m1, frozen, kT0 + 50));
+  CHECK_OK(pair.b->engine.take_result(m2));
+  CHECK_OK(deliver_to(*pair.a, *pair.b, m2, frozen, kT0 + 100));
+  CHECK_OK(pair.a->engine.take_result(m3));
+  // The first M3 is lost. A timeout must resend M3, never the cached M1.
+  CHECK_OK(pair.a->engine.poll(kT0 + 500));
+  CHECK_OK(pair.a->engine.take_result(retry));
+  CHECK(retry.phase == 4 && retry.step == 3 && retry.message_size == m3.message_size);
+  CHECK(std::memcmp(retry.message.data(), m3.message.data(), m3.message_size) == 0);
+  CHECK_OK(deliver_to(*pair.b, *pair.a, retry, frozen, kT0 + 550));
+  CHECK_OK(pair.b->engine.take_result(m4));
+  CHECK_OK(pair.b->engine.accept_send(m4.token, m4.phase, m4.step));
+  CHECK_OK(pair.b->engine.take_result(result));
+  CHECK(result.event == HandshakeEvent::Established);
+  // The first M4 is lost too. Exact M3 obtains M4 without reinstalling.
+  CHECK_OK(pair.a->engine.poll(kT0 + 900));
+  CHECK_OK(pair.a->engine.take_result(retry));
+  CHECK(retry.step == 3 && retry.message_size == m3.message_size);
+  CHECK_OK(deliver_to(*pair.b, *pair.a, retry, frozen, kT0 + 950));
+  CHECK_OK(pair.b->engine.take_result(result));
+  CHECK(result.step == 4 && result.message_size == m4.message_size);
+  CHECK_OK(deliver_to(*pair.a, *pair.b, result, frozen, kT0 + 1000));
+  CHECK_OK(pair.a->engine.take_result(result));
+  CHECK(result.event == HandshakeEvent::Established);
+  CHECK(pair.a->sink.installs == 1 && pair.b->sink.installs == 1);
+}
+
 void test_responder_waits_for_m4_admission() {
   Pair pair = Pair::make();
   const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
@@ -2050,6 +2083,7 @@ void test_dev_configure_busy_while_in_flight() {
 
 int main() {
   test_link_edhoc_full();
+  test_initiator_retries_m3_until_m4_arrives();
   test_responder_waits_for_m4_admission();
   test_m1_park_yields_to_live_m4();
   test_new_link_carrier_supersedes_quiet_m4();
