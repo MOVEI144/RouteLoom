@@ -140,3 +140,5 @@ APPLIEDのprovider変更は、shared idempotency domainまたは明示duplicate-
 Entropy Providerにはinitialize、ready、fill、reseed、failureを要求し、READY以外で鍵生成を拒否する。SDKの初期化で秘密を乱数不足のまま仮作成しない。
 
 capabilityは設計予定／実装／認定／有効を別に返す。[feature manifest](../reference/feature-profiles.json)。公開ABIの数値・struct layoutは未凍結。今回のJSONとPython小モデルはC ABIの代替ではない。
+
+SDK の firmware sleep 経路は耐久 pending の復旧結果を `DeviceObserver::on_sleep_pending_result(record, status)` に通知する。元の logical message ID を保持し、Ok は再注入の受付を示す（配送の成功ではない）。期限切れ・TIME_UNCERTAIN・再注入の失敗も通知し、callback 内の Device 変更は Busy で拒否する。caller-owned PowerCoordinator を bind する構成では、その coordinator に渡した PowerEvents が通知先になる。

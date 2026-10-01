@@ -18,6 +18,8 @@ void esp_deep_sleep_start() {}
 
 void bind_device_sleep_runtime(routeloom::Device&, routeloom::espnow::EspNowRuntime&) noexcept;
 
+routeloom::PowerEvents& device_sleep_events(routeloom::Device&) noexcept;
+
 namespace {
 using namespace routeloom;
 int failures = 0;
@@ -74,6 +76,24 @@ class Port final : public PowerPort {
   Status park{};
   unsigned aborts{0};
   unsigned enters{0};
+};
+
+class PendingObserver final : public DeviceObserver {
+ public:
+  explicit PendingObserver(Device& device) : device_(device) {}
+  void on_sleep_pending_result(const PendingDeliveryRecord& pending,
+                               StatusCode status) noexcept override {
+    ++calls;
+    id = pending.original_id;
+    result = status;
+    CHECK(device_.abort_sleep().code == StatusCode::Busy);
+  }
+  unsigned calls{0};
+  MessageId id{};
+  StatusCode result{StatusCode::Ok};
+
+ private:
+  Device& device_;
 };
 
 class Events final : public PowerEvents {
@@ -168,5 +188,36 @@ int run_device_sleep_scenarios() {
   drive(4500);
   CHECK(storage.writes == writes && !runtime.node().draining());
   runtime.stop();
+  espnow::EspNowRuntime pending_runtime(config, security, observer);
+  CHECK(pending_runtime.initialize());
+  CHECK(pending_runtime.start());
+  Device pending_device;
+  bind_device_sleep_runtime(pending_device, pending_runtime);
+  PendingObserver pending_observer(pending_device);
+  pending_device.observe_device(&pending_observer);
+  Storage pending_storage;
+  Port pending_port;
+  PowerCoordinator pending_power(PowerConfig{}, pending_runtime.node(), pending_port,
+                                 pending_storage, device_sleep_events(pending_device));
+  idf_stub::set_now_us(0);
+  CHECK(pending_device.bind_sleep(pending_power, ResetCause::ColdBoot, {}, 0));
+  const std::uint8_t payload = 42;
+  SendOptions options{};
+  options.delivery = DeliveryClass::Reliable;
+  options.lifetime_ms = 10000;
+  options.persist_across_sleep = true;
+  MessageId original{};
+  CHECK(pending_device.send(2, {&payload, 1}, options, original));
+  CHECK(pending_device.prepare_sleep(SleepRequest{}));
+  idf_stub::set_now_us(500000);
+  pending_device.step(500);
+  const auto saved_ticket = pending_device.sleep_ticket();
+  CHECK(saved_ticket.issued);
+  CHECK(pending_device.enter_sleep(saved_ticket));
+  idf_stub::set_now_us(600000);
+  CHECK(pending_device.wake(ResetCause::DeepSleepWake, {}, 600));
+  CHECK(pending_observer.calls == 1 && pending_observer.id == original &&
+        pending_observer.result == StatusCode::TimeUncertain);
+  pending_runtime.stop();
   return failures;
 }

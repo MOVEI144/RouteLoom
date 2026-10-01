@@ -140,6 +140,20 @@ void Device::Observer::on_verified_contact(const NodeId source,
   device_->note_gateway_contact(source, now_ms);
 }
 
+#if ROUTELOOM_DEVICE_SLEEP
+void Device::Observer::on_pending_result(const PendingDeliveryRecord& record,
+                                         const StatusCode result) noexcept {
+  ESP_LOGI(device_->tag_, "sleep pending session=%lu sequence=%llu status=%u",
+           static_cast<unsigned long>(record.original_id.session),
+           static_cast<unsigned long long>(record.original_id.sequence),
+           static_cast<unsigned>(result));
+  if (device_->device_observer_ != nullptr) {
+    CallbackScope scope(device_->in_callback_);
+    device_->device_observer_->on_sleep_pending_result(record, result);
+  }
+}
+#endif
+
 void Device::Observer::on_delivery(const DeliveryResult& result) noexcept {
   if (device_->bridge_ == nullptr) {
     ESP_LOGI(device_->tag_, "delivery session=%lu sequence=%llu state=%u reason=%s",
@@ -355,9 +369,9 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   }
 #endif
 
-  static Observer observer;
-  observer.bind(*this);
-  static espnow::EspNowRuntime runtime(config.radio, provider, observer);
+  Observer& node_observer = observer();
+  node_observer.bind(*this);
+  static espnow::EspNowRuntime runtime(config.radio, provider, node_observer);
   status = runtime.initialize();
   if (!status) return status;
   runtime_ = &runtime;

@@ -727,9 +727,8 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
                            config.security == DeviceSecurity::DevRam ? "rlpower" : "rlpwrmem");
   if (!power_open) fail(power_open.detail);
   static sdkv1::BlobPowerStorage power_storage(power_namespace);
-  static NullPowerEvents power_events;
   static PowerCoordinator power(PowerConfig{30000}, node, owner_power_port, power_storage,
-                                power_events);
+                                observer());
   owner_power_port.bind_owner(*owner_, &owner_rtc_port);
   const std::int64_t owner_prepare_at_us =
       esp_timer_get_time() + static_cast<std::int64_t>(CONFIG_ROUTELOOM_SLEEP_AFTER_MS) * 1000LL;

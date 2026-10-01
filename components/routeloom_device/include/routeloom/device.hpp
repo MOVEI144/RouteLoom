@@ -215,6 +215,9 @@ class DeviceObserver {
     (void)cause;
   }
   virtual void on_connectivity(const ConnectivitySnapshot& snapshot) noexcept { (void)snapshot; }
+  // Durable sleep pending was re-injected (Ok) or refused/expired. Ok is
+  // admission only; on_delivery reports the subsequent delivery outcome.
+  virtual void on_sleep_pending_result(const PendingDeliveryRecord&, StatusCode) noexcept {}
   // A request_join or leave ended: JOINED, JOIN_DENIED, JOIN_PENDING,
   // JOIN_TIMEOUT, LEFT or RECOVERY_REQUIRED (reason ids).
   virtual void on_operation(OperationId operation, std::uint16_t result) noexcept {
@@ -359,12 +362,24 @@ class Device {
  private:
   friend struct ::rl_dev;
   friend struct DeviceTestAccess;
+#if ROUTELOOM_DEVICE_SLEEP
+  class Observer final : public NodeObserver, public PowerEvents {
+#else
   class Observer final : public NodeObserver {
+#endif
    public:
     // Constant-initialized, so begin() holds it without a guard and an
     // image that never begins (maintenance console) links none of it.
     constexpr Observer() noexcept = default;
     void bind(Device& device) noexcept { device_ = &device; }
+#if ROUTELOOM_DEVICE_SLEEP
+    void on_transition(PowerState, PowerState, const char*) noexcept override {}
+    void on_pending_result(const PendingDeliveryRecord& record,
+                           StatusCode result) noexcept override;
+    void on_diagnostic(const char* reason) noexcept override {
+      on_diagnostic(reason, kInvalidNodeId, nullptr);
+    }
+#endif
     void on_message(const MessageKey& key, NodeId source, ByteView payload) noexcept override;
     void on_message(const MessageKey& key, NodeId source, ByteView payload,
                     const DeliveryAssurance& assurance) noexcept override;
@@ -380,6 +395,10 @@ class Device {
    private:
     Device* device_{nullptr};
   };
+  static Observer& observer() noexcept {
+    static Observer value;
+    return value;
+  }
   struct Posted {
     Job job{nullptr};
     void* ctx{nullptr};

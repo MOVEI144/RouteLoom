@@ -113,6 +113,10 @@ struct DeviceTestAccess {
   static void attach_runtime(Device& device, espnow::EspNowRuntime& runtime) noexcept {
     device.runtime_ = &runtime;
   }
+  static PowerEvents& sleep_events(Device& device) noexcept {
+    device.observer().bind(device);
+    return device.observer();
+  }
   static void member_gateway_image(Device& device, espnow::Sdkv1Stores& stores) noexcept {
     device.stores_ = &stores;
     device.security_ = DeviceSecurity::Member;
@@ -552,6 +556,9 @@ void test_device_begin_clears_key_on_failure() {
 void bind_device_sleep_runtime(routeloom::Device& device,
                                routeloom::espnow::EspNowRuntime& runtime) noexcept {
   routeloom::DeviceTestAccess::attach_runtime(device, runtime);
+}
+routeloom::PowerEvents& device_sleep_events(routeloom::Device& device) noexcept {
+  return routeloom::DeviceTestAccess::sleep_events(device);
 }
 int run_device_sleep_scenarios();
 
