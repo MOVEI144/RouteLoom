@@ -30,7 +30,7 @@ namespace {
 
 unsigned g_gpio_calls = 0;
 unsigned g_gpio_fail_call = 0;
-int g_gpio_direction[15]{};
+bool g_gpio_output_enabled[15]{};
 int g_gpio_level[15]{};
 bool g_wifi_init_called = false;
 bool g_rf_ready_at_wifi = false;
@@ -91,7 +91,7 @@ void reset() noexcept {
   static const std::uint8_t kDefaultMac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
   g_gpio_calls = 0;
   g_gpio_fail_call = 0;
-  std::fill_n(g_gpio_direction, 15, -1);
+  std::fill_n(g_gpio_output_enabled, 15, false);
   std::fill_n(g_gpio_level, 15, -1);
   g_wifi_init_called = false;
   g_rf_ready_at_wifi = false;
@@ -475,9 +475,9 @@ esp_err_t esp_now_set_peer_rate_config(const uint8_t* peer_addr,
   return ESP_OK;
 }
 
-esp_err_t gpio_set_direction(gpio_num_t gpio, gpio_mode_t mode) {
+esp_err_t gpio_output_enable(gpio_num_t gpio) {
   if (++g_gpio_calls == g_gpio_fail_call) return ESP_FAIL;
-  g_gpio_direction[static_cast<unsigned>(gpio)] = mode;
+  g_gpio_output_enabled[static_cast<unsigned>(gpio)] = true;
   return ESP_OK;
 }
 
@@ -490,8 +490,8 @@ esp_err_t gpio_set_level(gpio_num_t gpio, std::uint32_t level) {
 esp_err_t esp_wifi_init(const wifi_init_config_t* config) {
   g_wifi_init_called = true;
   g_antenna_at_wifi = g_gpio_level[14];
-  g_rf_ready_at_wifi = g_gpio_direction[3] == GPIO_MODE_OUTPUT && g_gpio_level[3] == 0 &&
-                       g_gpio_direction[14] == GPIO_MODE_OUTPUT && g_gpio_level[14] >= 0;
+  g_rf_ready_at_wifi = g_gpio_output_enabled[3] && g_gpio_level[3] == 0 &&
+                       g_gpio_output_enabled[14] && g_gpio_level[14] >= 0;
   (void)config;
   return ESP_OK;
 }

@@ -64,10 +64,11 @@ Status initialize_board_rf() noexcept {
 #else
   constexpr int kAntennaLevel = 0;
 #endif
+  // These reserved RF pins use the reset push-pull mode.
   // GPIO3 is active-low; GPIO14 selects the internal (0) or external (1) antenna.
-  if (gpio_set_direction(kRfSwitchEnableGpio, GPIO_MODE_OUTPUT) != ESP_OK ||
+  if (gpio_output_enable(kRfSwitchEnableGpio) != ESP_OK ||
       gpio_set_level(kRfSwitchEnableGpio, 0) != ESP_OK ||
-      gpio_set_direction(kAntennaSelectGpio, GPIO_MODE_OUTPUT) != ESP_OK ||
+      gpio_output_enable(kAntennaSelectGpio) != ESP_OK ||
       gpio_set_level(kAntennaSelectGpio, kAntennaLevel) != ESP_OK) {
     return Status::error(StatusCode::RadioFailure, "rf switch GPIO setup failed");
   }
