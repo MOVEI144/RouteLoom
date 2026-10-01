@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "routeloom/discovery_scope.hpp"
+#include "routeloom/secure_clear.hpp"
 
 namespace routeloom {
 
@@ -73,6 +74,7 @@ Status ObjectAssembler::verify(ByteView digest) const noexcept {
   sha256(data(), actual);
   std::uint8_t diff = 0;
   for (std::size_t i = 0; i < digest.size; ++i) diff |= actual[i] ^ digest.data[i];
+  secure_clear(actual);
   return diff == 0 ? Status::success() : Status::error(StatusCode::IntegrityError,
                                                      "assembly digest mismatch");
 }
