@@ -20,8 +20,9 @@ class Security final : public SecurityProvider {
   }
   std::uint32_t tx_context{1};
   Status current_rx_epoch(SecurityScope, NodeId, std::uint32_t& epoch) const noexcept override {
-    epoch = 1; return Status::success();
+    epoch = rx_context; return Status::success();
   }
+  std::uint32_t rx_context{1};
   Status next_counter(const SecurityContext& c, std::uint64_t& n) noexcept override {
     return cipher.next_counter(c, n);
   }
@@ -144,9 +145,52 @@ void terminal_ack_guard() {
     if (boundary == 2) assert(f.observer.result.reason == StatusCode::Expired);
   }
 }
+void source_floor_capacity() {
+  Fixture f;
+  assert(f.object->register_buffer({f.storage.data(), f.storage.size()}));
+  const std::uint8_t byte = 0x93;
+  object_wire::Start start{}; start.id = 1; start.total = 1; start.chunks = 1;
+  start.lifetime_ms = 2000;
+  ScopeDigest digest{}; sha256({&byte, 1}, digest);
+  std::copy_n(digest.begin(), start.digest.size(), start.digest.begin());
+  MonotonicMs now = 0;
+  const auto receive = [&](NodeId peer, ObjectId id, std::uint32_t boot) {
+    start.id = id;
+    auto manifest = frame(FrameType::AppObjectStart, start);
+    auto chunk = frame(FrameType::AppObjectChunk, object_wire::Chunk{id, 0, {&byte, 1}});
+    for (auto* wire_frame : {&manifest, &chunk}) {
+      wire_frame->header.origin = peer;
+      wire_frame->header.message.session = boot;
+      wire_frame->header.end_epoch = f.security.rx_context;
+      f.object->on_config_frame(peer, *wire_frame, now);
+    }
+    f.object->poll(now);
+    // Completion records expire; live source floors must survive them.
+    now += 32000;
+    f.object->poll(now);
+  };
+  // Same low 32 bits, distinct full-width peer identities.
+  for (std::size_t i = 0; i < profile::kEndSessions; ++i) {
+    receive((static_cast<NodeId>(i + 1) << 32) | 2, 1, 2);
+    assert(f.observer.received == i + 1);
+  }
+  const unsigned full = f.observer.received;
+  receive((static_cast<NodeId>(profile::kEndSessions + 1) << 32) | 2, 1, 2);
+  assert(f.observer.received == full);  // full: no live floor is evicted
+  const NodeId first = (NodeId{1} << 32) | 2;
+  receive(first, 1, 2);  // expired completion is not delivered again
+  receive(first, 2, 1);  // an older boot cannot raise the ID floor
+  assert(f.observer.received == full);
+  receive(first, 2, 2);
+  assert(f.observer.received == full + 1);
+  ++f.security.rx_context;  // retired contexts free both identity and progress
+  receive((static_cast<NodeId>(profile::kEndSessions + 1) << 32) | 2, 1, 2);
+  assert(f.observer.received == full + 2);
+}
 }
 int main(int argc, char** argv) {
   if (argc == 1 || std::string(argv[1]) == "loan") loan_registration();
   if (argc == 1 || std::string(argv[1]) == "deadline") received_deadline();
   if (argc == 1 || std::string(argv[1]) == "ack") terminal_ack_guard();
+  if (argc == 1 || std::string(argv[1]) == "floor") source_floor_capacity();
 }

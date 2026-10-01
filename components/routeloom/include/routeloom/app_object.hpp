@@ -72,10 +72,10 @@ class AppObject final : public ConfigEndpointSink {
   struct Key {
     NodeId peer{0};
     NetworkId network{0};
+    NodeId self{0};
     std::uint32_t boot{0};
     std::uint32_t epoch{0};
     ObjectId id{0};
-    NodeId self{0};
     std::uint32_t self_boot{0};
     bool operator==(const Key& other) const noexcept;
   };
@@ -102,7 +102,6 @@ class AppObject final : public ConfigEndpointSink {
   // A floor survives completion-record expiry until its crypto context is
   // retired. No live floor is evicted to admit a new source.
   struct Floor {
-    NodeId peer{0};
     std::uint32_t epoch{0};
     ObjectId highest{0};
     std::uint32_t boot{0};
@@ -154,6 +153,9 @@ class AppObject final : public ConfigEndpointSink {
   ConfigEndpointSink* fallback_{nullptr};
   std::array<Rx, ROUTELOOM_APP_OBJECT_RX_SLOTS> rx_{};
   std::array<Record, 4> records_{};
+  // Separate naturally aligned peer IDs avoid tail padding per floor.
+  // Both arrays use the same index and retire together with the context.
+  std::array<NodeId, profile::kEndSessions> floor_peers_{};
   std::array<Floor, profile::kEndSessions> floors_{};
   Tx tx_{};
   ObjectResult result_{};

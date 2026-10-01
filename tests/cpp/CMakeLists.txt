@@ -257,6 +257,11 @@ target_link_libraries(routeloom_sdkv1_authority_transport_tests PRIVATE routeloo
 target_compile_options(routeloom_sdkv1_authority_transport_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_authority_transport_tests COMMAND routeloom_sdkv1_authority_transport_tests)
 
+add_executable(routeloom_authority_assembler_tests test_authority_assembler.cpp)
+target_link_libraries(routeloom_authority_assembler_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_authority_assembler_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_authority_assembler_tests COMMAND routeloom_authority_assembler_tests)
+
 # RLRES1 resume state machine and its attack suite (plan P1-5, V1-F02).
 add_executable(routeloom_rlres1_tests test_rlres1.cpp)
 target_link_libraries(routeloom_rlres1_tests PRIVATE routeloom_core)

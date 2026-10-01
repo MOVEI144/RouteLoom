@@ -120,8 +120,8 @@ Status AppObject::cancel(ObjectId id) noexcept {
   return Status::success();
 }
 AppObject::Key AppObject::key(const wire::PlainFrame& frame, ObjectId id) const noexcept {
-  return {frame.header.origin, node_.config().network, frame.header.message.session,
-          frame.header.end_epoch, id, node_.node_id(), node_.config().message_session};
+  return {frame.header.origin, node_.config().network, node_.node_id(),
+          frame.header.message.session, frame.header.end_epoch, id, node_.config().message_session};
 }
 bool AppObject::live(const Key& k) const noexcept {
   std::uint32_t epoch = 0;
@@ -173,15 +173,21 @@ void AppObject::start_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
     } else { record.ack_pending = true; }
     return;
   }
-  Floor* floor = nullptr;
-  Floor* vacant = nullptr;
-  for (auto& candidate : floors_) {
+  std::size_t floor_index = floors_.size();
+  std::size_t vacant = floors_.size();
+  for (std::size_t i = 0; i < floors_.size(); ++i) {
+    auto& candidate = floors_[i];
+    auto& peer = floor_peers_[i];
     std::uint32_t epoch = 0;
-    if (candidate.peer != 0 && (!security_.current_rx_epoch(SecurityScope::EndToEnd, candidate.peer, epoch) ||
-                               epoch != candidate.epoch)) candidate = {};
-    if (candidate.peer == k.peer && candidate.epoch == k.epoch) floor = &candidate;
-    if (candidate.peer == 0 && vacant == nullptr) vacant = &candidate;
+    if (peer != 0 && (!security_.current_rx_epoch(SecurityScope::EndToEnd, peer, epoch) ||
+                     epoch != candidate.epoch)) {
+      peer = 0;
+      candidate = {};
+    }
+    if (peer == k.peer && candidate.epoch == k.epoch) floor_index = i;
+    if (peer == 0 && vacant == floors_.size()) vacant = i;
   }
+  Floor* floor = floor_index == floors_.size() ? nullptr : &floors_[floor_index];
   if (floor != nullptr && (k.boot < floor->boot || (k.boot == floor->boot && start.id <= floor->highest))) {
     queue_ack(k.peer, {k.id, AckStatus::Expired, 0, 0}, now_ms); return;
   }
@@ -206,10 +212,15 @@ void AppObject::start_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
     }
     if (rx.storage.data != nullptr && !rx.assembler.active()) slot = &rx;
   }
-  if (slot == nullptr || record_index == records_.size() || (floor == nullptr && vacant == nullptr)) {
+  if (slot == nullptr || record_index == records_.size() ||
+      (floor == nullptr && vacant == floors_.size())) {
     queue_ack(k.peer, {k.id, buffer_present ? AckStatus::Busy : AckStatus::NoBuffer, 0, 0}, now_ms); return;
   }
-  if (floor == nullptr) { floor = vacant; *floor = {k.peer, k.epoch, 0, k.boot}; }
+  if (floor == nullptr) {
+    floor_peers_[vacant] = k.peer;
+    floor = &floors_[vacant];
+    *floor = {k.epoch, 0, k.boot};
+  }
   // Routed TTL accounts for time already spent queued and in transit.
   // The object's remaining lifetime must consume that same elapsed time.
   const auto elapsed = frame.header.original_lifetime_ms - frame.header.remaining_deadline_ms;

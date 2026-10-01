@@ -121,10 +121,9 @@ void AuthorityEndpoint::drop_rx() noexcept {
   carrier_ready_ = false;
   carrier_size_ = 0;
   object_ready_ = false;
-  rx_.active = false;
   secure_clear(carrier_buf_.data(), carrier_buf_.size());
+  rx_.assembler.reset();
   secure_clear(rx_.buffer.data(), rx_.buffer.size());
-  rx_.received_chunks = 0;
 }
 
 void AuthorityEndpoint::drop_tx() noexcept {
@@ -187,7 +186,7 @@ bool AuthorityEndpoint::claim_kind(const autonomy::ControlObjectKind kind) noexc
 
 bool AuthorityEndpoint::claim_transfer(const NodeId origin,
                                        const autonomy::ObjectHash& hash) noexcept {
-  if ((rx_.active || object_ready_) && origin == rx_.origin &&
+  if ((rx_.active() || object_ready_) && origin == rx_.origin &&
       hash_equal(hash, rx_.hash)) return true;
   return tx_.active && tx_.total_len > kAuthorityCarrierBodyMax &&
          origin == tx_.gateway && hash_equal(hash, tx_.hash);
@@ -219,27 +218,33 @@ void AuthorityEndpoint::on_manifest(
     const NodeId origin, const autonomy::ControlObjectPayload& manifest,
     const MonotonicMs now_ms) noexcept {
   if (in_call_) return;
-  if (rx_.active && origin == rx_.origin && hash_equal(manifest.object_hash, rx_.hash) &&
-      manifest.total_len == rx_.total_len) {
+  if (rx_.active() && origin == rx_.origin && hash_equal(manifest.object_hash, rx_.hash) &&
+      manifest.total_len == rx_.assembler.total()) {
     // Sender retry of the live manifest: re-ack progress, no extension.
-    send_ack(origin, manifest.object_hash, rx_.received,
+    send_ack(origin, manifest.object_hash, rx_.assembler.received(),
              autonomy::ObjectAckStatus::Incomplete, now_ms);
     return;
   }
-  if (origin == kInvalidNodeId || origin == self_ || rx_.active || object_ready_ ||
+  if (origin == kInvalidNodeId || origin == self_ || rx_.active() || object_ready_ ||
       manifest.total_len < keys::kAuthorityEnvelopeMin ||
       manifest.total_len > kAuthorityObjectMax) {
     send_ack(origin, manifest.object_hash, 0, autonomy::ObjectAckStatus::Failed, now_ms);
     sat_inc(counters_.rx_denied);
     return;
   }
-  rx_.active = true;
+  rx_.assembler.reset();
+  // Preserve the authority lane's inclusive timeout boundary.
+  const auto begun = rx_.assembler.begin(
+      {rx_.buffer.data(), rx_.buffer.size()},
+      {rx_.received_chunks.data(), rx_.received_chunks.size()}, manifest.total_len,
+      kChunkDataMax, now_ms + kAuthorityReassemblyTimeoutMs + 1);
+  if (!begun) {
+    send_ack(origin, manifest.object_hash, 0, autonomy::ObjectAckStatus::Failed, now_ms);
+    sat_inc(counters_.rx_denied);
+    return;
+  }
   rx_.origin = origin;
   rx_.hash = manifest.object_hash;
-  rx_.total_len = manifest.total_len;
-  rx_.received = 0;
-  rx_.started_ms = now_ms;
-  rx_.received_chunks = 0;
   send_ack(origin, manifest.object_hash, 0, autonomy::ObjectAckStatus::Incomplete, now_ms);
 }
 
@@ -247,66 +252,54 @@ void AuthorityEndpoint::on_chunk(const NodeId origin,
                                  const autonomy::ObjectChunkPayload& chunk,
                                  const MonotonicMs now_ms) noexcept {
   if (in_call_) return;
-  if (!rx_.active || object_ready_ || origin != rx_.origin ||
+  if (!rx_.active() || object_ready_ || origin != rx_.origin ||
       !hash_equal(chunk.object_hash, rx_.hash)) {
     sat_inc(counters_.rx_denied);
     return;
   }
-  if (now_ms - rx_.started_ms > kAuthorityReassemblyTimeoutMs) {
-    const std::uint16_t progress = rx_.received;
+  if (rx_.assembler.expired(now_ms)) {
+    const std::uint16_t progress = rx_.assembler.received();
     const autonomy::ObjectHash hash = rx_.hash;
     drop_rx();
     send_ack(origin, hash, progress, autonomy::ObjectAckStatus::Failed, now_ms);
     sat_inc(counters_.rx_denied);
     return;
   }
-  if (!chunk_on_grid(rx_.total_len, chunk.offset, chunk.data_size, rx_.received)) {
+  if (!chunk_on_grid(rx_.assembler.total(), chunk.offset, chunk.data_size,
+                     rx_.assembler.received())) {
     // Out-of-window bytes poison the assembly, like the config path.
-    const std::uint16_t progress = rx_.received;
+    const std::uint16_t progress = rx_.assembler.received();
     const autonomy::ObjectHash hash = rx_.hash;
     drop_rx();
     send_ack(origin, hash, progress, autonomy::ObjectAckStatus::Failed, now_ms);
     sat_inc(counters_.rx_denied);
     return;
   }
-  const std::uint32_t bit = std::uint32_t{1} << (chunk.offset / kChunkDataMax);
-  if ((rx_.received_chunks & bit) != 0) {
-    if (std::memcmp(rx_.buffer.data() + chunk.offset, chunk.data.data(),
-                    chunk.data_size) != 0) {
-      const std::uint16_t progress = rx_.received;
-      const autonomy::ObjectHash hash = rx_.hash;
-      drop_rx();
-      send_ack(origin, hash, progress, autonomy::ObjectAckStatus::Failed, now_ms);
-      sat_inc(counters_.rx_denied);
-      return;
-    }
-  } else {
-    std::memcpy(rx_.buffer.data() + chunk.offset, chunk.data.data(), chunk.data_size);
-    rx_.received_chunks |= bit;
-    rx_.received = static_cast<std::uint16_t>(rx_.received + chunk.data_size);
+  const auto inserted = rx_.assembler.insert(
+      chunk.offset, {chunk.data.data(), chunk.data_size}, now_ms);
+  if (!inserted) {
+    const std::uint16_t progress = rx_.assembler.received();
+    const autonomy::ObjectHash hash = rx_.hash;
+    drop_rx();
+    send_ack(origin, hash, progress, autonomy::ObjectAckStatus::Failed, now_ms);
+    sat_inc(counters_.rx_denied);
+    return;
   }
-  if (rx_.received >= rx_.total_len) {
-    Digest256 digest{};
-    sha256(ByteView{rx_.buffer.data(), rx_.total_len}, digest);
-    bool match = true;
-    for (std::size_t i = 0; i < rx_.hash.size(); ++i) {
-      if (digest[i] != rx_.hash[i]) match = false;
-    }
-    secure_clear(digest);
-    if (!match) {
+  if (rx_.assembler.complete()) {
+    if (!rx_.assembler.verify({rx_.hash.data(), rx_.hash.size()})) {
       const autonomy::ObjectHash hash = rx_.hash;
+      const std::uint16_t total = rx_.assembler.total();
       drop_rx();
-      send_ack(origin, hash, rx_.total_len, autonomy::ObjectAckStatus::Failed, now_ms);
+      send_ack(origin, hash, total, autonomy::ObjectAckStatus::Failed, now_ms);
       sat_inc(counters_.rx_denied);
       return;
     }
-    rx_.active = false;
     object_ready_ = true;
-    send_ack(origin, rx_.hash, rx_.total_len, autonomy::ObjectAckStatus::Ok, now_ms);
+    send_ack(origin, rx_.hash, rx_.assembler.total(), autonomy::ObjectAckStatus::Ok, now_ms);
     sat_inc(counters_.rx_objects);
     return;
   }
-  send_ack(origin, chunk.object_hash, rx_.received,
+  send_ack(origin, chunk.object_hash, rx_.assembler.received(),
            autonomy::ObjectAckStatus::Incomplete, now_ms);
 }
 
@@ -348,8 +341,8 @@ bool AuthorityEndpoint::take_rx(AuthorityRxCarrier& out) noexcept {
   if (object_ready_) {
     // Kind-7 objects are envelope bytes verbatim (never handshake wire).
     out.kind = AuthorityCarrierKind::Envelope;
-    out.bytes = ByteView{rx_.buffer.data(), rx_.total_len};
-    out.writable = MutableByteView{rx_.buffer.data(), rx_.total_len};
+    out.bytes = ByteView{rx_.buffer.data(), rx_.assembler.total()};
+    out.writable = MutableByteView{rx_.buffer.data(), rx_.assembler.total()};
     object_ready_ = false;
     return true;
   }
@@ -493,11 +486,11 @@ bool AuthorityEndpoint::pump_tx(const MonotonicMs now_ms) noexcept {
 
 void AuthorityEndpoint::poll(const MonotonicMs now_ms) noexcept {
   if (in_call_) return;
-  if (rx_.active && !object_ready_ &&
-      now_ms - rx_.started_ms > kAuthorityReassemblyTimeoutMs) {
+  if (rx_.active() && !object_ready_ &&
+      rx_.assembler.expired(now_ms)) {
     const NodeId origin = rx_.origin;
     const autonomy::ObjectHash hash = rx_.hash;
-    const std::uint16_t progress = rx_.received;
+    const std::uint16_t progress = rx_.assembler.received();
     drop_rx();
     send_ack(origin, hash, progress, autonomy::ObjectAckStatus::Failed, now_ms);
     sat_inc(counters_.rx_denied);
@@ -506,7 +499,7 @@ void AuthorityEndpoint::poll(const MonotonicMs now_ms) noexcept {
 }
 
 bool AuthorityEndpoint::quiescent() const noexcept {
-  return !rx_.active && !carrier_ready_ && !object_ready_ && !tx_.active &&
+  return !rx_.active() && !carrier_ready_ && !object_ready_ && !tx_.active &&
          !tx_result_ready_ && !in_call_;
 }
 
