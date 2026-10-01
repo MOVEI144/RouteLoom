@@ -6,6 +6,7 @@
 #include "routeloom/device.h"
 
 #include <atomic>
+#include <algorithm>
 #include <cstring>
 
 #include "routeloom/device.hpp"
@@ -21,6 +22,15 @@ bool sized(const T* object, const std::uint32_t version) noexcept {
 template <typename T>
 bool dev_sized(const T* object) noexcept {
   return sized(object, RL_DEV_API_VERSION);
+}
+template <>
+bool dev_sized(const rl_dev_observer_t* object) noexcept {
+  return object != nullptr && object->struct_size >= offsetof(rl_dev_observer_t, on_object) &&
+         object->version == RL_DEV_API_VERSION;
+}
+template <>
+bool dev_sized(const rl_dev_capabilities_t* object) noexcept {
+  return object != nullptr && object->struct_size >= offsetof(rl_dev_capabilities_t, object_transfer) && object->version == RL_DEV_API_VERSION;
 }
 template <typename T>
 bool core_sized(const T* object) noexcept {
@@ -108,7 +118,8 @@ static_assert(RL_DEV_CONNECTIVITY_SLEEPING == static_cast<int>(Connectivity::Sle
 static_assert(RL_APPLIED_LEASE_SIZE == sizeof(ExecutionLease), "APPLIED lease size");
 }  // namespace
 
-struct rl_dev final : public NodeObserver, public DeviceObserver, public AppliedEndpointSink {
+struct rl_dev final : public NodeObserver, public DeviceObserver, public AppliedEndpointSink,
+                      public ObjectObserver {
   // A posted C job waits in one of these until its Owner pass takes it.
   struct Job {
     std::atomic<bool> used{false};
@@ -124,10 +135,17 @@ struct rl_dev final : public NodeObserver, public DeviceObserver, public Applied
   void bind(Device& target, const rl_dev_observer_t* c_observer) noexcept {
     device = &target;
     observer = rl_dev_observer_t{};
-    if (dev_sized(c_observer)) std::memcpy(&observer, c_observer, sizeof(observer));
+    if (dev_sized(c_observer)) {
+      std::memcpy(&observer, c_observer, offsetof(rl_dev_observer_t, on_object));
+      if (c_observer->struct_size >= offsetof(rl_dev_observer_t, on_object_result)) {
+        observer.on_object = c_observer->on_object;
+      }
+      if (c_observer->struct_size >= sizeof(rl_dev_observer_t)) observer.on_object_result = c_observer->on_object_result;
+    }
     sink_installed = false;
     target.observe(this);
     target.observe_device(this);
+    target.observe_object(this);
     target.on_poll(&rl_dev::poll, this);
     install_sink();
   }
@@ -180,6 +198,21 @@ struct rl_dev final : public NodeObserver, public DeviceObserver, public Applied
     if (observer.on_connectivity == nullptr) return;
     const rl_dev_connectivity_t c = to_c(snapshot);
     observer.on_connectivity(observer.user, &c);
+  }
+  void on_object(const ObjectRxInfo& info, ByteView data) noexcept override {
+    if (observer.on_object == nullptr) return;
+    rl_dev_object_rx_t c{}; dev_header(c);
+    c.source = info.source; c.object_id = info.id; c.source_boot = info.source_boot;
+    c.end_context = info.end_context; c.app_tag = info.app_tag;
+    c.content_encoding = info.content_encoding;
+    observer.on_object(observer.user, &c, data.data, data.size);
+  }
+  void on_object_result(const ObjectResult& result) noexcept override {
+    if (observer.on_object_result == nullptr) return;
+    rl_dev_object_result_t c{}; dev_header(c);
+    c.object_id = result.id; c.state = static_cast<std::uint8_t>(result.state);
+    c.reason = static_cast<std::uint16_t>(result.reason);
+    observer.on_object_result(observer.user, &c);
   }
   void on_operation(const OperationId operation, const std::uint16_t result) noexcept override {
     if (observer.on_operation != nullptr) observer.on_operation(observer.user, operation, result);
@@ -292,7 +325,10 @@ rl_status_code_t rl_dev_capabilities(rl_dev_t* device, rl_dev_capabilities_t* ou
   c.max_payload = caps.max_payload;
   c.max_group_payload = caps.max_group_payload;
   c.max_applied_payload = static_cast<std::uint16_t>(kAppliedUserPayloadMax);
-  *out = c;
+  c.object_transfer = caps.object_transfer; c.object_rx_slots = caps.object_rx_slots;
+  c.max_object_bytes = caps.max_object_bytes;
+  c.struct_size = static_cast<std::uint32_t>(std::min<std::size_t>(out->struct_size, sizeof(c)));
+  std::memcpy(out, &c, c.struct_size);
   return RL_STATUS_OK;
 }
 
@@ -309,6 +345,27 @@ rl_status_code_t rl_dev_send(rl_dev_t* device, const rl_node_id_t destination,
       device->device->send(destination, ByteView{payload, payload_size}, converted, id);
   if (status) *out_id = to_c(id);
   return to_c(status);
+}
+
+void rl_dev_object_options_init(rl_dev_object_options_t* options) {
+  if (options == nullptr) return;
+  *options = {}; dev_header(*options); options->deadline_ms = 30000;
+}
+rl_status_code_t rl_dev_send_object(rl_dev_t* device, rl_node_id_t destination,
+                                    const uint8_t* data, size_t size,
+                                    const rl_dev_object_options_t* options, uint32_t* out_id) {
+  if (device == nullptr || device->device == nullptr || out_id == nullptr || !dev_sized(options) ||
+      options->reserved != 0) return RL_STATUS_INVALID_ARGUMENT;
+  const ObjectOptions converted{options->deadline_ms, options->app_tag, options->content_encoding};
+  return static_cast<rl_status_code_t>(device->device->send_object(destination, {data, size}, converted, *out_id).code);
+}
+rl_status_code_t rl_dev_cancel_object(rl_dev_t* device, uint32_t object_id) {
+  if (device == nullptr || device->device == nullptr) return RL_STATUS_INVALID_ARGUMENT;
+  return static_cast<rl_status_code_t>(device->device->cancel_object(object_id).code);
+}
+rl_status_code_t rl_dev_register_object_buffer(rl_dev_t* device, uint8_t* storage, size_t size) {
+  if (device == nullptr || device->device == nullptr) return RL_STATUS_INVALID_ARGUMENT;
+  return static_cast<rl_status_code_t>(device->device->register_object_buffer({storage, size}).code);
 }
 
 rl_status_code_t rl_dev_send_group(rl_dev_t* device, const uint16_t group,

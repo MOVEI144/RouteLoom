@@ -140,3 +140,21 @@ decoderは長さの完全一致、予約id（0とgroup namespace）の拒否、N
 end不変部はNetwork、origin、Message ID、固定終端、配送契約、元の最大寿命、payload。hop可変部は前後hop、残hop、残forwarding予算、round、hop crypto counter。可変fieldをend AADへ入れて中継で破壊しない。remaining予算をhop側だけで保護する場合、侵害Relayによる虚偽の延長は終端の独立した時刻／認可検査がない限り完全には防げない。
 
 Provider変更時は終端contextとdestination bindingを再検証する。Message ID不変でも新しいAADを同じnonceで再暗号化しない。実encoderは88B header＋128B payload＋2×16B tag＝248Bが250Bに収まることをstatic_assertとgolden vectorで確認済み（test cipher使用）。本番crypto Profileでの再検証はG-SECに残す。122Bは実証済み長ではなく予算。
+
+## AppObject schema 1
+
+拡張型64 START、65 CHUNK、66 ACK。整数はbig-endian、すべて認証済みunicastのlink＋end保護。byte9はBulk固定。通常DATAのterminal dedup pinをchunkごとに作らず、typed frameのResolved/Evidenceとobjectのbitmap／完了記録を使う。中継はOFFでもopaqueに転送する。OFF終端はSTARTに認証済みUnsupported ACKを返す。
+
+| 型 | payload（順序） | bytes |
+|---|---|---:|
+| START | schema:u8=1、id:u32、total:u16、chunks:u8、app_tag:u16、encoding:u8、digest:16 B、lifetime_ms:u32 | 31 |
+| CHUNK | schema:u8=1、id:u32、index:u8、length:u8、data:1〜121 B | 7＋data |
+| ACK | schema:u8=1、id:u32、status:u8、missing:u8、bitmap:u64 | 15 |
+
+idはboot内単調で0禁止。totalは1〜4096、chunksはceil(total/121)、最後だけ短く、34chunkまで。digestは本文のSHA-256先頭16 B。manifest metadataはend AEADと同ID照合で保護する。lifetimeは1〜120000 msで、再送STARTでは送信側の残り期限を送る。受信期限は最初の受付で固定し、再送／重複で延ばさない。
+
+ACK statusはIncomplete=0、Complete=1、Busy=2、NoBuffer=3、Conflict=4、Expired=5、Cancelled=6（予約）、Unsupported=7、Failed=8。bitmap bit iはchunk i、missingは最初の欠けたindex（全体完了はchunks）。未送信bitを含むACK、別source／boot／contextのACKは転送を完了しない。受信はfull network、双方identity／boot、暗号contextとidを照合する。contextは所属generationに結合する。
+
+送信windowは2、同一frame最大5送信。初回ACK待ちは実送信のhop結果後に開始し、1秒から指数backoff最大4秒、±10% jitter。全体期限と10秒無進捗期限を優先する。各typed frameのTTLは4秒。新Bulkのqueue admissionは既存80% watermarkで拒否する。object START／CHUNK／ACKは全て既存Work ledgerに課金し、送信nodeごとの保守的LRモデルで50 ms/s、burst一frameにpacingする（RF実測のairtimeではない）。
+
+受付時に完了記録四枠の一つを予約し、最初の期限＋30秒まで保持する。同じSTARTには結果ACKを再返送し、異内容はConflict。sourceごとのboot／context／highest admitted idのfloorは暗号context退役まで保持し、記録のない旧idはExpiredとして再通知しない。receiver再起動を跨ぐexactly-onceはアプリの永続IDが担当する。goldenは[protocol/app-object-golden](../../protocol/app-object-golden)。

@@ -33,6 +33,8 @@ SchedClass MeshNode::TxScheduler::classify(const TxJob& job) noexcept {
     }
     return SchedClass::Normal;
   }
+  if (group_type == FrameType::AppObjectStart || group_type == FrameType::AppObjectChunk ||
+      group_type == FrameType::AppObjectAck) return SchedClass::Bulk;
   if (job.form == JobForm::Forwarded) {
     // Transit traffic keeps its lane across hops: receipts and application
     // results ride management; everything else follows the header's
@@ -52,6 +54,10 @@ SchedClass MeshNode::TxScheduler::classify(const TxJob& job) noexcept {
     }
   }
   switch (job.plain.header.type) {
+    case FrameType::AppObjectStart:
+    case FrameType::AppObjectChunk:
+    case FrameType::AppObjectAck:
+      return SchedClass::Bulk;
     case FrameType::Data:
     case FrameType::Service:
       // Service=21 payloads classify like application DATA by priority —

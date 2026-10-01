@@ -8,6 +8,9 @@
     {"id": "device_api", "label": "Device C API", "value": 1, "c": "ROUTELOOM_DEVICE_C_API", "rust": "DEVICE_C_API",
      "cpp_check": "RL_DEV_API_VERSION", "cpp_include": "routeloom/device.h",
      "source": "components/routeloom_device/include/routeloom/device.h", "rule": "exact major in every struct header; 1.x adds tail fields and functions only; layouts in protocol/abi-golden"},
+    {"id": "app_object", "label": "AppObject payload", "value": 1, "c": "ROUTELOOM_APP_OBJECT_SCHEMA", "rust": "APP_OBJECT_SCHEMA",
+     "cpp_check": "routeloom::object_wire::kVersion", "cpp_include": "routeloom/app_object_wire.hpp",
+     "source": "components/routeloom/include/routeloom/app_object_wire.hpp", "rule": "optional authenticated unicast; extension types 64-66; 121-byte chunks; 4096-byte limit"},
     {"id": "wire_major", "label": "Mesh wire major", "value": 2, "c": "ROUTELOOM_WIRE_MAJOR", "rust": "WIRE_MAJOR",
      "cpp_check": "routeloom::wire::kMajor", "cpp_include": "routeloom/wire.hpp", "rust_check": "routeloom_wire::MAJOR",
      "source": "components/routeloom/include/routeloom/wire.hpp", "rule": "never changes within SDK 2.x; other majors are rejected"},
@@ -128,6 +131,7 @@
     ],
     "codes": [
       {"id": 0, "name": "NONE", "api1": null},
+      {"id": 1, "name": "TOO_LARGE", "api1": "TOO_LARGE"},
       {"id": 256, "name": "QUEUED", "api1": null},
       {"id": 257, "name": "TX_ACCEPTED", "api1": null},
       {"id": 258, "name": "TX_MAC_PENDING", "api1": null},

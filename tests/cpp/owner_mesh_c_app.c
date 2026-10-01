@@ -1,6 +1,7 @@
 /* The mesh peer's C application (P05-C): join, send, APPLIED, leave and
    post through the Device C API only, compiled as C11. */
 
+#include <string.h>
 #include "owner_mesh_c_app.h"
 #include "routeloom/version.h"
 
@@ -57,7 +58,7 @@ static void check_boundaries(mesh_c_app_t* app) {
   rl_message_id_t id;
   const uint8_t byte = 1;
 
-  rl_dev_struct_init(&caps, sizeof(caps) - 1);
+  rl_dev_struct_init(&caps, offsetof(rl_dev_capabilities_t, object_transfer) - 1);
   count(app, rl_dev_capabilities(app->device, &caps) == RL_STATUS_INVALID_ARGUMENT);
   rl_dev_struct_init(&caps, sizeof(caps));
   caps.version = RL_DEV_API_VERSION + 1;
@@ -67,6 +68,10 @@ static void check_boundaries(mesh_c_app_t* app) {
                  caps.member == 1 && caps.security_profile == RL_DEV_SECURITY_CANDIDATE &&
                  caps.max_payload == RL_MAX_APPLICATION_PAYLOAD &&
                  caps.max_applied_payload == RL_APPLIED_PAYLOAD_MAX);
+  memset(&caps, 0xa5, sizeof(caps));
+  caps.struct_size = offsetof(rl_dev_capabilities_t, object_transfer); caps.version = RL_DEV_API_VERSION;
+  count(app, rl_dev_capabilities(app->device, &caps) == RL_STATUS_OK && caps.object_transfer == 0xa5 && caps.struct_size == offsetof(rl_dev_capabilities_t, object_transfer));
+  count(app, rl_dev_capabilities(app->device, &caps) == RL_STATUS_OK && caps.object_transfer == 0xa5);
   rl_dev_struct_init(&membership, sizeof(membership));
   count(app, rl_dev_membership(app->device, &membership) == RL_STATUS_OK &&
                  membership.node == rl_dev_node_id(app->device));
@@ -210,9 +215,33 @@ static void on_poll(void* user, rl_dev_t* device, rl_monotonic_ms_t now_ms) {
   }
 }
 
+static void on_object(void* user, const rl_dev_object_rx_t* info, const uint8_t* bytes, size_t size) {
+  mesh_c_app_t* app = (mesh_c_app_t*)user;
+  count(app, info->version == RL_DEV_API_VERSION && size <= sizeof(app->object_data));
+  if (size > sizeof(app->object_data)) return;
+  memcpy(app->object_data, bytes, size); app->object_size = (uint16_t)size; ++app->objects;
+}
+static void on_object_result(void* user, const rl_dev_object_result_t* result) {
+  mesh_c_app_t* app = (mesh_c_app_t*)user;
+  app->object_state = result->state; ++app->object_results;
+}
+rl_status_code_t mesh_c_app_object_send(mesh_c_app_t* app, rl_node_id_t destination,
+    const uint8_t* payload, size_t size, uint32_t deadline, uint32_t* id) {
+  rl_dev_object_options_t options; rl_dev_object_options_init(&options); options.deadline_ms = deadline;
+  app->object_results = 0;
+  return rl_dev_send_object(app->device, destination, payload, size, &options, id);
+}
+rl_status_code_t mesh_c_app_object_buffer(mesh_c_app_t* app, uint8_t* bytes, size_t size) {
+  return rl_dev_register_object_buffer(app->device, bytes, size);
+}
+rl_status_code_t mesh_c_app_object_cancel(mesh_c_app_t* app, uint32_t id) {
+  return rl_dev_cancel_object(app->device, id);
+}
+
 void mesh_c_app_observer(mesh_c_app_t* app, rl_dev_observer_t* out) {
   rl_dev_struct_init(out, sizeof(*out));
   out->user = app;
+  out->on_object = on_object; out->on_object_result = on_object_result;
   out->on_message = on_message;
   out->on_delivery = on_delivery;
   out->on_membership = on_membership;

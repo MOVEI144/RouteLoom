@@ -144,3 +144,19 @@ MemberEdhoc専用（DevRamはSite Authorityが無く固定channel、[channel移�
 gatewayは採用済みsiteのSAK（`SiteCommitVerifier`）で署名を検証してから台帳（`rlmauth`）へcommitし、planを配る。USB sessionはhostを認証するだけで、planの正しさは保証しない。偽の署名・署名なしは`Denied`（detail＝AuthenticationFailed）で、何も配らない。commitの証拠はRELEASEまで保持し、gatewayはOFFER時に認証済みの直接peerを固定して、その全員のREADYまでRELEASEを拒否する。さらにRELEASEの必須member全員について、現plan hashのREADYを確認する。欠けていればBusy（detail＝WouldBlock）で拒否する。解放後もそのpeerの結果を待ち、全員の結果または期限後に成否を確定する。hostはreportの`ready`を確認し、siteのmember ID集合を渡してから解放する。RELEASEのpayloadは2.0.0-devの途中で`plan_hash[32]`だけの34 Bから変わったので、hostとgateway firmwareは組で更新する。組が合わないRELEASEはどちらの向きでもgatewayがProtocolErrorで拒否し（hostの要求は応答なしで期限切れ）、commitは解放しない。hostはSTATUSのreport（台帳の先頭、現在のchannelとepoch、gatewayの時計）から次のplanを組み立てるので、5 sより古いreportでは提示しない。回復用のsigned snapshotは配らない（snapshotはcommit証拠そのもので、READYの関門を越えてしまう）。daemon側はAPI1 `site.channel_plan.status/offer/release`（[Host §11](host.md)）。
 
 [Host](host.md)／[Wire](wire-protocol.md)／[電源断](crash-time-resources.md)
+
+## AppObject HostOps（capability bit14）
+
+schema=1、以下のsub:u8を先頭に置く。整数はbig-endian。認証済みHostLinkのみ、gatewayの一つのTX arenaをBegin／Chunk／Endで満たす。USB creditが無ければ送らない。uploadとcallback egressは一つのarenaを共有し、同時利用はBusyで拒否する。ACKのphaseは0 idle、1 staging、2 mesh transfer、3 Delivered、4 Expired、5 CancelledBeforeTx、6 Indeterminate、7 Failed、8 Unsupported。
+
+| sub | 方向 | schema／subの後のbody |
+|---|---|---|
+| 0x80 Begin | H→G | token:u32、node:u64、deadline_ms:u32、app_tag:u16、encoding:u8、total:u16 |
+| 0x81 Chunk | H→G | token:u32、offset:u16、length:u16、data（1〜512 B） |
+| 0x82 End | H→G | token:u32 |
+| 0x83 Cancel | H→G | token:u32 |
+| 0x84 Status | G→H | token:u32、phase:u8、StatusCode:u16、mesh_object_id:u32 |
+| 0x85 Get | H→G | token:u32 |
+| 0x86 Ingress | G→H | source:u64、id:u32、source_boot:u32、end_context:u32、app_tag:u16、encoding:u8、total:u16、offset:u16、length:u16、digest:16 B、data（1〜512 B） |
+
+tokenはsession内単調で0禁止。同じBeginは期限を延長せず、完了後も二度目のmesh転送を始めない。Chunkは連続offsetで、既存bytesと一致する重複だけを許す。Endは全bytesを持ったときだけsend_objectへ渡し、Statusのstaging／transferは全体成功ではない。Ingressはcallbackで検証済みのobjectを一件のbounded USB egress copyへ保持する。credit停止は10秒でcopyを破棄、session teardownではloan取消とarena消去を行う。hostはsessionとmetadataと全体digestを再照合してobjects logに公開する。

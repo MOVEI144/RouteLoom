@@ -96,6 +96,20 @@ void MeshNode::emit_busy_or_drop(const NodeId peer, const wire::Header& rejected
 }
 
 Status MeshNode::encode_job(TxJob& job, const MonotonicMs now_ms) noexcept {
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  if (job.owner == JobOwner::AppObject) {
+    const auto& header = job.form == JobForm::Plain ? job.plain.header : job.forwarded.header;
+    std::uint32_t epoch = 0;
+    // Object jobs belong to the boot and End context admitted at enqueue;
+    // session repair must not seal an old operation under a new context.
+    if (header.network != config_.network || header.origin != config_.node ||
+        header.message.session != config_.message_session ||
+        !security_.tx_epoch(SecurityScope::EndToEnd, header.destination, epoch) ||
+        epoch != header.end_epoch) {
+      return Status::error(StatusCode::Expired, "OBJECT_CONTEXT_RETIRED");
+    }
+  }
+#endif
   // tx_encoded_ still holds this job's sealed frame (the driver refused it
   // and nothing else was sealed since): hand the same bytes over again.
   if (job.encoded_tag != 0 && job.encoded_tag == tx_encoded_tag_) return Status::success();
@@ -596,7 +610,7 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
     }
     return;
   }
-  if (job.owner == JobOwner::Config) {
+  if (job.owner == JobOwner::Config || job.owner == JobOwner::AppObject) {
     if (component_jobs_outstanding_ > 0) --component_jobs_outstanding_;
     if (config_sink_ != nullptr) {
       if (component_event_available()) {
@@ -676,7 +690,7 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
     }
     return;
   }
-  if (job.owner == JobOwner::Config) {
+  if (job.owner == JobOwner::Config || job.owner == JobOwner::AppObject) {
     if (component_jobs_outstanding_ > 0) --component_jobs_outstanding_;
     if (config_sink_ != nullptr) {
       if (component_event_available()) {

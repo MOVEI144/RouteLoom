@@ -1,5 +1,7 @@
 #pragma once
 
+#include "routeloom/app_object.hpp"
+
 // Device-side USB bridge (G-USB, portable level). Connects a byte stream
 // (UART/TTY/loopback) to a MeshNode through the v0.1 COBS+CRC32 profile, the
 // HostLink v2 authenticated session (see usb_session.hpp) and session-direction
@@ -109,7 +111,11 @@ struct BridgeStats {
 class UsbBridge final : public UsbFrameSink, public NodeObserver,
                         public GatewayHostSink, public GatewayDeliveryObserver,
                         public ConfigHostSink, public DiagnosticSink,
-                        public sdkv1::JoinRelayHostSink {
+                        public sdkv1::JoinRelayHostSink
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+                        , public ObjectObserver
+#endif
+                        {
  public:
   struct Config {
     ByteView secret{};  // hostlink secret (rlkeys); caller-owned, must outlive the bridge
@@ -203,6 +209,13 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // answers with 0x51 GROUP_STATUS; an admitted send gets one more FINAL
   // 0x51 under its request id when it settles. Advertises
   // CAP_GROUP_DELIVERY_V1 in HelloAck. Requires config_.mesh.
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  Status attach_object(AppObject& object) noexcept;
+  bool object_receive_ready() const noexcept override { return state_ == SessionState::Active && object_up_size_ == 0 && object_phase_ != 1 && object_phase_ != 2; }
+  std::size_t object_receive_slots() const noexcept override { return 1; }
+  void on_object(const ObjectRxInfo& info, ByteView data) noexcept override;
+  void on_object_result(const ObjectResult& result) noexcept override;
+#endif
   Status attach_group() noexcept;
 
   // Re-evaluate group serving after the mesh's config changed under the
@@ -646,6 +659,31 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
                   MonotonicMs now_ms) noexcept;
   bool send_error(UsbErrorCode code, std::uint64_t request, std::uint16_t reason_id,
                   const char* detail, MonotonicMs now_ms) noexcept;
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  void handle_object(std::uint64_t request, ByteView inner, MonotonicMs now_ms) noexcept;
+  void object_status(std::uint64_t request, StatusCode code, MonotonicMs now_ms,
+                     std::uint32_t token = 0) noexcept;
+  void pump_object(MonotonicMs now_ms) noexcept;
+  void reset_object() noexcept;
+  AppObject* object_{nullptr};
+  std::array<std::uint8_t, 4096> object_io_{};
+  std::array<std::uint8_t, 4096> object_rx_{};
+  MonotonicMs object_up_deadline_ms_{0};
+  MonotonicMs object_now_ms_{0};
+  ObjectRxInfo object_up_info_{};
+  object_wire::Digest object_up_digest_{};
+  std::uint16_t object_up_size_{0};
+  std::uint16_t object_up_offset_{0};
+  std::uint32_t object_token_{0};
+  ObjectId object_id_{0};
+  NodeId object_destination_{0};
+  ObjectOptions object_options_{};
+  std::uint16_t object_total_{0};
+  std::uint16_t object_received_{0};
+  MonotonicMs object_deadline_ms_{0};
+  std::uint8_t object_phase_{0}; // 0 idle, 1 staging, 2 transferring, 3..8 ObjectState + 2
+  StatusCode object_reason_{StatusCode::Ok};
+#endif
   bool enqueue(FrameKind kind, std::uint16_t flags, std::uint64_t request,
                ByteView inner, MonotonicMs now_ms,
                MonotonicMs expires_ms = 0) noexcept;

@@ -485,6 +485,8 @@ class ConfigEndpointSink {
   // configured AND ready verifier profiles only — 0 means the sink accepts
   // no permits or its verifier is unprovisioned.
   virtual std::uint32_t permit_profile_bits() const noexcept { return 0; }
+  virtual bool accepts_extension(FrameType) const noexcept { return false; }
+  virtual bool quiescent() const noexcept { return true; }
 };
 
 // P6 revocation-gossip sink (docs/design/sdk-v1/04-removal-revocation.md
@@ -1188,7 +1190,8 @@ class MeshNode {
   // ordered group holds. This is stricter than radio quiescence: a
   // delivery waiting for a route can have no frame in flight.
   bool sleep_work_pending() const noexcept {
-    if (!quiesced() || component_jobs_outstanding_ != 0 ||
+    if ((config_sink_ != nullptr && !config_sink_->quiescent()) ||
+        !quiesced() || component_jobs_outstanding_ != 0 ||
         group_holds_.size() != 0 || group_promote_hold_.used) return true;
     bool pending = false;
     deliveries_.for_each([&](const Delivery& delivery) {
@@ -1741,7 +1744,7 @@ class MeshNode {
   enum class JobForm : std::uint8_t { Plain, Forwarded, Sealed };
   enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit,
                                        GatewayService, Config, Diagnostic,
-                                       Applied, Group, Bootstrap };
+                                       Applied, Group, Bootstrap, AppObject };
 
   // Records below are laid out largest-alignment first: MeshNode is a static
   // object in firmware and every byte of padding is .bss on the DRAM-bound

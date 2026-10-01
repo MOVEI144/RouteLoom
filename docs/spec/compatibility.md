@@ -27,6 +27,7 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 |---|---|---|---|---|
 | Core C ABI | 3 | `ROUTELOOM_CORE_C_ABI` / `CORE_C_ABI` | `components/routeloom/include/routeloom/routeloom.h` | exact major in every struct header; 3.x adds tail fields and functions only; layouts in protocol/abi-golden |
 | Device C API | 1 | `ROUTELOOM_DEVICE_C_API` / `DEVICE_C_API` | `components/routeloom_device/include/routeloom/device.h` | exact major in every struct header; 1.x adds tail fields and functions only; layouts in protocol/abi-golden |
+| AppObject payload | 1 | `ROUTELOOM_APP_OBJECT_SCHEMA` / `APP_OBJECT_SCHEMA` | `components/routeloom/include/routeloom/app_object_wire.hpp` | optional authenticated unicast; extension types 64-66; 121-byte chunks; 4096-byte limit |
 | Mesh wire major | 2 | `ROUTELOOM_WIRE_MAJOR` / `WIRE_MAJOR` | `components/routeloom/include/routeloom/wire.hpp` | never changes within SDK 2.x; other majors are rejected |
 | Mesh wire minor | 0 | `ROUTELOOM_WIRE_MINOR` / `WIRE_MINOR` | `components/routeloom/include/routeloom/wire.hpp` | emitted by this build; decode accepts any minor of major 2 (forward-compatible additions only) |
 | RLD1 carrier | 1 | `ROUTELOOM_RLD1_VERSION` / `RLD1_VERSION` | `components/routeloom/include/routeloom/autonomy_wire.hpp` | classified once by magic+version |

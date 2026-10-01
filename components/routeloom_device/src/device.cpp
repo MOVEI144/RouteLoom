@@ -470,6 +470,18 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
 #endif
   }
 #endif
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  static AppObject object(runtime.node(), provider, observer);
+  object_ = &object;
+  status = object.attach();
+  if (!status) return status;
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
+  if (bridge_ != nullptr) {
+    status = bridge_->attach_object(object);
+    if (!status) return status;
+  }
+#endif
+#endif
   return Status::success();
 }
 
@@ -568,6 +580,77 @@ Status Device::send(const NodeId destination, const ByteView payload,
   return runtime_->send_application(destination, payload, options, id);
 }
 
+Status Device::send_object(NodeId destination, ByteView data, const ObjectOptions& options,
+                           ObjectId& id) noexcept {
+  id = 0;
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  if (object_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
+  return object_->send(destination, data, options, runtime_->now_ms(), id);
+#else
+  (void)destination; (void)data; (void)options;
+  return Status::error(StatusCode::Unsupported, "object transfer disabled");
+#endif
+}
+Status Device::cancel_object(ObjectId id) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  if (object_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
+  return object_->cancel(id);
+#else
+  (void)id;
+  return Status::error(StatusCode::Unsupported, "object transfer disabled");
+#endif
+}
+Status Device::register_object_buffer(MutableByteView storage) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  if (object_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
+  return object_->register_buffer(storage);
+#else
+  (void)storage;
+  return Status::error(StatusCode::Unsupported, "object transfer disabled");
+#endif
+}
+bool Device::Observer::object_receive_ready() const noexcept {
+#if ROUTELOOM_APP_OBJECT_TRANSFER && ROUTELOOM_PROFILE_HAS_GATEWAY
+  if (device_ != nullptr && device_->bridge_ != nullptr) return device_->bridge_->object_receive_ready();
+#endif
+  return true;
+}
+std::size_t Device::Observer::object_receive_slots() const noexcept {
+#if ROUTELOOM_APP_OBJECT_TRANSFER && ROUTELOOM_PROFILE_HAS_GATEWAY
+  if (device_ != nullptr && device_->bridge_ != nullptr) return 1;
+#endif
+  return ROUTELOOM_APP_OBJECT_RX_SLOTS;
+}
+void Device::Observer::on_object(const ObjectRxInfo& info, ByteView data) noexcept {
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  if (device_ == nullptr) return;
+  device_->in_callback_ = true;
+#if ROUTELOOM_APP_OBJECT_TRANSFER && ROUTELOOM_PROFILE_HAS_GATEWAY
+  if (device_->bridge_ != nullptr) device_->bridge_->on_object(info, data);
+#endif
+  if (device_->object_observer_ != nullptr) device_->object_observer_->on_object(info, data);
+  device_->in_callback_ = false;
+#else
+  (void)info; (void)data;
+#endif
+}
+void Device::Observer::on_object_result(const ObjectResult& result) noexcept {
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  if (device_ == nullptr) return;
+  device_->in_callback_ = true;
+#if ROUTELOOM_APP_OBJECT_TRANSFER && ROUTELOOM_PROFILE_HAS_GATEWAY
+  if (device_->bridge_ != nullptr) device_->bridge_->on_object_result(result);
+#endif
+  if (device_->object_observer_ != nullptr) device_->object_observer_->on_object_result(result);
+  device_->in_callback_ = false;
+#else
+  (void)result;
+#endif
+}
+
 Status Device::send_group(const GroupId group, const ByteView payload,
                           const GroupSendOptions& options, MessageId& id) noexcept {
   if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
@@ -593,6 +676,11 @@ DeviceCapabilities Device::capabilities() const noexcept {
   caps.security_profile =
       caps.member ? SecurityProfile::Candidate : SecurityProfile::Development;
   caps.usb_gateway = bridge_ != nullptr;
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  caps.object_transfer = object_ != nullptr;
+  caps.max_object_bytes = object_wire::kMaxBytes;
+  caps.object_rx_slots = ROUTELOOM_APP_OBJECT_RX_SLOTS;
+#endif
   caps.max_payload = static_cast<std::uint16_t>(kMaxApplicationPayload);
   caps.max_group_payload = static_cast<std::uint16_t>(kGroupPayloadMax);
   if (runtime_ != nullptr) {

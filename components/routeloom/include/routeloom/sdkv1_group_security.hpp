@@ -22,6 +22,9 @@ class GroupSecurityProvider final : public SecurityProvider {
 
   bool ready() const noexcept override { return pairwise_.ready(); }
   Status tx_epoch(SecurityScope scope, NodeId peer, std::uint32_t& epoch) noexcept override;
+  Status current_rx_epoch(SecurityScope scope, NodeId peer, std::uint32_t& epoch) const noexcept override {
+    return pairwise_.current_rx_epoch(scope, peer, epoch);
+  }
   ContextState context_state(SecurityScope scope, NodeId peer) const noexcept override;
   Status tx_group_link_epochs(std::uint32_t& boot, std::uint32_t& g) noexcept override;
   bool accepts_group_epoch(std::uint32_t epoch) const noexcept override {

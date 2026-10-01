@@ -849,3 +849,12 @@ add_test(NAME routeloom_edhoc_interop_replay_join COMMAND routeloom_edhoc_intero
 # host/routeloom-edhoc (`cargo test -p routeloom-edhoc --test member`).
 add_test(NAME routeloom_edhoc_interop_replay_member COMMAND routeloom_edhoc_interop_peer --replay
     ${CMAKE_SOURCE_DIR}/protocol/edhoc-interop/method0_member.txt)
+
+if(ROUTELOOM_APP_OBJECT_TRANSFER)
+  add_executable(routeloom_app_object_tests test_app_object.cpp)
+  target_link_libraries(routeloom_app_object_tests PRIVATE routeloom_core)
+  target_compile_options(routeloom_app_object_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  target_compile_definitions(routeloom_app_object_tests PRIVATE
+    ROUTELOOM_OBJECT_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/app-object-golden")
+  add_test(NAME routeloom_app_object_tests COMMAND routeloom_app_object_tests)
+endif()

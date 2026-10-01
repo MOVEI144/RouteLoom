@@ -1,3 +1,5 @@
+option(ROUTELOOM_APP_OBJECT_TRANSFER "Optional 4 KiB unicast objects" OFF)
+
 set(ROUTELOOM_CORE_SOURCES
   src/authority.cpp
   src/autonomy_wire.cpp
@@ -38,6 +40,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/node_status.cpp
   src/node_transit.cpp
   src/node_txn.cpp
+  src/object_assembler.cpp
   src/observation.cpp
   src/peer_state.cpp
   src/power.cpp
@@ -90,6 +93,14 @@ set(ROUTELOOM_CORE_SOURCES
   src/usb_session.cpp
   src/wire.cpp
 )
+
+if((ESP_PLATFORM AND CONFIG_ROUTELOOM_APP_OBJECT_TRANSFER) OR
+   (NOT ESP_PLATFORM AND ROUTELOOM_APP_OBJECT_TRANSFER))
+  list(APPEND ROUTELOOM_CORE_SOURCES src/app_object_wire.cpp src/app_object.cpp src/usb_objects.cpp)
+  set(_routeloom_object_enabled 1)
+else()
+  set(_routeloom_object_enabled 0)
+endif()
 
 # Vendored micro-ecc (BSD-2, third_party/micro-ecc/LICENSE.txt inside this
 # component): the RLCP1_COSE_ESP256 permit verifier's P-256 backend. Identical
@@ -151,6 +162,8 @@ if(COMMAND idf_component_register)
     PRIV_REQUIRES esp_timer heap
   )
   target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
+  target_compile_definitions(${COMPONENT_LIB} PUBLIC
+    ROUTELOOM_APP_OBJECT_TRANSFER=${_routeloom_object_enabled})
   target_compile_definitions(${COMPONENT_LIB} PRIVATE ${ROUTELOOM_UECC_DEFS}
     ${ROUTELOOM_EDHOC_C_DEFS})
   # -Wpedantic is C++-only here: ESP-IDF's libc wrappers (esp_libc
@@ -163,6 +176,10 @@ if(COMMAND idf_component_register)
   target_compile_options(${COMPONENT_LIB} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-Werror>
     "$<$<COMPILE_LANGUAGE:C>:${ROUTELOOM_THIRD_PARTY_C_RELAX}>")
+  if(CONFIG_ROUTELOOM_APP_OBJECT_TRANSFER)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC
+      ROUTELOOM_APP_OBJECT_RX_SLOTS=${CONFIG_ROUTELOOM_APP_OBJECT_RX_SLOTS})
+  endif()
   if(CONFIG_ROUTELOOM_RESOURCE_PROFILE_ID)
     set(_routeloom_features "")
     foreach(_feature USB_NODE_STATUS USB_GATEWAY_ENDPOINT USB_GROUP USB_OBSERVATION)
@@ -243,6 +260,8 @@ else()
   target_link_libraries(routeloom_core PRIVATE routeloom_edhoc_headers
     routeloom_edhoc_third_party)
   target_compile_features(routeloom_core PUBLIC cxx_std_17)
+  target_compile_definitions(routeloom_core PUBLIC
+    ROUTELOOM_APP_OBJECT_TRANSFER=${_routeloom_object_enabled})
   target_compile_definitions(routeloom_core PRIVATE ${ROUTELOOM_UECC_DEFS}
     ${ROUTELOOM_EDHOC_C_DEFS} ${ROUTELOOM_TFPSA_DEFS} ROUTELOOM_EDHOC_BUILTIN_AEAD)
   target_compile_options(routeloom_core PRIVATE
