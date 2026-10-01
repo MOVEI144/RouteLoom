@@ -842,6 +842,19 @@ void Engine::on_r3(const NodeId peer, const Purpose purpose, const ByteView mess
   out.action = Action::Install;
 }
 
+MonotonicMs Engine::next_deadline() const noexcept {
+  MonotonicMs due = UINT64_MAX;
+  const auto sooner = [&](const auto& slot) {
+    if (slot.state == SlotState::Free) return;
+    // RLRES1 expires strictly after its wire deadline.
+    const MonotonicMs expiry = slot.deadline == UINT64_MAX ? UINT64_MAX : slot.deadline + 1;
+    if (expiry < due) due = expiry;
+  };
+  for (const auto& slot : initiators_) sooner(slot);
+  for (const auto& slot : responders_) sooner(slot);
+  return due;
+}
+
 bool Engine::next_expired(const MonotonicMs now, ExpiredSession& out) noexcept {
   for (auto& s : initiators_) {
     if (s.state != SlotState::Free && now > s.deadline) {

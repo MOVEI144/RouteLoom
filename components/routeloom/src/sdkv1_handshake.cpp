@@ -2807,6 +2807,35 @@ Status HandshakeEngine::dev_resume_commit(CarrierRecord& record,
 
 // --- Time, results, cancellation ---
 
+MonotonicMs HandshakeEngine::next_deadline(const MonotonicMs now) const noexcept {
+  if (!configured_) return UINT64_MAX;
+  if (has_pending_ || lookup_.kind != ResumeLookupWork::Kind::None) return now;
+  MonotonicMs due = rlres1_.next_deadline();
+  const auto sooner = [&](const MonotonicMs at) {
+    if (at < due) due = at;
+  };
+  for (const auto& record : records_) {
+    if (!record.used) continue;
+    sooner(record.deadline);
+    if (record.state == RecordState::ResumeLookupPeer) return now;
+    if (record.state == RecordState::EdhocQueued || record.state == RecordState::EdhocM1Parked) {
+      if (!edhoc_flight_.active) {
+        const MonotonicMs ecc_at =
+            ecc_primed_
+                ? (last_ecc_ > UINT64_MAX - kEccMinGapMs ? UINT64_MAX : last_ecc_ + kEccMinGapMs)
+                : now;
+        sooner(record.retransmit_at > ecc_at ? record.retransmit_at : ecc_at);
+      }
+    } else if (record.state != RecordState::EdhocM4Sent &&
+               (record.last_tx_size != 0 ||
+                (edhoc_flight_.active && edhoc_flight_.owner_token == record.token &&
+                 big_tx_owner_ == record.token && big_tx_size_ != 0))) {
+      sooner(record.retransmit_at);
+    }
+  }
+  return due;
+}
+
 Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
   if (entered_) return Status::error(StatusCode::Busy, "handshake re-entered");
   const EnterGuard guard(entered_);

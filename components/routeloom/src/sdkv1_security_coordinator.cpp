@@ -635,9 +635,12 @@ MonotonicMs SecurityCoordinator::next_deadline(const MonotonicMs now) const noex
   }
   if (mode_ == CoordinatorMode::ZeroTouch) sooner(joiner().next_deadline());
   if (has_member_engine()) {
-    // The engine and the bank publish no deadline: while either has work
-    // the firmware must keep polling, else the demux expiries rule.
-    if (!member().engine.quiescent() || bank_.demand_count() != 0) return now;
+    sooner(member().engine.next_deadline(now));
+    sooner(bank_.next_deadline());
+    if (bank_.demand_count() != 0) {
+      // A missing binding can requeue a demand; it cannot run until an event.
+      sooner(now > kJoinNoDeadline - 2 ? kJoinNoDeadline : now + 2);
+    }
     for (const auto& entry : member().demux) {
       if (entry.used) sooner(entry.expires_at);
     }

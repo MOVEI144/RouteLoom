@@ -84,6 +84,8 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::configure(const LocalView& loca
   secure_clear(salt);
   slot_salt_ready_ = true;
   last_tick_ = now;
+  next_expiry_ = UINT64_MAX;
+  expiry_slots_scanned_ = 0;
   install_serial_ = 0;
   last_rx_unknown_demand_ms_ = 0;
   rx_unknown_demand_started_ = false;
@@ -99,32 +101,39 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::tick(const MonotonicMs now) noe
     // A backwards clock extends no lifetime.
     return Status::error(StatusCode::InvalidArgument, "session clock regressed");
   }
+  if (now < next_expiry_) {
+    last_tick_ = now;
+    return Status::success();
+  }
   const std::uint64_t elapsed = now - last_tick_;
-  last_tick_ = now;
-  if (elapsed == 0) return Status::success();
-  auto age = [elapsed](std::uint32_t& remaining) {
-    remaining = elapsed >= remaining ? 0 : static_cast<std::uint32_t>(remaining - elapsed);
+  MonotonicMs next = UINT64_MAX;
+  const auto expired = [&](const std::uint32_t deadline) {
+    const std::uint32_t left = remaining(deadline);
+    if (elapsed >= left) return true;
+    const MonotonicMs due = last_tick_ + left;
+    if (due < next) next = due;
+    return false;
   };
+  constexpr std::uint64_t visited =
+      kLinkCapacity + kEndCapacity + kOverlapCapacity + kDemandCapacity;
+  expiry_slots_scanned_ =
+      expiry_slots_scanned_ > UINT64_MAX - visited ? UINT64_MAX : expiry_slots_scanned_ + visited;
   for (std::size_t i = 0; i < kLinkCapacity; ++i) {
-    if (!link_used_[i]) continue;
-    age(link_[i].remaining_ms);
-    if (link_[i].remaining_ms == 0 || !entry_usable(link_[i])) wipe_entry(link_[i], link_used_[i]);
+    if (link_used_[i] && expired(link_[i].remaining_ms)) wipe_entry(link_[i], link_used_[i]);
   }
   for (std::size_t i = 0; i < kEndCapacity; ++i) {
-    if (!end_used_[i]) continue;
-    age(end_[i].remaining_ms);
-    if (end_[i].remaining_ms == 0 || !entry_usable(end_[i])) wipe_entry(end_[i], end_used_[i]);
+    if (end_used_[i] && expired(end_[i].remaining_ms)) wipe_entry(end_[i], end_used_[i]);
   }
   for (std::size_t i = 0; i < kOverlapCapacity; ++i) {
-    if (!overlap_used_[i]) continue;
-    age(overlap_[i].remaining_ms);
-    if (overlap_[i].remaining_ms == 0) wipe_overlap(overlap_[i], overlap_used_[i]);
+    if (overlap_used_[i] && expired(overlap_[i].remaining_ms)) {
+      wipe_overlap(overlap_[i], overlap_used_[i]);
+    }
   }
   for (auto& demand : demand_) {
-    if (!demand.used) continue;
-    age(demand.hold_ms);
-    if (demand.hold_ms == 0) demand.used = false;
+    if (demand.used && expired(demand.hold_ms)) demand.used = false;
   }
+  last_tick_ = now;
+  next_expiry_ = next;
   return Status::success();
 }
 
@@ -179,7 +188,7 @@ bool SessionBank<kLinkCapacity, kEndCapacity>::map_network(
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
 bool SessionBank<kLinkCapacity, kEndCapacity>::entry_usable(
     const SessionBankEntry& entry) const noexcept {
-  if (entry.remaining_ms == 0) return false;
+  if (remaining(entry.remaining_ms) == 0) return false;
   const std::uint64_t created = entry.created_gk;
   const std::uint64_t current = local_.gk_epoch;
   // A context born more than one GK epoch ago, or from the future, is dead.
@@ -260,7 +269,7 @@ void SessionBank<kLinkCapacity, kEndCapacity>::record_demand(const SecurityScope
                                                              const NodeId peer) noexcept {
   for (auto& demand : demand_) {
     if (demand.used && demand.scope == scope && demand.peer == peer) {
-      demand.hold_ms = local_.demand_hold_ms;
+      demand.hold_ms = expires_after(local_.demand_hold_ms);
       return;
     }
   }
@@ -269,7 +278,7 @@ void SessionBank<kLinkCapacity, kEndCapacity>::record_demand(const SecurityScope
     demand.used = true;
     demand.scope = scope;
     demand.peer = peer;
-    demand.hold_ms = local_.demand_hold_ms;
+    demand.hold_ms = expires_after(local_.demand_hold_ms);
     return;
   }
 }
@@ -297,6 +306,7 @@ void SessionBank<kLinkCapacity, kEndCapacity>::wipe_overlap(SessionOverlapEntry&
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
 void SessionBank<kLinkCapacity, kEndCapacity>::wipe_all() noexcept {
+  next_expiry_ = UINT64_MAX;
   for (std::size_t i = 0; i < kLinkCapacity; ++i) wipe_entry(link_[i], link_used_[i]);
   for (std::size_t i = 0; i < kEndCapacity; ++i) {
     wipe_entry(end_[i], end_used_[i]);
@@ -442,9 +452,10 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::install_verified(
       overlap_[i].rx_max = existing->rx_max;
       overlap_[i].rx_bitmap = existing->rx_bitmap;
       overlap_[i].rx_cid = existing->rx_cid;
-      overlap_[i].remaining_ms = existing->remaining_ms > kOverlapLifetimeMs
-                                     ? kOverlapLifetimeMs
-                                     : existing->remaining_ms;
+      overlap_[i].remaining_ms =
+          expires_after(remaining(existing->remaining_ms) > kOverlapLifetimeMs
+                            ? kOverlapLifetimeMs
+                            : remaining(existing->remaining_ms));
       overlap_[i].install_serial = existing->install_serial;
       overlap_used_[i] = true;
       break;
@@ -464,7 +475,7 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::install_verified(
   fresh.peer_role = att.peer_role;
   fresh.created_gk = att.created_gk_epoch;
   fresh.flags = att.dev_resume ? kFlagDevResume : 0;
-  fresh.remaining_ms = kContextLifetimeMs;
+  fresh.remaining_ms = expires_after(kContextLifetimeMs);
   fresh.install_serial = ++install_serial_;
   if (existing != nullptr) {
     secure_clear(existing->tx_key);
@@ -517,6 +528,7 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::export_entry(
     return Status::error(StatusCode::NotFound, "session export missing");
   }
   out = *entry;
+  out.remaining_ms = remaining(entry->remaining_ms);
   return Status::success();
 }
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
@@ -627,6 +639,7 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::restore_entry(
 
   SessionBankEntry revived = entry;
   revived.install_serial = ++install_serial_;
+  revived.remaining_ms = expires_after(entry.remaining_ms);
   if (scope == SecurityScope::Link) {
     link_[free_slot] = revived;
     link_used_[free_slot] = true;
@@ -760,7 +773,7 @@ bool SessionBank<kLinkCapacity, kEndCapacity>::take_demand(SessionDemand& out) n
     demand.used = false;
     out.scope = demand.scope;
     out.peer = demand.peer;
-    const std::uint64_t deadline = last_tick_ + demand.hold_ms;
+    const std::uint64_t deadline = last_tick_ + remaining(demand.hold_ms);
     out.deadline_ms = deadline < last_tick_ ? 0xFFFFFFFFFFFFFFFFULL : deadline;
     return true;
   }
@@ -786,7 +799,7 @@ void SessionBank<kLinkCapacity, kEndCapacity>::note_rx_unknown(const SecuritySco
       last_tick_ - last_rx_unknown_demand_ms_ < kRxUnknownRateMs) return;
   const SessionBankEntry* current = find_current(scope, peer);
   if (current != nullptr && entry_usable(*current) &&
-      kContextLifetimeMs - current->remaining_ms < kRxUnknownGraceMs) {
+      kContextLifetimeMs - remaining(current->remaining_ms) < kRxUnknownGraceMs) {
     return;
   }
   record_demand(scope, peer);
@@ -960,7 +973,7 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::open(
     for (std::size_t i = 0; i < kOverlapCapacity; ++i) {
       if (!overlap_used_[i] || overlap_[i].scope != context.scope ||
           overlap_[i].peer != context.sender || overlap_[i].rx_cid != context.epoch ||
-          overlap_[i].remaining_ms == 0) {
+          remaining(overlap_[i].remaining_ms) == 0) {
         continue;
       }
       rx_key = &overlap_[i].rx_key;
