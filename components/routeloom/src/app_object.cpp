@@ -191,6 +191,15 @@ void AppObject::start_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
   if (floor != nullptr && (k.boot < floor->boot || (k.boot == floor->boot && start.id <= floor->highest))) {
     queue_ack(k.peer, {k.id, AckStatus::Expired, 0, 0}, now_ms); return;
   }
+  // A newer authenticated boot retires old receive work even when every
+  // slot is occupied. Retain the boot floor if new admission is Busy.
+  if (floor != nullptr && k.boot > floor->boot) {
+    for (auto& rx : rx_) {
+      if (rx.assembler.active() && rx.key.peer == k.peer) finish_rx(rx, AckStatus::Failed);
+    }
+    floor->boot = k.boot;
+    floor->highest = 0;
+  }
   std::size_t record_index = records_.size();
   for (std::size_t i = 0; i < records_.size(); ++i) {
     if (!records_[i].used) { record_index = i; break; }
@@ -204,9 +213,6 @@ void AppObject::start_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
   bool buffer_present = false;
   for (auto& rx : rx_) {
     buffer_present |= rx.storage.data != nullptr;
-    if (rx.assembler.active() && rx.key.peer == k.peer && rx.key.boot != k.boot) {
-      finish_rx(rx, AckStatus::Failed);
-    }
     if (rx.assembler.active() && rx.key.peer == k.peer) {
       queue_ack(k.peer, {k.id, AckStatus::Busy, 0, 0}, now_ms); return;
     }

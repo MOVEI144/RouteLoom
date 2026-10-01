@@ -49,6 +49,8 @@ class Observer final : public NodeObserver, public ObjectObserver {
   void on_diagnostic(const char*, NodeId, const MessageId*) noexcept override {}
   void on_object(const ObjectRxInfo&, ByteView) noexcept override { ++received; }
   void on_object_result(const ObjectResult& value) noexcept override { result = value; }
+  std::size_t object_receive_slots() const noexcept override { return slots; }
+  std::size_t slots{ROUTELOOM_APP_OBJECT_RX_SLOTS};
   ObjectResult result{};
   unsigned received{0};
 };
@@ -187,10 +189,34 @@ void source_floor_capacity() {
   receive((static_cast<NodeId>(profile::kEndSessions + 1) << 32) | 2, 1, 2);
   assert(f.observer.received == full + 2);
 }
+void boot_retires_full_receiver() {
+  Fixture f;
+  f.observer.slots = 1;
+  assert(f.object->register_buffer({f.storage.data(), f.storage.size()}));
+  const std::uint8_t byte = 0x93;
+  object_wire::Start start{}; start.id = 1; start.total = 1; start.chunks = 1;
+  start.lifetime_ms = 5000;
+  ScopeDigest digest{}; sha256({&byte, 1}, digest);
+  std::copy_n(digest.begin(), start.digest.size(), start.digest.begin());
+  auto manifest = frame(FrameType::AppObjectStart, start);
+  f.object->on_config_frame(2, manifest, 0);
+  manifest.header.message.session = 2;
+  f.object->on_config_frame(2, manifest, 1);
+  // An authenticated new boot retires the old loan before slot admission.
+  auto chunk = frame(FrameType::AppObjectChunk, object_wire::Chunk{1, 0, {&byte, 1}});
+  f.object->on_config_frame(2, chunk, 2);
+  f.object->poll(2);
+  assert(f.observer.received == 0);
+  chunk.header.message.session = 2;
+  f.object->on_config_frame(2, chunk, 3);
+  f.object->poll(3);
+  assert(f.observer.received == 1);
+}
 }
 int main(int argc, char** argv) {
   if (argc == 1 || std::string(argv[1]) == "loan") loan_registration();
   if (argc == 1 || std::string(argv[1]) == "deadline") received_deadline();
   if (argc == 1 || std::string(argv[1]) == "ack") terminal_ack_guard();
   if (argc == 1 || std::string(argv[1]) == "floor") source_floor_capacity();
+  if (argc == 1 || std::string(argv[1]) == "boot") boot_retires_full_receiver();
 }
