@@ -1010,9 +1010,11 @@ Status MigrationParticipant::commit(const VerifiedAuthorityPlan& verified,
           .read_blob(verified.plan_hash(),
                      MutableByteView{stored_blob.data(), stored_blob.size()}, stored_size)
           .ok() &&
+      stored_size <= stored_blob.size() &&
       plan_digest(ByteView{stored_blob.data(), stored_size}) == verified.plan_hash() &&
       plan_decode(ByteView{stored_blob.data(), stored_size}, stored_plan).ok() &&
-      stored_plan.new_epoch == verified.new_epoch()) {
+      stored_plan.new_epoch == verified.new_epoch() && stored_plan.network == config_.network &&
+      stored_plan.authority == config_.authority && check_plan_structure(stored_plan).ok()) {
     pending_plan_ = stored_plan;
     pending_hash_ = verified.plan_hash();
     plan_known_ = true;
@@ -1566,9 +1568,11 @@ Status MigrationParticipant::resume(const MonotonicMs now_ms) noexcept {
       commit.plan_hash, MutableByteView{blob.data(), blob.size()}, blob_size);
   MigrationPlan plan{};
   bool blob_ok = false;
-  if (blob_read.ok()) {
+  if (blob_read.ok() && blob_size <= blob.size()) {
     blob_ok = plan_decode(ByteView{blob.data(), blob_size}, plan).ok() &&
-              plan_digest(ByteView{blob.data(), blob_size}) == commit.plan_hash;
+              plan_digest(ByteView{blob.data(), blob_size}) == commit.plan_hash &&
+              plan.network == config_.network && plan.authority == config_.authority &&
+              plan.new_epoch == commit.new_epoch && check_plan_structure(plan).ok();
   }
   if (!blob_ok) {
     // The ledger/commit record references a blob we cannot prove: refetch

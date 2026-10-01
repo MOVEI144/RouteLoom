@@ -671,6 +671,40 @@ void test_late_commit_uses_the_stored_blob() {
   CHECK(after.active_epoch() == plan.new_epoch);
 }
 
+void test_cached_commit_blob_obeys_adoption_checks() {
+  for (const bool wrong_scope : {false, true}) {
+    Rig rig{};
+    ChannelOperationRunner runner(rig.port, rig.ops);
+    MigrationAuthority verify = rig.verifier_only();
+    MigrationParticipant participant(rig.participant_config, rig.storage, verify, runner,
+                                     &rig.hooks);
+    MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+    if (wrong_scope) {
+      plan.network = kNet + 1;
+    } else {
+      plan.expiry_ms = plan.switch_reference_ms;  // no legal post-switch window
+    }
+    std::array<std::uint8_t, 512> buf{};
+    std::size_t size = 0;
+    const ByteView blob = rig.encode(plan, buf, size);
+    const Digest256 hash = plan_digest(blob);
+    CHECK_OK(rig.storage.write_blob(hash, blob));
+    const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+    const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+    CHECK_OK(participant.note_commit_evidence(
+        op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
+    CHECK(participant.phase() == ParticipantPhase::Recovering);
+    CHECK(!participant.prepare(blob, rig.measurements(), kNow).ok());
+    CHECK(participant.phase() == ParticipantPhase::Recovering);
+    CHECK(participant.active_epoch().value == 0);
+    MigrationParticipant rebooted(rig.participant_config, rig.storage, verify, runner,
+                                  &rig.hooks);
+    CHECK(rebooted.resume(kNow + 1000).code == StatusCode::IntegrityError);
+    CHECK(rebooted.phase() == ParticipantPhase::Recovering);
+    CHECK(!rebooted.prepare(blob, rig.measurements(), kNow + 1000).ok());
+  }
+}
+
 void test_verified_plan_only() {
   Rig rig{};
   rig.ops.visit_hard_cap_ms = 1000;
@@ -1884,6 +1918,7 @@ int main() {
   test_commit_without_blob_refetches();
   test_refetched_blob_catches_up_after_switch();
   test_expired_commit_settles_on_its_channel();
+  test_cached_commit_blob_obeys_adoption_checks();
   test_late_commit_uses_the_stored_blob();
   test_verified_plan_only();
   test_required_set_gating();
