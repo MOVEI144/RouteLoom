@@ -6,6 +6,7 @@
 #include <new>
 
 #include "routeloom/aead_gcm.hpp"
+#include "routeloom/espnow_power.hpp"
 #include "routeloom/espnow_security_owner.hpp"
 #include "routeloom/psa_aead_gcm.hpp"
 #include "routeloom/psa_edhoc_aead.hpp"
@@ -396,6 +397,18 @@ void test_member_root_mapping(bool flat) {
   EspNowSecurityOwnerTestAccess::apply(owner, member);
   CHECK(runtime.node().started());
   const NodeConfig& node = runtime.node().config();
+  EspNowPowerPort power_port(runtime);
+  power_port.bind_owner(owner);
+  PowerImage image{};
+  CHECK(power_port.capture_cache(image));
+  CHECK(image.network == stores.site.site().network);
+  CHECK(image.config_revision == stores.site.site().assignment_generation);
+  CHECK(power_port.matches_context(image, node.network));
+  image.network ^= (1ULL << 32U);
+  CHECK(!power_port.matches_context(image, node.network));
+  image.network ^= (1ULL << 32U);
+  ++image.config_revision;
+  CHECK(!power_port.matches_context(image, node.network));
   if (flat) {
     CHECK(node.group_roots[0] == site_record().gateways[0] &&
           node.group_roots[1] == site_record().gateways[1]);

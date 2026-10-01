@@ -137,6 +137,11 @@ class PowerPort {
   virtual void abort_sleep(MonotonicMs) noexcept {}
   // Fill peers[] and channel with the platform's current peer cache.
   virtual Status capture_cache(PowerImage& image) noexcept = 0;
+  // The platform may bind additional durable membership context. Node
+  // identity is always checked by PowerCoordinator before this hook.
+  virtual bool matches_context(const PowerImage& image, NetworkId network) const noexcept {
+    return image.network == network;
+  }
   // Stop the radio driver so no new TX/RX can start. MeshNode work has
   // already settled; this must not fabricate unknown TX results.
   virtual Status quiesce_radio() noexcept = 0;

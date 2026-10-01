@@ -722,7 +722,9 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   bool power_bound = false;
   bool sleep_requested = false;
   static espnow::NvsBlobNamespace power_namespace;
-  const Status power_open = power_namespace.open(espnow::kSecurityNvsPartition, "rlpower");
+  const Status power_open =
+      power_namespace.open(espnow::kSecurityNvsPartition,
+                           config.security == DeviceSecurity::DevRam ? "rlpower" : "rlpwrmem");
   if (!power_open) fail(power_open.detail);
   static sdkv1::BlobPowerStorage power_storage(power_namespace);
   static NullPowerEvents power_events;

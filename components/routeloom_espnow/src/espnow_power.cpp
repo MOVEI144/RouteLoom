@@ -32,7 +32,19 @@ void EspNowPowerPort::abort_sleep(const MonotonicMs now_ms) noexcept {
   }
 }
 
+bool EspNowPowerPort::matches_context(const PowerImage& image, NetworkId network) const noexcept {
+  if (owner_ == nullptr || owner_->coordinator().mode() == sdkv1::CoordinatorMode::Dev)
+    return PowerPort::matches_context(image, network);
+  NetworkId member_network = 0;
+  std::uint32_t generation = 0;
+  return owner_->coordinator().member_context(member_network, generation) &&
+         image.network == member_network && image.config_revision == generation;
+}
+
 Status EspNowPowerPort::capture_cache(PowerImage& image) noexcept {
+  if (owner_ != nullptr && owner_->coordinator().mode() != sdkv1::CoordinatorMode::Dev &&
+      !owner_->coordinator().member_context(image.network, image.config_revision))
+    return Status::error(StatusCode::InvalidState, "sleep membership unavailable");
   image.channel = runtime_.channel();
   runtime_.for_each_peer(
       [&](const NodeId node, const MacAddress& mac, const RouteMetric metric,

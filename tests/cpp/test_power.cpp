@@ -178,6 +178,10 @@ class MemoryPowerStorage final : public PowerStorage {
 
 class FakePowerPort final : public PowerPort {
  public:
+  bool matches_context(const PowerImage& image, NetworkId network) const noexcept override {
+    return context_matches && PowerPort::matches_context(image, network);
+  }
+  bool context_matches{true};
   Status capture_cache(PowerImage& image) noexcept override {
     ++capture_calls;
     if (!inject_capture) return inject_capture;
@@ -472,6 +476,22 @@ SleepTicket reach_ready(PowerWorld& w) {
   CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
   CHECK(w.pump_until(PowerState::ReadyToSleep));
   return w.coordinator.ticket();
+}
+
+void test_platform_context_refuses_saved_image() {
+  MemoryPowerStorage storage;
+  PowerWorld saved(storage);
+  CHECK_OK(saved.coordinator.begin(ResetCause::ColdBoot, {}, 0));
+  const SleepTicket ticket = reach_ready(saved);
+  saved.port.context_matches = false;
+  CHECK(!saved.coordinator.ticket_valid(ticket));
+  CHECK(saved.coordinator.sleep_enter(ticket, saved.now).code == StatusCode::InvalidState);
+  PowerWorld wake(storage);
+  wake.port.context_matches = false;
+  CHECK_OK(wake.coordinator.begin(ResetCause::DeepSleepWake, {1, 1, true}, 0));
+  CHECK(wake.coordinator.resume_outcome() == ResumeOutcome::CacheLost);
+  CHECK(std::find(wake.events.diagnostics.begin(), wake.events.diagnostics.end(),
+                  "SLEEP_IMAGE_CONTEXT_MISMATCH") != wake.events.diagnostics.end());
 }
 
 void test_power_stats_accumulate() {
@@ -5545,6 +5565,7 @@ int main() {
   test_unread_wake_reopens_radio_without_consuming_image();
   test_sleep_image_readback_failure_refuses_ticket();
   test_send_lifetime_ceiling();
+  test_platform_context_refuses_saved_image();
   test_power_stats_accumulate();
   test_cold_boot_and_errors();
   test_full_cycle_transition_order();

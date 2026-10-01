@@ -291,7 +291,7 @@ bool PowerCoordinator::ticket_valid(const SleepTicket& ticket) const noexcept {
   return ticket.issued && ticket_.issued && ticket.id == ticket_.id &&
          ticket.radio_generation == radio_generation_ &&
          ticket.config_revision == node_.config_revision() &&
-         ticket.pending_generation == pending_generation();
+         ticket.pending_generation == pending_generation() && image_usable(image_);
 }
 
 void PowerCoordinator::issue_ticket() noexcept {
@@ -391,7 +391,7 @@ bool PowerCoordinator::validate_enter(const SleepTicket& ticket,
   if (ticket.radio_generation != radio_generation_) return false;
   if (ticket.config_revision != node_.config_revision()) return false;
   if (ticket.pending_generation != pending_generation()) return false;
-  if (!image_valid_ || !sleep_image_armed_) return false;
+  if (!image_valid_ || !sleep_image_armed_ || !image_usable(image_)) return false;
   for (const auto plan : carry_plan_) {
     if (plan == CarryPlanKind::Expired) {
       return false;  // un-notified carry plan: settlement did not finish
@@ -1010,12 +1010,10 @@ Status PowerCoordinator::load_image(PowerImage& image, bool& found) noexcept {
 }
 
 bool PowerCoordinator::image_usable(const PowerImage& image) const noexcept {
-  // Identity binding only. config_revision is persisted in the image for
-  // diagnostics but deliberately not compared here: MeshNode::config_revision
-  // also bumps on runtime peer add/remove, so a freshly-booted node would
-  // never match a stored image and every resume would degrade to cold start.
-  return image.network == node_.config().network &&
-         image.node == node_.config().node;
+  // Node identity is mandatory. The port owns full membership identity;
+  // a legacy port only checks network, since runtime peer changes also
+  // bump the node's diagnostic config_revision across a fresh boot.
+  return image.node == node_.config().node && port_.matches_context(image, node_.config().network);
 }
 
 void PowerCoordinator::resume_flow(const ResetCause cause,

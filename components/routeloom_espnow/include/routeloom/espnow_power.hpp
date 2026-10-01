@@ -42,6 +42,7 @@ class EspNowPowerPort final : public PowerPort {
   }
 
   Status capture_cache(PowerImage& image) noexcept override;
+  bool matches_context(const PowerImage& image, NetworkId network) const noexcept override;
   Status prepare_sleep(MonotonicMs now_ms) noexcept override;
   void abort_sleep(MonotonicMs now_ms) noexcept override;
   Status quiesce_radio() noexcept override;
