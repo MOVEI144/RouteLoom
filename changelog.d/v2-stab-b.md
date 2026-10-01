@@ -22,5 +22,9 @@
   supersede it.
 - Cached channel-plan blobs obey the same site and structural checks as
   refetched blobs, including after a restart.
+- A fresh scoped neighbor binding exchanges current self/gateway route
+  records without waiting for the slow non-tree rotation. An old indirect
+  route can no longer keep reset-recovery replies on the previous path;
+  local queue pressure retains the owed update for retry.
 - HIL reset-cycle recovery time now measures the first observed delivery
   completion after reset, including its send latency.
