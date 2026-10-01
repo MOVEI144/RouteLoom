@@ -1,8 +1,10 @@
 #include "node_internal.hpp"
+#include "routeloom/owner_pump.hpp"
 
 namespace routeloom {
 
 void MeshNode::process_awaiting_hop(const MonotonicMs now_ms) noexcept {
+  if (awaiting_hop_.size() == 0) return;
   saturating_add(work_stats_.expiry_slots_scanned, awaiting_hop_.capacity());
   awaiting_hop_.erase_if(
       [&](const AwaitingHop& value) { return value.expires_at_ms <= now_ms; },
@@ -119,21 +121,53 @@ void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
 }
 
 void MeshNode::expire_dedup(const MonotonicMs now_ms) noexcept {
+  if (dedup_.size() == 0) return;
   saturating_add(work_stats_.expiry_slots_scanned, dedup_.capacity());
   const std::size_t expired = dedup_.erase_if(
       [&](const DedupEntry& value) { return value.expires_at_ms <= now_ms; });
   saturating_add(dedup_stats_.expired, expired);
 }
 
+bool MeshNode::idle_timers_only() const noexcept {
+  // Active/scoped work retains fallback until its timers publish a minimum.
+  if (gateway_scoped() || neighbors_.size() != 0 || routes_.size() != 0 ||
+      deliveries_.size() != 0 || dedup_.size() != 0 || awaiting_hop_.size() != 0 ||
+      applied_records_.size() != 0 || seqno_seen_.size() != 0 || seqno_state_.size() != 0 ||
+      discoveries_.size() != 0 || route_request_seen_.size() != 0 || group_trees_.size() != 0 ||
+      group_origins_.size() != 0 || group_streams_.size() != 0 || group_holds_.size() != 0 ||
+      !scheduler_.empty() || physical_.active || group_promote_hold_.used ||
+      triggered_advertisement_) {
+    return false;
+  }
+  for (const auto& slot : txn_slots_) {
+    if (slot.state != TxnState::Free) return false;
+  }
+  return true;
+}
+
+MonotonicMs MeshNode::next_deadline(const MonotonicMs now_ms) const noexcept {
+  if (!started_) return UINT64_MAX;
+  if (idle_timers_only()) {
+    return paused(pause::kBackgroundWork) ? UINT64_MAX : next_route_advertisement_ms_;
+  }
+  return now_ms > UINT64_MAX - kOwnerPollPeriodMs ? UINT64_MAX : now_ms + kOwnerPollPeriodMs;
+}
+
 Status MeshNode::poll(const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
   if (!started_) return Status::success();
+  if (idle_timers_only() &&
+      (paused(pause::kBackgroundWork) || now_ms < next_route_advertisement_ms_)) {
+    return Status::success();
+  }
+  NodeGuard guard(in_call_);
   last_clock_ms_ = now_ms;
   // Expired/revoked admission transactions close before anything else may
   // transmit: no new TX leaves on a dead transaction (design-q116 §7.2).
   sweep_transactions(now_ms);
-  saturating_add(work_stats_.expiry_slots_scanned, routes_.expire(now_ms));
+  if (routes_.size() != 0) {
+    saturating_add(work_stats_.expiry_slots_scanned, routes_.expire(now_ms));
+  }
   // P3 (03 §6/§7): decay the per-peer observation windows, release stale
   // busy feedback at its TTL, refresh effective link costs and advance the
   // route-switch hysteresis before any selection change is advertised.

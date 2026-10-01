@@ -26,6 +26,9 @@
 #include "nvs_flash.h"
 
 namespace {
+uint32_t notification_count = 0;
+void (*notification_hook)(void*) = nullptr;
+void* notification_context = nullptr;
 
 std::int64_t g_now_us = 0;
 std::uint8_t g_channel = 6;
@@ -81,6 +84,9 @@ namespace idf_stub {
 void reset() noexcept {
   static const std::uint8_t kDefaultMac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
   g_now_us = 0;
+  notification_count = 0;
+  notification_hook = nullptr;
+  notification_context = nullptr;
   g_channel = 6;
   g_send_count = 0;
   g_del_peer_count = 0;
@@ -521,3 +527,28 @@ esp_err_t esp_wifi_set_max_tx_power(const int8_t power) {
   (void)power;
   return ESP_OK;
 }
+
+void xTaskNotifyGive(TaskHandle_t task) {
+  if (task != nullptr) ++notification_count;
+}
+uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks) {
+  if (notification_hook != nullptr) {
+    const auto hook = notification_hook;
+    notification_hook = nullptr;
+    hook(notification_context);
+  }
+  if (ticks != 0) g_last_peek_ticks = notification_count == 0 ? ticks : 0;
+  const uint32_t count = notification_count;
+  if (clear)
+    notification_count = 0;
+  else if (notification_count != 0)
+    --notification_count;
+  return count;
+}
+
+namespace idf_stub {
+void set_notify_wait_hook(void (*hook)(void*), void* context) noexcept {
+  notification_hook = hook;
+  notification_context = context;
+}
+}  // namespace idf_stub

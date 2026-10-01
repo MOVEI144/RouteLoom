@@ -455,6 +455,7 @@ void MeshNode::schedule_route_advertisements(const MonotonicMs now_ms) noexcept 
 }
 
 void MeshNode::expire_sequence_requests(const MonotonicMs now_ms) noexcept {
+  if (seqno_seen_.size() == 0 && seqno_state_.size() == 0) return;
   saturating_add(work_stats_.expiry_slots_scanned,
                  seqno_seen_.capacity() + seqno_state_.capacity());
   seqno_seen_.erase_if(

@@ -640,6 +640,71 @@ void test_owner_wait_rounds_up_to_a_tick() {
   runtime.stop();
 }
 
+void test_notification_keeps_external_and_racing_wakes() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.start().ok());
+  runtime.bind_wake_task(xTaskGetCurrentTaskHandle());
+  // An external queue (post/USB/worker) is not visible to runtime's wait.
+  runtime.notify_owner();
+  runtime.wait_for_event(1000);
+  CHECK(idf_stub::last_peek_ticks() == 0);
+  CHECK(runtime.register_neighbor(kPeer, peer_mac(), 1).ok());
+  const auto inject = [](void*) {
+    const std::uint8_t junk = 0;
+    CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), &junk, 1));
+  };
+  idf_stub::set_notify_wait_hook(inject, nullptr);
+  runtime.wait_for_event(1000);
+  CHECK(idf_stub::last_peek_ticks() == 0);
+  const auto empty = runtime.owner_stats().empty_polls;
+  runtime.poll_once();
+  CHECK(runtime.owner_stats().empty_polls == empty);
+  runtime.stop();
+}
+
+void test_idle_deadline_poll_equivalence() {
+  std::uint32_t polls[2]{};
+  std::vector<std::string> diagnostics[2];
+  for (unsigned adaptive = 0; adaptive < 2; ++adaptive) {
+    idf_stub::reset();
+    TestSecurity security;
+    CapturingObserver observer;
+    EspNowRuntime runtime(make_config(), security, observer);
+    CHECK(runtime.initialize().ok());
+    CHECK(runtime.start().ok());
+    routeloom::MonotonicMs now = 0;
+    while (now <= 60000) {
+      idf_stub::set_now_us(static_cast<std::int64_t>(now) * 1000);
+      runtime.poll_once();
+      const routeloom::MonotonicMs due = runtime.next_deadline(now);
+      CHECK(due > now);
+      if (adaptive != 0) {
+        const auto stats = runtime.node().work_stats();
+        CHECK(runtime.node().poll(now + 1));
+        CHECK(runtime.node().work_stats().expiry_slots_scanned == stats.expiry_slots_scanned);
+      }
+      now = adaptive != 0 ? std::min(due, now + 1000) : now + 1;
+    }
+    polls[adaptive] = runtime.owner_stats().polls;
+    CHECK(idf_stub::send_count() == 0);
+    CHECK(observer.messages.empty());
+    CHECK(observer.delivery_events.empty());
+    diagnostics[adaptive] = observer.diagnostics;
+    CHECK(observer.group_messages.empty());
+    CHECK(observer.group_results.empty());
+    CHECK(runtime.node().work_stats().expiry_slots_scanned == 0);
+    runtime.stop();
+  }
+  CHECK(diagnostics[0] == diagnostics[1]);
+  CHECK(polls[0] == 60001);
+  CHECK(polls[1] == 601);
+  std::printf("idle Owner polls: eager=%u deadline=%u\n", polls[0], polls[1]);
+}
+
 void test_owner_trace_includes_node_work() {
   idf_stub::reset();
   TestSecurity security;
@@ -1406,6 +1471,8 @@ void test_hil_rx_diagnostics_are_owner_serialized() {
 }  // namespace
 
 int main() {
+  test_notification_keeps_external_and_racing_wakes();
+  test_idle_deadline_poll_equivalence();
   test_hil_rx_diagnostics_are_owner_serialized();
   test_completions_attribute_in_send_order_after_take_tx();
   test_cutover_fence_recovers_when_driver_omits_completion();

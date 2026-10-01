@@ -361,6 +361,7 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   status = runtime.initialize();
   if (!status) return status;
   runtime_ = &runtime;
+  runtime.bind_wake_task(xTaskGetCurrentTaskHandle());
 
   // Post-RF randomness first: boot() arms the cookie sealer from it.
   status = entropy.begin();
@@ -510,7 +511,27 @@ void Device::step(const MonotonicMs now_ms) noexcept {
 }
 
 MonotonicMs Device::next_deadline(const MonotonicMs now_ms) const noexcept {
-  return now_ms + kOwnerPollPeriodMs;
+  const MonotonicMs ceiling = role_ == profile::Role::Endpoint ? 1000
+                              : role_ == profile::Role::Relay  ? 100
+                                                               : 20;
+  MonotonicMs due = now_ms > UINT64_MAX - ceiling ? UINT64_MAX : now_ms + ceiling;
+  const auto sooner = [&](const MonotonicMs at) {
+    if (at < due) due = at;
+  };
+  if (runtime_ != nullptr) sooner(runtime_->next_deadline(now_ms));
+  if (owner_ != nullptr) sooner(owner_->next_deadline(now_ms));
+  // Application hooks, USB and optional configuration ports have no
+  // deadline callback yet, so preserve their documented cadence.
+  if (bridge_ != nullptr || poll_hook_ != nullptr || operation_ != Operation::None) {
+    sooner(now_ms > UINT64_MAX - kOwnerPollPeriodMs ? UINT64_MAX : now_ms + kOwnerPollPeriodMs);
+  }
+#if ROUTELOOM_DEVICE_REMOTE_CONFIG
+  if (remote_config_ != nullptr) sooner(now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2);
+#endif
+#if ROUTELOOM_DEVICE_MIGRATION
+  if (channel_plan_ != nullptr) sooner(now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2);
+#endif
+  return due < now_ms ? now_ms : due;
 }
 
 Status Device::post(const Job job, void* ctx) noexcept {
@@ -523,6 +544,7 @@ Status Device::post(const Job job, void* ctx) noexcept {
     ++posted_count_;
   }
   portEXIT_CRITICAL(&posted_lock_);
+  if (!full && runtime_ != nullptr) runtime_->notify_owner();
   return full ? Status::error(StatusCode::Busy, "post queue full") : Status::success();
 }
 

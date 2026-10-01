@@ -60,7 +60,9 @@ unsigned tx_overruns() noexcept;
 // Called after every successful xQueueReceive (nullptr clears): lets a
 // test refill a queue while the Owner drains it, as the radio does.
 void set_receive_hook(void (*hook)(void* context), void* context) noexcept;
-// Ticks passed to the most recent xQueuePeek.
+// Inject an event immediately before the atomic notification wait.
+void set_notify_wait_hook(void (*hook)(void*), void* context) noexcept;
+// Ticks passed to the most recent blocking notification take (0 if signalled).
 unsigned last_peek_ticks() noexcept;
 bool log_contains(const char* text) noexcept;
 

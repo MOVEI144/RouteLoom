@@ -23,3 +23,6 @@ void vTaskDelay(TickType_t ticks);
 void vTaskDelete(TaskHandle_t task);
 uint32_t uxTaskGetStackHighWaterMark(TaskHandle_t task);
 const char* pcTaskGetName(TaskHandle_t task);
+
+void xTaskNotifyGive(TaskHandle_t task);
+uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks);

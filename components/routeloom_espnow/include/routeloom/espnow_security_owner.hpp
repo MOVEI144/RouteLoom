@@ -95,6 +95,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // here on.
   SecurityProvider& session_provider() noexcept;
   sdkv1::SecurityCoordinator& coordinator() noexcept;
+  const sdkv1::SecurityCoordinator& coordinator() const noexcept;
   sdkv1::MembershipLifecycle& lifecycle() noexcept;
   // Late bindings (each once, before boot): the radio (RLD1 TX, channel
   // operations, member node adoption) and the USB bridge (LocalJoin +
@@ -137,6 +138,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // One pump turn after runtime.poll_once: coordinator Poll, ready radio
   // completions, and the action drain (tune/member/discovery/report).
   void poll(MonotonicMs now_ms) noexcept;
+  MonotonicMs next_deadline(MonotonicMs now_ms) const noexcept;
   // Sleep drain (P4 §9.3): waits for the node's accepted delivery,
   // group and radio work, then closes new node admission and parks the
   // coordinator once its security workspace is quiescent. At the drain

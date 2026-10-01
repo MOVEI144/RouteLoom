@@ -50,6 +50,17 @@ namespace {
 // images can tell them apart in a captured log.
 const char* kTag = "RouteLoomNode";
 
+#if CONFIG_ROUTELOOM_ROLE_GATEWAY
+struct UsbInput {
+  std::uint8_t size{0};
+  std::array<std::uint8_t, 64> bytes{};
+};
+struct UsbReader {
+  QueueHandle_t queue{nullptr};
+  routeloom::espnow::EspNowRuntime* runtime{nullptr};
+};
+#endif
+
 // NVS codec state uses CPU-only reads and writes, so C5 Owner profiles
 // keep it in LP SRAM while HP SRAM remains available to radio traffic.
 #if CONFIG_IDF_TARGET_ESP32C5
@@ -712,22 +723,40 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   const std::int64_t owner_stop_at_us = owner_prepare_at_us + 30000000LL;
   sdkv1::SecurityCoordinator& coordinator = owner_->coordinator();
 #endif
-  // Boot complete — the pump loop below is the node's main loop.
-  fail_streak_runtime_started(s_fail);
-
 #if CONFIG_ROUTELOOM_ROLE_GATEWAY
-  static std::array<std::uint8_t, 512> usb_rx{};
+  // A bounded byte carrier; decoding and all bridge state stay on Owner.
+  static UsbReader usb_reader;
+  usb_reader.queue = xQueueCreate(4, sizeof(UsbInput));
+  usb_reader.runtime = &runtime;
+  if (usb_reader.queue == nullptr) fail("USB reader queue allocation failed");
+  const auto read_usb = [](void* context) {
+    auto& reader = *static_cast<UsbReader*>(context);
+    for (;;) {
+      UsbInput input{};
+      const int received =
+          usb_serial_jtag_read_bytes(input.bytes.data(), input.bytes.size(), portMAX_DELAY);
+      if (received <= 0) continue;
+      input.size = static_cast<std::uint8_t>(received);
+      if (xQueueSend(reader.queue, &input, portMAX_DELAY) == pdTRUE) reader.runtime->notify_owner();
+    }
+  };
+  if (xTaskCreate(read_usb, "rl_usb_rx", 2048, &usb_reader, tskIDLE_PRIORITY + 1, nullptr) !=
+      pdPASS) {
+    fail("USB reader task allocation failed");
+  }
 #endif
+  // Boot complete: every fallible startup allocation precedes this mark.
+  fail_streak_runtime_started(s_fail);
 #if CONFIG_ROUTELOOM_TRACE && CONFIG_ROUTELOOM_ROLE_GATEWAY
   MonotonicMs last_usb_trace_ms = 0;
 #endif
   for (;;) {
 #if CONFIG_ROUTELOOM_ROLE_GATEWAY
-    const int received = usb_serial_jtag_read_bytes(usb_rx.data(), usb_rx.size(), 0);
-    if (received > 0) {
-      usb_receive(ByteView{usb_rx.data(), static_cast<std::size_t>(received)},
-                  monotonic_now_ms());
+    UsbInput input{};
+    for (unsigned i = 0; i < 4 && xQueueReceive(usb_reader.queue, &input, 0) == pdTRUE; ++i) {
+      usb_receive(ByteView{input.bytes.data(), input.size}, monotonic_now_ms());
     }
+
 #endif
     const MonotonicMs now_ms = monotonic_now_ms();
     step(now_ms);
@@ -813,7 +842,8 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
       }
     }
 #endif
-    runtime.wait_for_event(next_deadline(now_ms) - now_ms);
+    const MonotonicMs wait_now_ms = monotonic_now_ms();
+    runtime.wait_for_event(next_deadline(wait_now_ms) - wait_now_ms);
   }
 }
 

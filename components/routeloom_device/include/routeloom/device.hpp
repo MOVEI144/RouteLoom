@@ -277,8 +277,8 @@ class Device {
 
   // One Owner pass: USB, runtime drain, owner, posted jobs, poll hook.
   void step(MonotonicMs now_ms) noexcept;
-  // Latest time the next step() may run. Fixed at one Owner poll period
-  // until the components report their deadlines.
+  // Minimum component deadline bounded by the role ceiling (endpoint
+  // 1000 ms, relay 100 ms, gateway 20 ms); unsupported work keeps 2 ms.
   MonotonicMs next_deadline(MonotonicMs now_ms) const noexcept;
   // Gateway USB input for the next step().
   void usb_receive(ByteView bytes, MonotonicMs now_ms) noexcept;

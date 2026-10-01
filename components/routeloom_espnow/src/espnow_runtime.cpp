@@ -728,10 +728,12 @@ void EspNowRuntime::task_entry(void* argument) noexcept {
   // stop() running on it recognizes the self-call, self-cleared before
   // the join flag drops so a joiner never observes a dangling handle.
   runtime->task_ = xTaskGetCurrentTaskHandle();
+  runtime->bind_wake_task(xTaskGetCurrentTaskHandle());
   while (runtime->started_) {
     runtime->poll_once();
     runtime->wait_for_event(kOwnerPollPeriodMs);
   }
+  runtime->bind_wake_task(nullptr);
   runtime->task_ = nullptr;
   // Released last: once task_running_ reads false, a joining stop() owns
   // the teardown and frees the queues this task was draining.
@@ -1263,37 +1265,43 @@ void EspNowRuntime::poll_bootstrap(const MonotonicMs now) noexcept {
   }
 }
 
-void EspNowRuntime::wait_for_event(const MonotonicMs timeout_ms) noexcept {
-  if (event_queue_ == nullptr) {
-    vTaskDelay(ms_to_ticks_ceil(timeout_ms));
-    return;
+MonotonicMs EspNowRuntime::next_deadline(const MonotonicMs now_ms) const noexcept {
+  MonotonicMs due = node_.next_deadline(now_ms);
+  const auto sooner = [&](const MonotonicMs at) {
+    if (at < due) due = at;
+  };
+  // Channel operations, optional sinks and callback-watchdog work retain
+  // their compatibility cadence until they expose every internal timer.
+  portENTER_CRITICAL(&callback_lock_);
+  const bool radio_work = pending_tx_ || raw_tx_count_ != 0 || quarantined_count_ != 0 ||
+                          fenced_outstanding_ || expired_tx_count_ != 0;
+  portEXIT_CRITICAL(&callback_lock_);
+  if (discovery_ != nullptr || migration_ != nullptr || node_.gateway_sink() != nullptr ||
+      node_.config_sink() != nullptr || radio_work) {
+    sooner(now_ms > UINT64_MAX - kOwnerPollPeriodMs ? UINT64_MAX : now_ms + kOwnerPollPeriodMs);
   }
-  // Staged completions bypass the queue: a TX callback that lands on a
-  // full queue while poll_once is draining stages its completion AFTER
-  // the pass's entry check — the queue is empty now but the node's job is
-  // still unresolved. Blocking here would idle until the next tick
-  // (issue #60-3), so re-check the staging slots under the lock for the
-  // shared owner wait below.
+  return due;
+}
+
+void EspNowRuntime::notify_owner() noexcept {
+  const TaskHandle_t task = wake_task_.load();
+  if (task != nullptr) xTaskNotifyGive(task);
+}
+
+void EspNowRuntime::wait_for_event(const MonotonicMs timeout_ms) noexcept {
+  if (timeout_ms == 0) return;
+  if (wake_task_.load() == nullptr) bind_wake_task(xTaskGetCurrentTaskHandle());
+  // Do not clear before inspecting staging: USB/post/worker queues belong
+  // to the Device. The atomic blocking take consumes their notification
+  // even if it arrived between the Owner pass and this wait.
+  // A notification for work already drained costs at most one empty pass.
   bool staged = false;
   portENTER_CRITICAL(&callback_lock_);
   staged = lost_node_tx_valid_ || lost_tx_count_ != 0;
   portEXIT_CRITICAL(&callback_lock_);
-  // Thin FreeRTOS binding of the shared owner wait (owner_pump.hpp — the
-  // host harness executes the same routine against a fake queue). Peek,
-  // not receive: the event stays queued for poll_once's ordered drain
-  // (reserved slots -> lost completions -> queued events -> node poll).
-  // A TX completion posted while we sleep releases the wait NOW — the
-  // event wins over the periodic tick (issue #60-3). Bootstrap-queue
-  // traffic keeps its old bounded latency via the periodic timeout.
-  struct QueueWait {
-    QueueHandle_t queue;
-    void wait_until_posted(const MonotonicMs wait_ms) noexcept {
-      Event peek{};
-      (void)xQueuePeek(queue, &peek, ms_to_ticks_ceil(wait_ms));
-    }
-  };
-  QueueWait wait{event_queue_};
-  owner_wait_for_event(wait, timeout_ms, staged);
+  staged = staged || (event_queue_ != nullptr && uxQueueMessagesWaiting(event_queue_) != 0) ||
+           (bootstrap_queue_ != nullptr && uxQueueMessagesWaiting(bootstrap_queue_) != 0);
+  if (!staged) (void)ulTaskNotifyTake(pdTRUE, ms_to_ticks_ceil(timeout_ms));
 }
 
 Status EspNowRuntime::send_application(
@@ -2674,6 +2682,10 @@ bool EspNowRuntime::classify_bootstrap(const std::uint8_t* data,
 void EspNowRuntime::enqueue_rx(
     const esp_now_recv_info_t* info, const std::uint8_t* data,
     const int length) noexcept {
+  struct WakeOnExit {
+    EspNowRuntime& runtime;
+    ~WakeOnExit() { runtime.notify_owner(); }
+  } wake{*this};
   if (event_queue_ == nullptr || info == nullptr ||
       info->src_addr == nullptr || data == nullptr || length <= 0 ||
       length > static_cast<int>(kMaxEspNowBody)) {
@@ -2793,6 +2805,10 @@ void EspNowRuntime::enqueue_rx(
 void EspNowRuntime::enqueue_tx(
     const esp_now_send_info_t* info,
     const esp_now_send_status_t status) noexcept {
+  struct WakeOnExit {
+    EspNowRuntime& runtime;
+    ~WakeOnExit() { runtime.notify_owner(); }
+  } wake{*this};
   if (event_queue_ == nullptr || info == nullptr ||
       info->des_addr == nullptr) {
     return;

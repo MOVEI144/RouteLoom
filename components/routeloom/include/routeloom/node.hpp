@@ -824,6 +824,9 @@ class MeshNode {
   DeliveryResult delivery(const MessageId& id) const noexcept;
 
   Status poll(MonotonicMs now_ms) noexcept;
+  // Idle nodes publish the advertisement timer. Work whose component has
+  // no deadline contract retains the bounded 2 ms compatibility cadence.
+  MonotonicMs next_deadline(MonotonicMs now_ms) const noexcept;
   Status on_radio_receive(NodeId peer, ByteView frame, const RadioRxMetadata& metadata,
                           MonotonicMs now_ms) noexcept;
   // M1 telemetry entry point (m1-completion/02-telemetry.md §2.3): same
@@ -2470,6 +2473,7 @@ class MeshNode {
 
   void process_awaiting_hop(MonotonicMs now_ms) noexcept;
   void process_delivery_timeouts(MonotonicMs now_ms) noexcept;
+  bool idle_timers_only() const noexcept;
   void expire_dedup(MonotonicMs now_ms) noexcept;
   void schedule_route_advertisements(MonotonicMs now_ms) noexcept;
   void schedule_sequence_requests(MonotonicMs now_ms) noexcept;
