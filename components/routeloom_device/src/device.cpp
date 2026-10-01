@@ -612,8 +612,9 @@ Status Device::register_object_buffer(MutableByteView storage) noexcept {
   return Status::error(StatusCode::Unsupported, "object transfer disabled");
 #endif
 }
+#if ROUTELOOM_APP_OBJECT_TRANSFER
 bool Device::Observer::object_receive_ready() const noexcept {
-#if ROUTELOOM_APP_OBJECT_TRANSFER && ROUTELOOM_PROFILE_HAS_GATEWAY
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
   if (device_ != nullptr && device_->bridge_ != nullptr) return device_->bridge_->object_receive_ready();
 #endif
   return true;
@@ -622,31 +623,24 @@ std::size_t Device::Observer::object_receive_slots() const noexcept {
   return ROUTELOOM_APP_OBJECT_RX_SLOTS;
 }
 void Device::Observer::on_object(const ObjectRxInfo& info, ByteView data) noexcept {
-#if ROUTELOOM_APP_OBJECT_TRANSFER
   if (device_ == nullptr) return;
   device_->in_callback_ = true;
-#if ROUTELOOM_APP_OBJECT_TRANSFER && ROUTELOOM_PROFILE_HAS_GATEWAY
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
   if (device_->bridge_ != nullptr) device_->bridge_->on_object(info, data);
 #endif
   if (device_->object_observer_ != nullptr) device_->object_observer_->on_object(info, data);
   device_->in_callback_ = false;
-#else
-  (void)info; (void)data;
-#endif
 }
 void Device::Observer::on_object_result(const ObjectResult& result) noexcept {
-#if ROUTELOOM_APP_OBJECT_TRANSFER
   if (device_ == nullptr) return;
   device_->in_callback_ = true;
-#if ROUTELOOM_APP_OBJECT_TRANSFER && ROUTELOOM_PROFILE_HAS_GATEWAY
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
   if (device_->bridge_ != nullptr) device_->bridge_->on_object_result(result);
 #endif
   if (device_->object_observer_ != nullptr) device_->object_observer_->on_object_result(result);
   device_->in_callback_ = false;
-#else
-  (void)result;
-#endif
 }
+#endif
 
 Status Device::send_group(const GroupId group, const ByteView payload,
                           const GroupSendOptions& options, MessageId& id) noexcept {

@@ -32,7 +32,7 @@
       "id": "bridge_node-esp32c3-normal-off-off", "app": "bridge_node", "target": "esp32c3",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL=y"],
-      "symbols_absent": ["9AppObject", "11object_wire"],
+      "symbols_absent": ["9AppObject", "11object_wire", "6Device8Observer.*(on_object|object_receive)", "6rl_dev.*on_object"],
       "budget": {"app_bin_max": 1219456, "static_free_min": 51192, "rtc_used_max": 6632}
     },
     {
@@ -333,7 +333,7 @@
       "id": "endpoint_c-esp32c3-example", "app": "endpoint_c", "dir": "examples/endpoint_c",
       "target": "esp32c3", "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_DEV_KCONFIG_IDENTITY=y", "CONFIG_ROUTELOOM_ROLE_ENDPOINT=y"],
-      "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
+      "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway", "6Device8Observer.*(on_object|object_receive)", "6rl_dev.*on_object"],
       "budget": {"app_bin_max": 1331648, "static_free_min": 84604, "rtc_used_max": 5768}
     },
     {

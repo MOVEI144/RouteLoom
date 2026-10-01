@@ -118,8 +118,11 @@ static_assert(RL_DEV_CONNECTIVITY_SLEEPING == static_cast<int>(Connectivity::Sle
 static_assert(RL_APPLIED_LEASE_SIZE == sizeof(ExecutionLease), "APPLIED lease size");
 }  // namespace
 
-struct rl_dev final : public NodeObserver, public DeviceObserver, public AppliedEndpointSink,
-                      public ObjectObserver {
+struct rl_dev final : public NodeObserver, public DeviceObserver, public AppliedEndpointSink
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+                      , public ObjectObserver
+#endif
+                      {
   // A posted C job waits in one of these until its Owner pass takes it.
   struct Job {
     std::atomic<bool> used{false};
@@ -137,15 +140,19 @@ struct rl_dev final : public NodeObserver, public DeviceObserver, public Applied
     observer = rl_dev_observer_t{};
     if (dev_sized(c_observer)) {
       std::memcpy(&observer, c_observer, offsetof(rl_dev_observer_t, on_object));
+#if ROUTELOOM_APP_OBJECT_TRANSFER
       if (c_observer->struct_size >= offsetof(rl_dev_observer_t, on_object_result)) {
         observer.on_object = c_observer->on_object;
       }
       if (c_observer->struct_size >= sizeof(rl_dev_observer_t)) observer.on_object_result = c_observer->on_object_result;
+#endif
     }
     sink_installed = false;
     target.observe(this);
     target.observe_device(this);
+#if ROUTELOOM_APP_OBJECT_TRANSFER
     target.observe_object(this);
+#endif
     target.on_poll(&rl_dev::poll, this);
     install_sink();
   }
@@ -199,6 +206,7 @@ struct rl_dev final : public NodeObserver, public DeviceObserver, public Applied
     const rl_dev_connectivity_t c = to_c(snapshot);
     observer.on_connectivity(observer.user, &c);
   }
+#if ROUTELOOM_APP_OBJECT_TRANSFER
   void on_object(const ObjectRxInfo& info, ByteView data) noexcept override {
     if (observer.on_object == nullptr) return;
     rl_dev_object_rx_t c{}; dev_header(c);
@@ -214,6 +222,7 @@ struct rl_dev final : public NodeObserver, public DeviceObserver, public Applied
     c.reason = static_cast<std::uint16_t>(result.reason);
     observer.on_object_result(observer.user, &c);
   }
+#endif
   void on_operation(const OperationId operation, const std::uint16_t result) noexcept override {
     if (observer.on_operation != nullptr) observer.on_operation(observer.user, operation, result);
   }

@@ -354,16 +354,22 @@ class Device {
  private:
   friend struct ::rl_dev;
   friend struct DeviceTestAccess;
-  class Observer final : public NodeObserver, public ObjectObserver {
+  class Observer final : public NodeObserver
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+                       , public ObjectObserver
+#endif
+                       {
    public:
     // Constant-initialized, so begin() holds it without a guard and an
     // image that never begins (maintenance console) links none of it.
     constexpr Observer() noexcept = default;
     void bind(Device& device) noexcept { device_ = &device; }
+#if ROUTELOOM_APP_OBJECT_TRANSFER
     bool object_receive_ready() const noexcept override;
     std::size_t object_receive_slots() const noexcept override;
     void on_object(const ObjectRxInfo& info, ByteView data) noexcept override;
     void on_object_result(const ObjectResult& result) noexcept override;
+#endif
     void on_message(const MessageKey& key, NodeId source, ByteView payload) noexcept override;
     void on_message(const MessageKey& key, NodeId source, ByteView payload,
                     const DeliveryAssurance& assurance) noexcept override;
