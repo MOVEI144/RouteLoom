@@ -562,7 +562,7 @@ void test_exchange_ratio_cost() {
   // submissions can consume them.
   for (int i = 0; i < 20; ++i) { now += 5; tick(); }
 
-  for (int i = 0; i < 5; ++i) {
+  for (int i = 0; i < 8; ++i) {
     MessageId m{};
     radio1.fail_next = true;   // first physical attempt of this delivery fails
     CHECK_OK(a.send(2, payload_view(), SendOptions{}, now, m));
@@ -576,6 +576,27 @@ void test_exchange_ratio_cost() {
   // After 4+ authenticated accepts the ratio applies: ceil(1 * 2/1) = 2.
   // Queue delay is negligible (5ms steps) so no penalty term interferes.
   CHECK(a.peer_link_cost(2) >= 2);
+  for (int i = 0; i < 20; ++i) { now += 5; tick(); }
+  now = 2200;
+  tick();
+  CHECK(a.peer_link_cost(2) == 2);
+  CHECK(a.peer_tx_window(2) >= 2);
+  // Keep one healthy exchange awaiting its accept while a second fails.
+  // The unresolved submission must not hide the settled failure work.
+  MessageId pending{}, lost{};
+  CHECK_OK(a.send(2, payload_view(), SendOptions{}, now, pending));
+  CHECK_OK(a.poll(now + 5));
+  CHECK_OK(a.send(2, payload_view(), SendOptions{}, now + 5, lost));
+  radio1.fail_next = true;
+  now += 10;
+  net.flush(now);
+  CHECK(!radio1.failed.empty());
+  while (!radio1.failed.empty()) {
+    CHECK_OK(a.on_radio_tx_result(radio1.failed.front(), false, now));
+    radio1.failed.pop_front();
+  }
+  CHECK_OK(a.poll(now + 5));
+  CHECK(a.peer_link_cost(2) >= 3);
 }
 
 // ------------------ node: sustained egress load switches route (D4-01)

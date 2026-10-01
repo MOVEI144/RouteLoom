@@ -31,18 +31,24 @@ void MeshNode::refresh_link_cost(Neighbor& neighbor, const MonotonicMs now_ms) n
   // invented). A dirty window (sdk-completion/03 §3.3 — some attempt resolved
   // Unknown) may still count work toward worsening but must never let the
   // measured ratio improve the base off nominal.
-  // Submission work precedes its authenticated accept. Sampling while
-  // an exchange is unresolved would turn one healthy in-flight attempt
-  // into apparent loss; keep the ratio and its relaxation at a settled boundary.
-  bool exchange_pending = physical_.active && physical_.job.requires_hop_accept &&
-                          physical_.job.peer == neighbor.node;
+  // Submission work precedes its authenticated accept. Exclude the latest
+  // unresolved attempt of each exchange, but retain settled failure work
+  // even when other exchanges toward this peer remain in flight.
+  std::uint32_t pending_work = 0;
+  if (physical_.active && physical_.job.requires_hop_accept &&
+      physical_.job.peer == neighbor.node) {
+    pending_work = 1;
+  }
   awaiting_hop_.for_each([&](const AwaitingHop& value) {
-    if (value.job.peer == neighbor.node) exchange_pending = true;
+    if (value.job.peer == neighbor.node) ++pending_work;
   });
+  const bool exchange_pending = pending_work != 0;
+  const std::uint32_t settled_work =
+      neighbor.exchange_work > pending_work ? neighbor.exchange_work - pending_work : 0;
   RouteMetric base = neighbor.metric;
-  if (!exchange_pending && neighbor.exchange_accepts >= kExchangeMinAccepts) {
+  if (neighbor.exchange_accepts >= kExchangeMinAccepts) {
     const RouteMetric measured = measured_link_base(
-        neighbor.metric, neighbor.exchange_work, neighbor.exchange_accepts);
+        neighbor.metric, settled_work, neighbor.exchange_accepts);
     if (!neighbor.metric_window_dirty || measured >= base) base = measured;
   }
   // §6.2 queue penalty: ONLY our egress sojourn toward this peer, smoothed

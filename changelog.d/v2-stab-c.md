@@ -4,7 +4,7 @@
   existing 8 s deadline after the bounded EDHOC resends finish. Chunked
   replies over three or four hops can now arrive after the resend budget
   without losing the initiator's exchange. Link and resume timing is unchanged.
-- Link exchange cost is sampled after pending hop exchanges settle, so a
+- Link exchange cost excludes the latest unresolved hop attempts, so a
   healthy submission awaiting HOP_ACCEPT does not inflate its metric and
   interrupt a multi-hop route. Failed attempt work and queue pressure still count.
 - Real-Owner CI covers forced two-, three- and four-hop End sessions in
