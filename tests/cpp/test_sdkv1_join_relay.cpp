@@ -93,8 +93,10 @@ class RadioPort final : public ZtRld1Port {
     if (refuse || send_budget == 0) return Status::error(StatusCode::NoRoute, "radio unavailable");
     if (send_budget > 0) --send_budget;
     air_.push_back(RadioFrame{self_, destination, Bytes(frame.data, frame.data + frame.size)});
+    if (on_send) on_send();
     return Status::success();
   }
+  std::function<void()> on_send;
   bool refuse{false};
   // Sends left before the port refuses (-1: unlimited). Models the
   // one-outstanding-frame radio rule one pump round at a time.
@@ -524,6 +526,49 @@ void test_closed_policy_offers_only_to_this_site() {
     CHECK(world.proxy.set_zero_touch_open(true).ok());
     CHECK(world.connect());
   }
+}
+
+void test_smart_offer_expiry_before_slot() {
+  current = "smart offer expiry before slot";
+  World world;
+  ExpectedJoinList list{};
+  list.count = 1;
+  list.ttl_s = 1;
+  list.marks[0].fill(0x37);
+  world.proxy.set_expected(&list, world.now + 1);
+  ZtDiscoverBody body{};
+  body.smart = true;
+  body.org_hint = kOrgHint;
+  body.mark = list.marks[0];
+  CHECK(world.links[0]->discover(body, world.now));
+  world.pump();
+  world.advance(400);
+  CHECK(world.observers[0]->offers.empty());
+  CHECK(world.links[0]->stats().offers_ignored == 1);
+}
+
+void test_smart_policy_callback_reentry() {
+  current = "smart policy callback reentry";
+  World world;
+  ExpectedJoinList list{};
+  list.count = 1;
+  list.ttl_s = 300;
+  list.marks[0].fill(0x37);
+  world.proxy.set_expected(&list, world.now + 300000);
+  ZtDiscoverBody body{};
+  body.smart = true;
+  body.org_hint = kOrgHint;
+  body.mark = list.marks[0];
+  world.proxy_radio.on_send = [&] { world.proxy.set_expected(nullptr, 0); };
+  CHECK(world.links[0]->discover(body, world.now));
+  world.pump();
+  world.advance(400);
+  CHECK(world.observers[0]->offers.size() == 1);
+  world.proxy_radio.on_send = {};
+  CHECK(world.links[0]->discover(body, world.now));
+  world.pump();
+  world.advance(400);
+  CHECK(world.observers[0]->offers.size() == 2);
 }
 
 void test_unreachable_and_busy() {
@@ -2099,6 +2144,8 @@ int main() {
   test_resume_chunked_opening();
   test_unreachable_and_busy();
   test_closed_policy_offers_only_to_this_site();
+  test_smart_offer_expiry_before_slot();
+  test_smart_policy_callback_reentry();
   test_flood();
   test_rate_limit();
   test_timeouts();

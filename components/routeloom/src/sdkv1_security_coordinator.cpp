@@ -2470,6 +2470,7 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
 void SecurityCoordinator::set_proxy_policy(const std::uint64_t site_id,
                                            const bool zero_touch_open, const ExpectedJoinList* expected,
                                            const MonotonicMs now) noexcept {
+  if (in_port_) return;
   secure_clear(&proxy_expected_, sizeof(proxy_expected_));
   if (expected != nullptr) proxy_expected_ = *expected;
   proxy_expected_site_ = site_id;
@@ -2970,8 +2971,12 @@ void SecurityCoordinator::start_refresh(const MonotonicMs now) noexcept {
 
 void SecurityCoordinator::maybe_abandon_refresh(const MonotonicMs now) noexcept {
   if (!refresh_active_ || mode_ != CoordinatorMode::ZeroTouch) return;
-  if (now - refresh_start_ < kRefreshAbandonMs) return;
-  // Five minutes without MemberReady: re-verification is impossible
+  const JoinSnapshot snapshot = joiner().snapshot();
+  const bool search_ended = deps_.joiner_config.smart_join &&
+                            snapshot.state == JoinState::Stopped;
+  if (!search_ended && now - refresh_start_ < kRefreshAbandonMs) return;
+  // Finite smart search end, or five minutes without MemberReady:
+  // re-verification is impossible
   // (host down, out of range, attacker-triggered). A healthy retained
   // membership re-adopts instead of wedging in ZeroTouch; an impaired
   // store stays with the joiner (it heals or reports RecoveryRequired).
@@ -2980,6 +2985,11 @@ void SecurityCoordinator::maybe_abandon_refresh(const MonotonicMs now) noexcept 
                        health.read_error_mask == 0 && !health.active_load_failed &&
                        !health.quarantined && !health.uncertain;
   if (!healthy) return;
+  if (search_ended) {
+    join_search_result_ = snapshot.counters.denies != 0 ? StatusCode::AuthorizationFailed
+                          : snapshot.counters.pendings != 0 ? StatusCode::ApprovalRequired
+                                                            : StatusCode::Expired;
+  }
   refresh_active_ = false;
   // The cooldown answers a site that was heard but could not re-verify us
   // (host down, attacker). A refresh that never reached a candidate only
@@ -3534,11 +3544,16 @@ void SecurityCoordinator::stop_traffic(const bool clear_resume) noexcept {
 
 Status SecurityCoordinator::request_join(const MonotonicMs now) noexcept {
   if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
-  if (mode_ == CoordinatorMode::Member) return start_recovery_join(now);
+  if (mode_ == CoordinatorMode::Member) {
+    join_search_result_ = StatusCode::Ok;
+    return start_recovery_join(now);
+  }
   if (mode_ != CoordinatorMode::ZeroTouch) {
     return Status::error(StatusCode::InvalidState, "JOIN_NOT_AVAILABLE");
   }
-  return joiner().retry_now(now);
+  const Status status = joiner().retry_now(now);
+  if (status) join_search_result_ = StatusCode::Ok;
+  return status;
 }
 
 Status SecurityCoordinator::apply_join_policy(const JoinerConfig& policy,
@@ -3600,6 +3615,10 @@ Status SecurityCoordinator::start_recovery_join(const MonotonicMs now) noexcept 
     action.recovery = JoinRecoveryReason::MembershipInvalid;
     emit_action(action);
   } else {
+    if (deps_.joiner_config.smart_join && !usb_direct_) {
+      refresh_active_ = true;
+      refresh_start_ = now;
+    }
     note_milestone_leg_started(now);
   }
   in_port_ = false;

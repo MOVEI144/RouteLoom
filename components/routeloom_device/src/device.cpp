@@ -67,9 +67,6 @@ class CallbackScope {
   bool prior_;
 };
 
-// A request_join ends here at the latest (a join attempt and its retries).
-
-
 std::uint16_t membership_cause(const MembershipStage stage) noexcept {
   switch (stage) {
     case MembershipStage::Member: return ROUTELOOM_REASON_JOINED;
@@ -733,7 +730,14 @@ void Device::update_membership(const MonotonicMs now_ms) noexcept {
   }
   if (operation_ == Operation::Join) {
     if (stage != MembershipStage::Member) operation_left_member_ = true;
-    if (stage == MembershipStage::Member && operation_left_member_) {
+    const StatusCode result = owner_->coordinator().join_search_result();
+    if (result == StatusCode::AuthorizationFailed) {
+      finish_operation(ROUTELOOM_REASON_JOIN_DENIED);
+    } else if (result == StatusCode::ApprovalRequired) {
+      finish_operation(ROUTELOOM_REASON_JOIN_PENDING);
+    } else if (result == StatusCode::Expired) {
+      finish_operation(ROUTELOOM_REASON_JOIN_TIMEOUT);
+    } else if (stage == MembershipStage::Member && operation_left_member_) {
       finish_operation(ROUTELOOM_REASON_JOINED);
     } else if (stage == MembershipStage::Removed || joiner.counters.denies > operation_denies_) {
       finish_operation(ROUTELOOM_REASON_JOIN_DENIED);
@@ -741,7 +745,8 @@ void Device::update_membership(const MonotonicMs now_ms) noexcept {
       finish_operation(ROUTELOOM_REASON_RECOVERY_REQUIRED);
     } else if (joiner.counters.pendings > operation_pendings_) {
       finish_operation(ROUTELOOM_REASON_JOIN_PENDING);
-    } else if (now_ms >= operation_deadline_ms_) {
+    } else if (now_ms >= operation_deadline_ms_ ||
+               (smart_join_ && joiner.state == sdkv1::JoinState::Stopped)) {
       finish_operation(ROUTELOOM_REASON_JOIN_TIMEOUT);
     }
   } else if (operation_ == Operation::Leave && stage == MembershipStage::Recovery) {

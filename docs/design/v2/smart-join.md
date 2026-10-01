@@ -6,7 +6,12 @@ boots as Member without a ZeroTouch DISCOVER or a new join request. A fresh
 smart search listens for `listen_ms`, adds the existing `start_jitter_ms`
 random delay, then probes. `search_ms` bounds the whole search, including
 listening and retries. One search can start at most one full procedure;
-transport retransmissions stay within that procedure. API calls can start
+transport retransmissions stay within that procedure. The deadline starts
+when the search is requested, including the boot/store check. A stopped
+attempt releases its candidate reservation so a later API search can proceed.
+A healthy retained membership resumes after a finite verification ends,
+while the API reports timeout, pending or denial rather than a new join.
+API calls can start
 another finite search. `boot_join=false` disables automatic fresh boot joins.
 `same_site_only=true` requires a retained site preference; an unassigned
 node cannot select an arbitrary site. The existing `isolation_notice_s`
@@ -35,7 +40,9 @@ hints. The first positive answer holds one existing pending-offer row for
 one cookie window (2 s by default). Refresh probes from that MAC can update
 the nonce without extending the reservation. Other contenders stay light;
 m1 admission or expiry releases the row. This prevents simultaneous planned
-joiners from consuming their single attempt on the same busy proxy. OFFER remains unauthenticated: a forged positive can cause
+joiners from consuming their single attempt on the same busy proxy. List expiry is checked again when sending a slotted OFFER, and the gateway
+epoch cache must cover the cookie window before a smart positive is sent.
+OFFER remains unauthenticated: a forged positive can cause
 one procedure, while certificate verification, Authority decision, durable
 membership commit/readback and JoinConfirm remain mandatory.
 

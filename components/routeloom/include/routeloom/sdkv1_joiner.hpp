@@ -390,6 +390,7 @@ class Joiner final {
   static MonotonicMs sat_add(MonotonicMs a, std::uint64_t delta) noexcept;
   static void sat_inc(std::uint32_t& counter) noexcept;
   static bool step_expected(JoinState state, JoinAuthPhase phase, std::uint8_t step) noexcept;
+  void end_search(MonotonicMs now) noexcept;
 
   MonotonicMs search_deadline_{0};
   std::uint32_t search_attempts_{0};

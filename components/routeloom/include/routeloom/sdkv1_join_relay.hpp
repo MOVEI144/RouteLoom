@@ -327,10 +327,12 @@ class JoinProxy {
   // hint is unauthenticated: a forged one only reaches the authority,
   // which still decides.
   Status set_zero_touch_open(bool open) noexcept;
-  void set_expected(const ExpectedJoinList* list, MonotonicMs expires) noexcept {
+  Status set_expected(const ExpectedJoinList* list, MonotonicMs expires) noexcept {
+    if (in_call_) return Status::error(StatusCode::Busy, "in port callback");
     offers_.clear();
     expected_ = list;
     expected_expires_ = expires;
+    return Status::success();
   }
   Status set_authority(bool reachable, std::uint8_t hops, MonotonicMs now_ms) noexcept;
   Status set_membership(MembershipState state, MonotonicMs now_ms) noexcept;

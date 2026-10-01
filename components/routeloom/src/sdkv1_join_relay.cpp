@@ -675,6 +675,11 @@ void JoinProxy::handle_discover(const MacAddress& source, const MacAddress& dest
       }) != nullptr) return;
   // An OFFER may lead to a relay, which needs the gateway's epoch: a
   // DISCOVER creates the need when the cache is missing (#116 §3.3).
+  if (body.smart && expected && epoch_cache_valid(now_ms) &&
+      (now_ms > ~MonotonicMs{0} - config_.cookie_bucket_ms ||
+       !epoch_cache_valid(now_ms + config_.cookie_bucket_ms))) {
+    gateway_epoch_ = 0;  // refresh before promising the cookie window
+  }
   if (!body.smart || expected) need_gateway_epoch(now_ms);
   PendingOffer* offer = offers_.allocate();
   if (offer == nullptr) {
@@ -715,8 +720,13 @@ void JoinProxy::send_offer(PendingOffer& pending, const MonotonicMs now_ms) noex
   // Authority-reachable only with a live gateway epoch whose reply said
   // ready; without it the device should prefer another proxy and retry
   // discovery later (#116 §3.3).
-  body.flags = pending.smart && pending.expected ? kZtOfferExpected : 0;
-  if (reachable_ && epoch_cache_valid(now_ms) && gateway_ready_) {
+  const bool expected = pending.expected &&
+      (pending.retained || (expected_ != nullptr && now_ms < expected_expires_));
+  body.flags = pending.smart && expected ? kZtOfferExpected : 0;
+  const bool epoch_ready = epoch_cache_valid(now_ms) &&
+      (!pending.smart || (now_ms <= ~MonotonicMs{0} - config_.cookie_bucket_ms &&
+                         epoch_cache_valid(now_ms + config_.cookie_bucket_ms)));
+  if (reachable_ && epoch_ready && gateway_ready_) {
     body.flags |= kZtOfferAuthorityReachable;
   }
   const bool reserved = pending.smart && offers_.find([&](const PendingOffer& offer) {
@@ -744,7 +754,7 @@ void JoinProxy::send_offer(PendingOffer& pending, const MonotonicMs now_ms) noex
   if (!zt_offer_body_encode(body, encoded)) return;
   if (emit_rld1(pending.mac, pending.nonce, FrameType::Offer, encoded.view())) {
     ++stats_.offers_tx;
-    if (pending.smart && pending.expected && !pending.offered &&
+    if (pending.smart && expected && !pending.offered &&
         (body.flags & (kZtOfferProxyBusy | kZtOfferAuthorityReachable)) == kZtOfferAuthorityReachable &&
         now_ms <= ~MonotonicMs{0} - config_.cookie_bucket_ms) {
       pending.offered = true;

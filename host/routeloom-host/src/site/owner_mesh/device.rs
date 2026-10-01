@@ -255,6 +255,37 @@ fn mesh_f01_leave_intent_power_cuts() {
     );
 }
 
+/// A finite retained-site search restores Member on timeout and resumes
+/// delivery after the radio heals, without a new admission.
+#[test]
+fn mesh_j02_finite_retained_search_restores_member() {
+    let Some(mut world) = MeshWorld::start("j02-finite", Switch::forced_multihop()) else {
+        panic!("J02 requires the real Owner mesh peer");
+    };
+    converge_gated(&mut world, 1, "j02 finite");
+    let a = world.index_of(NODE_A);
+    let before = world.snaps[a].clone();
+    world.peers[a].smart_join_policy(false, true, 1000);
+    world.switch.isolate(a);
+    let (status, op) = world.peers[a].device_op(false, world.now).unwrap();
+    assert_eq!(status, STATUS_OK);
+    until(&mut world, 2000, |w| w.snaps[a].op_last == op);
+    assert_eq!(world.snaps[a].op_result, reasons::REASON_JOIN_TIMEOUT);
+    assert_eq!(
+        world.snaps[a].stage, STAGE_MEMBER,
+        "finite search restores retained membership"
+    );
+    assert_eq!(world.snaps[a].id_fp, before.id_fp);
+    assert!(world.snaps[a].has_site);
+    assert_eq!(world.snaps[a].j_m1, 0);
+    world.switch.heal(a);
+    until(&mut world, 120_000, |w| {
+        w.snaps[a].authority_ready && w.snaps[a].join_confirmed
+    });
+    assert!(world.snaps[a].join_confirmed);
+    deliver_each(&mut world, a, 0, 2, b"j02-finite-after");
+}
+
 /// F05-R: a send and a leave made from inside Device callbacks (a received
 /// message, a membership event) answer Busy every time and change nothing.
 /// A re-verification (request_join on a member) reports Member→Joining→

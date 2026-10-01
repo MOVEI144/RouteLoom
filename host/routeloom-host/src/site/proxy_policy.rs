@@ -146,12 +146,15 @@ impl SiteAuthority {
         {
             return;
         }
-        let Ok(tail) = (ProxyPolicySet {
+        let mut set = ProxyPolicySet {
             generation,
             zero_touch_open: self.policy.zero_touch_open,
             tlv: self.policy.expected.tlv(),
-        })
-        .encode() else {
+        };
+        let encoded = set.encode();
+        use zeroize::Zeroize;
+        set.tlv.zeroize();
+        let Ok(tail) = encoded else {
             return;
         };
         let tail = zeroize::Zeroizing::new(tail);

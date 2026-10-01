@@ -399,6 +399,7 @@ Status Joiner::start(const JoinBootInput& boot, const MonotonicMs now) noexcept 
   }
   if (!clock_ok(now)) return Status::error(StatusCode::ClockUncertain, "joiner clock");
   begin_run(boot);
+  if (config_.smart_join) search_deadline_ = sat_add(now, config_.search_ms);
   direct_ = false;
   direct_port_ = nullptr;
   set_state(JoinState::BootCheck);
@@ -462,7 +463,7 @@ Status Joiner::retry_now(const MonotonicMs now) noexcept {
   InCall guard(in_call_);
   if (state_ == JoinState::Stopped) {
     if (!config_.smart_join || boot_witness_ == 0) return Status::error(StatusCode::InvalidState, "joiner not booted");
-    search_deadline_ = 0;
+    search_deadline_ = sat_add(now, config_.search_ms);
     search_attempts_ = counters_.attempts;
     api_triggered_ = true;
     set_state(JoinState::BootCheck);
@@ -564,14 +565,24 @@ Status Joiner::poll(const MonotonicMs now) noexcept {
       (now >= search_deadline_ ||
        (!attempt_.active && counters_.attempts > search_attempts_ &&
         state_ == JoinState::Backoff))) {
-    teardown_attempt();
-    action_pending_ = false;
-    channel_waiting_ = false;
-    set_state(JoinState::Stopped);
+    end_search(now);
     return Status::success();
   }
   link_.poll(now);  // chunk retransmits and assembly expiry; callbacks only set flags
   return drive(now);
+}
+
+void Joiner::end_search(const MonotonicMs now) noexcept {
+  if (attempt_.active) {
+    candidates_.apply_outcome(attempt_, JoinAttemptOutcome::Pending, 0, now, entropy_);
+  }
+  teardown_attempt();
+  action_pending_ = false;
+  channel_waiting_ = false;
+  wipe_expectation();
+  secure_clear(rrs_staged_);
+  rrs_staged_len_ = 0;
+  set_state(JoinState::Stopped);
 }
 
 Status Joiner::on_rld1_rx(const JoinRxMeta& meta, const ByteView frame,
@@ -1097,7 +1108,7 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
       if (direct_) {
         begin_direct_attempt();
       } else if (config_.smart_join) {
-        search_deadline_ = sat_add(now, config_.search_ms);
+        if (search_deadline_ == 0) search_deadline_ = sat_add(now, config_.search_ms);
         backoff_deadline_ = sat_add(now, config_.listen_ms);
         set_state(JoinState::Backoff);
       } else {
@@ -1117,7 +1128,7 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
       if (direct_) {
         begin_direct_attempt();
       } else if (config_.smart_join) {
-        search_deadline_ = sat_add(now, config_.search_ms);
+        if (search_deadline_ == 0) search_deadline_ = sat_add(now, config_.search_ms);
         backoff_deadline_ = sat_add(now, config_.listen_ms);
         set_state(JoinState::Backoff);
       } else {
@@ -1148,7 +1159,7 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
       set_state(JoinState::Stopped);
       return Status::success();
     }
-    search_deadline_ = sat_add(now, config_.search_ms);
+    if (search_deadline_ == 0) search_deadline_ = sat_add(now, config_.search_ms);
     std::uint32_t draw = 0;
     const Status random = entropy_.fill(MutableByteView{reinterpret_cast<std::uint8_t*>(&draw), sizeof draw});
     if (!random) {
@@ -1322,8 +1333,7 @@ Status Joiner::drive_scan_window(const MonotonicMs now) noexcept {
 Status Joiner::drive_select(const MonotonicMs now) noexcept {
   if (action_pending_) return Status::success();
   if (config_.smart_join && counters_.attempts > search_attempts_) {
-    teardown_attempt();
-    set_state(JoinState::Stopped);
+    end_search(now);
     return Status::success();
   }
   // At most one pass over the table per poll: a recovery join skips every

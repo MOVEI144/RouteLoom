@@ -98,7 +98,7 @@ JoinBootInput boot_input() {
 
 
 struct Measurement { std::uint32_t attempts; std::uint64_t bytes; };
-Measurement selection(bool smart, bool expected, bool expired, bool denied) {
+Measurement selection(bool smart, bool expected, bool expired, bool denied, bool forged = false) {
   auto config = device_config();
   config.smart_join = smart;
   config.listen_ms = 1000;
@@ -120,6 +120,19 @@ Measurement selection(bool smart, bool expected, bool expired, bool denied) {
   net.faults().drop_if = [&](RadioDir direction, const Bytes& frame) {
     bytes += frame.size();
     autonomy::Rld1Envelope env{};
+    if (forged && direction == RadioDir::Down && autonomy::rld1_decode(view(frame), env) &&
+        env.kind == FrameType::Offer) {
+      ZtOfferBody offer{};
+      CHECK(zt_offer_body_decode(ByteView{env.body.data(), env.body_size}, offer));
+      CHECK((offer.flags & kZtOfferExpected) == 0);
+      offer.flags |= kZtOfferExpected | kZtOfferAuthorityReachable;
+      ByteBuffer<kZtOfferBodySize> body{};
+      CHECK(zt_offer_body_encode(offer, body));
+      const auto& proxy = env.claimed_node == a.proxies[0].node ? a.proxies[0] : b.proxies[0];
+      CHECK(net.inject_down_raw(proxy, Bytes(body.bytes.begin(), body.bytes.begin() + body.size),
+                                FrameType::Offer, nullptr, &env.transaction_nonce));
+      return true;
+    }
     if (direction == RadioDir::Up && autonomy::rld1_decode(view(frame), env) &&
         env.kind == FrameType::Discover && smart) {
       CHECK(env.claimed_node != kDeviceNode);
@@ -144,7 +157,8 @@ Measurement selection(bool smart, bool expected, bool expired, bool denied) {
     CHECK(snap.counters.m1_sent == (denied ? 1U : 0U));
     CHECK(net.now() <= 60005);
   }
-  if (smart) CHECK(net.site(0).authority_.m1_seen == 0);
+  if (smart && !forged) CHECK(net.site(0).authority_.m1_seen == 0);
+  if (forged) CHECK(snap.counters.attempts == 1);
   return {snap.counters.m1_sent, bytes};
 }
 
@@ -202,6 +216,37 @@ void finite_and_api_only() {
   CHECK(net.device().joiner.snapshot().state == JoinState::Stopped);
   CHECK(net.device().radio.sends == 0);
 }
+
+void retry_after_inflight_deadline() {
+  auto config = device_config();
+  config.smart_join = true;
+  config.listen_ms = 0;
+  config.search_ms = 10000;
+  JoinSimNetwork net(config, identity_record());
+  net.add_site(site_a_params());
+  ExpectedJoinList expected{};
+  expected.count = 1;
+  expected.ttl_s = 300;
+  CHECK(identity_join_mark(identity_record(), expected.marks[0]));
+  net.site(0).set_expected(expected, 300000);
+  net.faults().drop_if = [](RadioDir direction, const Bytes& frame) {
+    autonomy::Rld1Envelope env{};
+    return direction == RadioDir::Down && autonomy::rld1_decode(view(frame), env) &&
+           (env.kind == FrameType::BootstrapAuth || env.kind == FrameType::BootstrapChunk);
+  };
+  CHECK(net.device().joiner.start(boot_input(), 0));
+  CHECK(net.pump_until([&] {
+    return net.device().joiner.snapshot().state == JoinState::WaitM2;
+  }, 9000));
+  net.skip_to(10000);
+  CHECK(net.device().joiner.snapshot().state == JoinState::Stopped);
+  net.faults().drop_if = {};
+  net.skip_to(30000); // let the failed relay and transient hold expire
+  CHECK(net.device().joiner.retry_now(net.now()));
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 10000));
+  CHECK(net.device().site_store.has_site());
+  CHECK(net.device().joiner.snapshot().counters.attempts == 2);
+}
 }
 
 int main() {
@@ -216,7 +261,9 @@ int main() {
   selection(true, false, false, false);
   selection(true, true, true, false);
   selection(true, true, false, true);
+  selection(true, false, false, true, true);
   retained_membership();
   finite_and_api_only();
+  retry_after_inflight_deadline();
   return failures == 0 ? 0 : 1;
 }

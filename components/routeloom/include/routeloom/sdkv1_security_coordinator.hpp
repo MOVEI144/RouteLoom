@@ -598,6 +598,9 @@ class SecurityCoordinator final : public BootstrapSink,
     if (mode_ != CoordinatorMode::ZeroTouch) return JoinSnapshot{};
     return joiner().snapshot();
   }
+  // Retained membership can resume after an exhausted search; the Device
+  // operation must report that result rather than a new successful join.
+  StatusCode join_search_result() const noexcept { return join_search_result_; }
   Status send_authority_typed(std::uint8_t type, ByteView body, MonotonicMs now) noexcept;
   // Adopted GK epochs for the 0x66 QueryLocal answer (0/0 pre-adoption;
   // false until the member config lands).
@@ -1017,6 +1020,7 @@ class SecurityCoordinator final : public BootstrapSink,
   CoordinatorMode mode_{CoordinatorMode::Fresh};
   SdkMembershipHooks hooks_;
   NullJoinObserver joiner_observer_{};
+  StatusCode join_search_result_{StatusCode::Ok};
   // The bank stays outside the union: the firmware binds the session
   // provider over it at construction, before any workspace exists. The
   // GK state, the group/pairwise mux, the scope views and the authority
