@@ -1,0 +1,37 @@
+[
+  {
+    "log": "regressions/migration-red.log",
+    "fix_commit": "8303ca4f",
+    "before_failure": "2 checks: cached newer commit stayed blocked by old refetch",
+    "sha256": "22df43b0d22254e795709c8b7d25641faa37cc36d95657a697a13e2b73f33d4a",
+    "after": "passed in final selfcheck / targeted test"
+  },
+  {
+    "log": "regressions/radio-red.log",
+    "fix_commit": "731ce6a1",
+    "before_failure": "RX counter advanced in callback before Owner poll",
+    "sha256": "6a57f6e92c1cc2a72f84877bb614da9cf9051fe0128452315a33c1f80f1eebec",
+    "after": "passed in final selfcheck / targeted test"
+  },
+  {
+    "log": "regressions/m06-red.log",
+    "fix_commit": "2abf2962",
+    "before_failure": "94/100 below the gateway reset threshold",
+    "sha256": "b46db64fb4eb45b886c66e56b7551767d2e562b720ae6b143cffe967bbaa3629",
+    "after": "passed in final selfcheck / targeted test"
+  },
+  {
+    "log": "regressions/m4-other-peer-red.log",
+    "fix_commit": "5fca34e2",
+    "before_failure": "8 checks: confirmed link blocked routed exchange from another peer",
+    "sha256": "05a92b7ed99bdd2d2e9d15f56414065d5a6e6c266f1ecde420a3582388d2e31a",
+    "after": "passed in final selfcheck / targeted test"
+  },
+  {
+    "log": "regressions/confirmed-rx-red.log",
+    "fix_commit": "6d3d2ffc",
+    "before_failure": "An admitted, lost m4 could not be retransmitted after a new m1 overwrote the large stash",
+    "sha256": "6f94b9dc833495173529dd82f3a29e0eda0f42479eb0d70dd48a2eca080b6c33",
+    "after": "passed in final selfcheck / targeted test"
+  }
+]

@@ -1,0 +1,18 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running unittests src/main.rs (host/target/debug/deps/routeloom_host-5af871a45d47017f)
+
+running 1 test
+
+thread 'site::owner_mesh::send::mesh_m06_gateway_reset_cycles_deliver' panicked at routeloom-host/src/site/owner_mesh/send.rs:248:5:
+delivered 94/100, (per cycle, first delivery ms): [(10, Some(3775)), (10, Some(3475)), (10, Some(3900)), (10, Some(4525)), (10, Some(3425)), (10, Some(2900)), (9, Some(5200)), (10, Some(4275)), (6, Some(13025)), (9, Some(5475))]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test site::owner_mesh::send::mesh_m06_gateway_reset_cycles_deliver ... FAILED
+
+failures:
+
+failures:
+    site::owner_mesh::send::mesh_m06_gateway_reset_cycles_deliver
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 743 filtered out; finished in 5.26s
+
+error: test failed, to rerun pass `-p routeloom-host --bin routeloom-host`

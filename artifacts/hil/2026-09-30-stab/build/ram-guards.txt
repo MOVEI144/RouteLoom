@@ -1,0 +1,15 @@
+sb-br-chain.log: Guard (DRAM, .bss 209256 B, .data 13196 B): free 49496 B vs floor 27648 B — **PASS**
+sb-br-n1.log: Guard (DRAM, .bss 205728 B, .data 13196 B): free 53024 B vs floor 27648 B — **PASS**
+sb-br-plan-pre.log: Guard (DRAM, .bss 224280 B, .data 13356 B): free 34312 B vs floor 27648 B — **PASS**
+sb-br-plan.log: Guard (DRAM, .bss 224280 B, .data 13356 B): free 34312 B vs floor 27648 B — **PASS**
+sb-ep-feat.log: Guard (DIRAM, .bss 221016 B, .data 18015 B): free 113953 B vs floor 8192 B — **PASS**
+sb-ep-m0-fullcal.log: 
+sb-ep-m0.log: Guard (DIRAM, .bss 160512 B, .data 15327 B): free 177205 B vs floor 8192 B — **PASS**
+sb-ep-os.log: Guard (DIRAM, .bss 160496 B, .data 15327 B): free 177221 B vs floor 8192 B — **PASS**
+sb-ep-plan.log: Guard (DIRAM, .bss 175536 B, .data 15487 B): free 162021 B vs floor 8192 B — **PASS**
+sb-rl-feat-pre.log: Guard (DIRAM, .bss 240856 B, .data 18015 B): free 94113 B vs floor 8192 B — **PASS**
+sb-rl-feat.log: Guard (DIRAM, .bss 240856 B, .data 18015 B): free 94113 B vs floor 8192 B — **PASS**
+sb-rl-os.log: Guard (DIRAM, .bss 180320 B, .data 15327 B): free 157397 B vs floor 8192 B — **PASS**
+sb-br-plan@a3692b8d: Guard (DRAM, .bss 224280 B, .data 13356 B): free 34312 B vs floor 27648 B — **PASS**
+sb-ep-plan@a3692b8d: Guard (DIRAM, .bss 175536 B, .data 15487 B): free 162021 B vs floor 8192 B — **PASS**
+sb-rl-feat@a3692b8d: Guard (DIRAM, .bss 240856 B, .data 18015 B): free 94113 B vs floor 8192 B — **PASS**

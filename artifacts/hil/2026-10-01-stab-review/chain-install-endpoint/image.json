@@ -1,0 +1,41 @@
+{
+  "write": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:47:54",
+      "log": "flash-endpoint-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "588b08fd2f7320f9ad836bc2ee4b4432048f358ad714a4944ab1a57cc062eab1",
+    "app_bytes": 1297728,
+    "bundle": "hil-review-chain-ep-reference_node-esp32c6"
+  },
+  "nvs_before": {
+    "rlcfg": {
+      "sha256": "fb7d9fd2333aa371f7f37bc20a41bdbb8241ee7803e896bb6b7f198dcd188484",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "dd765f74903a45c9527130f809a6920ab042e5dc4c6f9c65bfb81162c06eaa86",
+      "blank": false
+    }
+  },
+  "nvs_after": {
+    "rlcfg": {
+      "sha256": "fb7d9fd2333aa371f7f37bc20a41bdbb8241ee7803e896bb6b7f198dcd188484",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "dd765f74903a45c9527130f809a6920ab042e5dc4c6f9c65bfb81162c06eaa86",
+      "blank": false
+    }
+  }
+}

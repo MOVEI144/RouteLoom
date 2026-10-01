@@ -1,0 +1,11 @@
+[2026-09-30T16:39:06.430+00:00] !! opened
+[2026-09-30T16:39:16.443+00:00] I (878) RouteLoomRef: sdkv1 identity: node=2 kid=bf689dc8a44cb79I (12610) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-30T16:39:16.443+00:00] W (12610) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-30T16:39:16.443+00:00] I (12612) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T16:39:16.443+00:00] W (12617) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T16:39:21.048+00:00] W (17192) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T16:39:21.448+00:00] I (17502) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-30T16:39:21.448+00:00] W (17503) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-30T16:39:21.448+00:00] I (17533) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T16:39:21.448+00:00] W (17534) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T16:39:21.448+00:00] W (17553) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present

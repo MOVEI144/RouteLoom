@@ -1,0 +1,4 @@
+[2026-10-01T01:25:15.372+00:00] I (154) esp_image: segment 1: paddr=00065fd0 vaddr=40800000 sizeI (22275) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-10-01T01:25:15.373+00:00] W (22275) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-10-01T01:25:15.373+00:00] I (22277) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-10-01T01:25:15.373+00:00] W (22282) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none

@@ -1,0 +1,24 @@
+{
+  "requested": 20,
+  "host_accepted": 20,
+  "delivered": 20,
+  "stopped_reason": null,
+  "success_rate": 1.0,
+  "rate_limit_retries": 0,
+  "pace_s": 1.0,
+  "elapsed_s": 19.07,
+  "latency_ms_median": 63.56,
+  "latency_ms_p95": 121.26,
+  "latency_ms_max": 132.54,
+  "by_destination": {
+    "2": {
+      "accepted": 10,
+      "delivered": 10
+    },
+    "3": {
+      "accepted": 10,
+      "delivered": 10
+    }
+  },
+  "evidence": "artifacts/hil/2026-10-01-stab-review/restored-home/settled-traffic.jsonl"
+}

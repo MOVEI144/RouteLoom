@@ -219,6 +219,15 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::erase_site_trust() noexcept {
   }
   const Status policy = owner.stores_->proxy_policy().erase();
   if (!policy) return policy;
+  // The journaled removal (Holdoff, then the UnassignedReady watermark)
+  // is the one record of a removal. A recovery join that found the
+  // removal wrote RLV1 Blocked first so traffic stayed stopped until the
+  // journal held the intent; left standing it would refuse the readmit
+  // that the notice path allows after the same holdoff.
+  if (owner.stores_->local_revocation().has_record()) {
+    const Status cleared = owner.stores_->local_revocation().clear();
+    if (!cleared) return cleared;
+  }
   // RLS1 is erased by the lifecycle's Site step next, RLI1 stays
   // (device-level per 04 §6.4), and this step wipes the site-bound
   // intake policy and the RAM view (GK scope + discovery membership).

@@ -1,0 +1,11 @@
+{
+  "identity": {
+    "chip": "esp32c6",
+    "mac": "10:bd:a3:ff:fe:b1:47:54",
+    "log": "flash-endpoint-preflight.log",
+    "flash_bytes": 4194304
+  },
+  "app_sha256": "8bf04f55a72d41335a895d2816d7b7deb51ef5366ce47287963a623e3ffb7821",
+  "app_bytes": 1296976,
+  "bundle": "hil-stab-5f-endpoint-reference_node-esp32c6"
+}

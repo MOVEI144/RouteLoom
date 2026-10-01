@@ -203,3 +203,64 @@ fn mesh_send_inflight_replay_terminates_both_requests() {
     }
     assert_eq!(world.snaps[1].rx_count - rx, 1, "one logical delivery");
 }
+
+/// M06 (gateway, HIL shape): the gateway resets ten times while the host
+/// keeps its daemon; after each re-authentication ten sends 2 s apart go
+/// to A. Every send ends terminal, delivery resumes within 15 s (vt) of
+/// each reset and at least 95 of 100 are delivered.
+#[test]
+fn mesh_m06_gateway_reset_cycles_deliver() {
+    let Some(mut world) = sent_world("m06-gw-cycles") else {
+        return; // no C++ peers: skip (ignore-equivalent)
+    };
+    let mut key = 0x6600_u64;
+    let mut delivered = 0;
+    let mut per_cycle = Vec::new();
+    for _ in 0..10 {
+        let sessions = world.usb_auth_total();
+        world.peers[0].power_cut();
+        let reset_at = world.now;
+        reauth_within(&mut world, sessions, reset_at);
+        let mut sends = Vec::new();
+        for index in 0..10_u64 {
+            key += 1;
+            sends.push(legacy_send(&mut world, key, NODE_A, &index.to_be_bytes()));
+            world.pump_until(80, |_| false);
+        }
+        world.pump_until(((DEADLINE_MS + GRACE_MS) / 25) as u32, |_| false);
+        let mut got = 0;
+        let mut first = None;
+        for request in &sends {
+            let outcome = terminals(&world, *request);
+            assert!(!outcome.is_empty(), "send {request} ended terminal");
+            if outcome.iter().any(|(s, _)| *s == Some(DELIVERY_DELIVERED)) {
+                got += 1;
+                if first.is_none() {
+                    first = terminal_events(&world, *request)
+                        .next()
+                        .map(|(_, _, at)| at - reset_at);
+                }
+            }
+        }
+        per_cycle.push((got, first));
+        delivered += got;
+    }
+    eprintln!("M06: {delivered}/100, per cycle: {per_cycle:?}");
+    assert!(
+        delivered >= 95
+            && per_cycle
+                .iter()
+                .all(|(_, first)| first.is_some_and(|t| t <= 15_000)),
+        "delivered {delivered}/100, (per cycle, first delivery ms): {per_cycle:?}"
+    );
+}
+
+fn reauth_within(world: &mut MeshWorld, before: usize, since: u64) {
+    while world.usb_auth_total() <= before && world.now < since + 20_000 {
+        world.step(25);
+    }
+    assert!(
+        world.usb_auth_total() > before,
+        "re-authenticated after the reset"
+    );
+}

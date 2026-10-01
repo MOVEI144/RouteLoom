@@ -1,0 +1,9 @@
+[2026-09-30T20:57:36.849+00:00] !! opened
+[2026-09-30T20:58:32.718+00:00] I (880) RouteLoomRef: sdkv1 identity: node=3 kid=ea6e313d68314edI (60470) RouteLoom: stack hwm rl_owner 10152 B
+[2026-09-30T20:58:32.718+00:00] I (60471) RouteLoom: owner polls=14449 empty=14348 rxq_max=1 max_us rx=2807 bootstrap=13557 node=3332 security=689792
+[2026-09-30T20:58:32.718+00:00] I (60474) RouteLoom: owner expiry_slots=5200920 hop_accept_expired=0
+[2026-09-30T20:58:32.718+00:00] I (60480) RouteLoom: HIL HEAP free=139624 largest=122880 min=138704 B
+[2026-09-30T20:58:32.718+00:00] I (60486) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=0 busy=0 quarantined=0 fenced=0 tx_ok=39 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=97 rx_other_channel=0
+[2026-09-30T20:58:32.718+00:00] I (60502) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=4 send_failures=2 kind_rejects=0
+[2026-09-30T20:58:32.718+00:00] I (60513) RouteLoom: HIL ROUTE peer=1 phase=-1 via=2 metric=2 generation=17 seq=1
+[2026-09-30T20:58:32.718+00:00] I (60521) RouteLoom: HIL ROUTE peer=2 phase=5 via=2 metric=1 generation=17 seq=1

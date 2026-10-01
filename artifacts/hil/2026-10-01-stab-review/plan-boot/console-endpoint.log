@@ -1,0 +1,24 @@
+[2026-10-01T01:33:56.991+00:00] I (876) RouteLoomRef: sdkv1 identity: node=3 kid=249bc8aa4cc88e2I (5640) RouteLoomRef: discovery event=BOUND peer=2
+[2026-10-01T01:33:56.991+00:00] W (5640) RouteLoomRef: diagnostic reason=BOUND peer=2 message=none
+[2026-10-01T01:33:56.991+00:00] I (5679) RouteLoomRef: discovery event=REACHABLE peer=2
+[2026-10-01T01:33:56.991+00:00] W (5680) RouteLoomRef: diagnostic reason=REACHABLE peer=2 message=none
+[2026-10-01T01:34:51.802+00:00] I (60470) RouteLoom: stack hwm rl_owner 10136 B
+[2026-10-01T01:34:51.802+00:00] I (60470) RouteLoom: owner polls=14459 empty=14327 rxq_max=1 max_us rx=2728 bootstrap=15469 node=3398 security=689623
+[2026-10-01T01:34:51.802+00:00] I (60474) RouteLoom: owner expiry_slots=1966152 hop_accept_expired=1
+[2026-10-01T01:34:51.802+00:00] I (60480) RouteLoom: HIL HEAP free=159132 largest=143360 min=158268 B
+[2026-10-01T01:34:51.802+00:00] I (60486) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=0 busy=0 quarantined=0 fenced=0 tx_ok=57 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=115 rx_other_channel=0
+[2026-10-01T01:34:51.802+00:00] I (60502) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=0 probes=9 send_failures=6 kind_rejects=0
+[2026-10-01T01:34:51.903+00:00] I (60513) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=60 seq=1
+[2026-10-01T01:34:51.903+00:00] I (60520) RouteLoom: HIL ROUTE peer=2 phase=5 via=2 metric=1 generation=31 seq=1
+[2026-10-01T01:35:51.835+00:00] I (120473) RouteLoom: stack hwm rl_owner 10136 B
+[2026-10-01T01:35:51.835+00:00] I (120473) RouteLoom: owner polls=29418 empty=29220 rxq_max=1 max_us rx=2728 bootstrap=15469 node=3398 security=689623
+[2026-10-01T01:35:51.835+00:00] I (120477) RouteLoom: owner expiry_slots=4000576 hop_accept_expired=1
+[2026-10-01T01:35:51.835+00:00] I (120483) RouteLoom: HIL HEAP free=159132 largest=143360 min=158268 B
+[2026-10-01T01:35:51.835+00:00] I (120490) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=0 busy=0 quarantined=0 fenced=0 tx_ok=88 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=179 rx_other_channel=0
+[2026-10-01T01:35:51.835+00:00] I (120506) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=0 probes=18 send_failures=9 kind_rejects=0
+[2026-10-01T01:35:51.835+00:00] I (120517) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=60 seq=1
+[2026-10-01T01:35:51.835+00:00] I (120524) RouteLoom: HIL ROUTE peer=2 phase=5 via=2 metric=1 generation=31 seq=1
+[2026-10-01T01:35:57.644+00:00] W (126261) rl_migrate: migration event PHASE_PREPARING peer=0
+[2026-10-01T01:35:57.644+00:00] W (126262) RouteLoomRef: diagnostic reason=PHASE_PREPARING peer=0 message=none
+[2026-10-01T01:35:59.247+00:00] W (127877) RouteLoomRef: diagnostic reason=CHANNEL_NOTICE peer=1 message=none
+[2026-10-01T01:35:59.447+00:00] W (128094) RouteLoomRef: diagnostic reason=PHASE_COMMITTED peer=0 message=none

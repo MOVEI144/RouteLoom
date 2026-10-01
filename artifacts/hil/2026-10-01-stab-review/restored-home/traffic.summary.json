@@ -1,0 +1,24 @@
+{
+  "requested": 20,
+  "host_accepted": 20,
+  "delivered": 19,
+  "stopped_reason": null,
+  "success_rate": 0.95,
+  "rate_limit_retries": 0,
+  "pace_s": 1.0,
+  "elapsed_s": 19.14,
+  "latency_ms_median": 76.98,
+  "latency_ms_p95": 580.92,
+  "latency_ms_max": 4228.42,
+  "by_destination": {
+    "2": {
+      "accepted": 10,
+      "delivered": 10
+    },
+    "3": {
+      "accepted": 10,
+      "delivered": 9
+    }
+  },
+  "evidence": "/home/sahur/orca/workspaces/RouteLoom/v2-stab-b/artifacts/hil/2026-10-01-stab-review/restored-home/traffic.jsonl"
+}

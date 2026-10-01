@@ -1,0 +1,11 @@
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:824: pair.b->engine.take_result(m2c) (handshake no result)
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:825: m2c.event == HandshakeEvent::Send && m2c.step == 2
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:827: c.engine.take_result(out) (handshake no result)
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:829: pair.b->engine.take_result(out) (handshake no result)
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:830: out.step == 4
+STATUS failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:833: c.engine.take_result(out) (handshake no result)
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:834: out.event == HandshakeEvent::Established
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_sdkv1_handshake.cpp:835: pair.b->sink.installs == 2
+sdkv1 handshake: 8 failures
+edhoc sizes: m1=92 m2=376 m3=390 m4=53
+resume sizes: r1=60 r2=52 r3=16

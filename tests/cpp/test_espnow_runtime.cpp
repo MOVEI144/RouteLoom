@@ -24,6 +24,9 @@
 
 namespace routeloom::espnow {
 struct EspNowRuntimeTestAccess {
+  static std::uint32_t hil_rx_frames(const EspNowRuntime& runtime) noexcept {
+    return runtime.hil_rx_frames_;
+  }
   static const NodeConfig& wire_config(const EspNowRuntime& runtime) noexcept {
     return runtime.config_.node;
   }
@@ -1384,9 +1387,26 @@ void test_cutover_fence_recovers_when_driver_omits_completion() {
   runtime.stop();
 }
 
+void test_hil_rx_diagnostics_are_owner_serialized() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.start().ok());
+  CHECK(runtime.register_neighbor(kPeer, peer_mac(), 1).ok());
+  const std::uint8_t invalid_frame = 0;
+  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), &invalid_frame, 1));
+  CHECK(EspNowRuntimeTestAccess::hil_rx_frames(runtime) == 0);
+  runtime.poll_once();
+  CHECK(EspNowRuntimeTestAccess::hil_rx_frames(runtime) == 1);
+  runtime.stop();
+}
+
 }  // namespace
 
 int main() {
+  test_hil_rx_diagnostics_are_owner_serialized();
   test_completions_attribute_in_send_order_after_take_tx();
   test_cutover_fence_recovers_when_driver_omits_completion();
   test_boot_installs_lease_port();

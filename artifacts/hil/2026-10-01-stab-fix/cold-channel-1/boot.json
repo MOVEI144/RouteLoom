@@ -1,0 +1,12 @@
+{
+  "expected": [
+    "0000000000000002",
+    "0000000000000003"
+  ],
+  "authenticated_at_s": 0.0,
+  "routes_at_s": {},
+  "all_routes_at_s": null,
+  "elapsed_s": 120.175,
+  "source": "/home/sahur/orca/workspaces/RouteLoom/v2-stab-b/artifacts/hil/2026-10-01-stab-fix/cold-channel-1/routes.jsonl",
+  "offset_after_release_s": 4.079249858856201
+}

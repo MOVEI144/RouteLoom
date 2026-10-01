@@ -1,0 +1,77 @@
+[
+  {
+    "response": {
+      "accepted": true,
+      "request": 3
+    },
+    "delivery": {
+      "request": 3,
+      "destination": 2,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 1675297337,
+      "msg_seq": 15,
+      "updated_ms": 1790798000144
+    }
+  },
+  {
+    "response": {
+      "accepted": true,
+      "request": 4
+    },
+    "delivery": {
+      "request": 4,
+      "destination": 2,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 1675297337,
+      "msg_seq": 16,
+      "updated_ms": 1790798001150
+    }
+  },
+  {
+    "response": {
+      "accepted": true,
+      "request": 5
+    },
+    "delivery": {
+      "request": 5,
+      "destination": 2,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 1675297337,
+      "msg_seq": 17,
+      "updated_ms": 1790798002154
+    }
+  },
+  {
+    "response": {
+      "accepted": true,
+      "request": 6
+    },
+    "delivery": {
+      "request": 6,
+      "destination": 2,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 1675297337,
+      "msg_seq": 18,
+      "updated_ms": 1790798003155
+    }
+  },
+  {
+    "response": {
+      "accepted": true,
+      "request": 7
+    },
+    "delivery": {
+      "request": 7,
+      "destination": 2,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 1675297337,
+      "msg_seq": 19,
+      "updated_ms": 1790798004169
+    }
+  }
+]

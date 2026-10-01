@@ -1,0 +1,19 @@
+[2026-09-30T19:47:17.392+00:00] !! opened
+[2026-09-30T19:47:31.730+00:00] I (874) RouteLoomRef: sdkv1 identity: node=3 kid=72b2282f385b2d8W (17190) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T19:47:32.532+00:00] I (17870) RouteLoomRef: discovery event=BOUND peer=2
+[2026-09-30T19:47:32.532+00:00] W (17871) RouteLoomRef: diagnostic reason=BOUND peer=2 message=none
+[2026-09-30T19:47:33.152+00:00] I (18505) RouteLoomRef: discovery event=BOUND peer=1
+[2026-09-30T19:47:33.152+00:00] W (18506) RouteLoomRef: diagnostic reason=BOUND peer=1 message=none
+[2026-09-30T19:47:33.152+00:00] I (18595) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T19:47:33.152+00:00] W (18595) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T19:47:33.152+00:00] W (18603) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-30T19:47:34.562+00:00] I (19927) RouteLoomRef: discovery event=REACHABLE peer=2
+[2026-09-30T19:47:34.562+00:00] W (19927) RouteLoomRef: diagnostic reason=REACHABLE peer=2 message=none
+[2026-09-30T19:48:15.159+00:00] I (60469) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T19:48:15.159+00:00] I (60469) RouteLoom: owner polls=14381 empty=14196 rxq_max=5 max_us rx=134902 bootstrap=5177 node=3454 security=689865
+[2026-09-30T19:48:15.159+00:00] I (60473) RouteLoom: owner expiry_slots=5176080 hop_accept_expired=1
+[2026-09-30T19:48:15.159+00:00] I (60479) RouteLoom: HIL HEAP free=138568 largest=122880 min=137624 B
+[2026-09-30T19:48:15.159+00:00] I (60485) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=2 busy=0 quarantined=0 fenced=0 tx_ok=110 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=104 rx_other_channel=0
+[2026-09-30T19:48:15.159+00:00] I (60501) RouteLoom: HIL DISCOVERY candidates=0 neighbors=2 capacity=0 auth=2 stale=0 probes=8 send_failures=8 kind_rejects=0
+[2026-09-30T19:48:15.159+00:00] I (60513) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=299 seq=1
+[2026-09-30T19:48:15.159+00:00] I (60520) RouteLoom: HIL ROUTE peer=2 phase=5 via=2 metric=1 generation=0 seq=0

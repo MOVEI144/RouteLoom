@@ -1,0 +1,15 @@
+{
+  "expected": [
+    "0000000000000002",
+    "0000000000000003"
+  ],
+  "authenticated_at_s": 0.0,
+  "routes_at_s": {
+    "0000000000000003": 0.0,
+    "0000000000000002": 0.0
+  },
+  "all_routes_at_s": 0.0,
+  "elapsed_s": 0.009,
+  "source": "/home/sahur/orca/workspaces/RouteLoom/v2-stab-b/artifacts/hil/2026-10-01-stab-review/boot-4/routes.jsonl",
+  "offset_after_release_s": 4.092233657836914
+}

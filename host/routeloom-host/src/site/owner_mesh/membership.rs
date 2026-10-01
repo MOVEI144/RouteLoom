@@ -152,7 +152,21 @@ fn mesh_j06_closed_policy_stops_offers_until_reopened() {
 /// 20/20.
 #[test]
 fn mesh_j05_revoked_node_returns_with_the_same_node_id() {
-    let Some(mut world) = MeshWorld::start("j05", Switch::direct()) else {
+    j05_revoke_and_return("j05", false);
+}
+
+/// J05 (b), revoke-ordering variant: B is off the air for 8 s around the
+/// revoke, so G applies the RRS1 first and cancels B's RemovalNotice. B
+/// learns its removal from the recovery join instead; the removal it
+/// records is the same holdoff as the notice path, and B returns at
+/// generation 2 after it.
+#[test]
+fn mesh_j05_revoke_learned_by_recovery_join_returns() {
+    j05_revoke_and_return("j05-iso", true);
+}
+
+fn j05_revoke_and_return(tag: &str, isolate_b: bool) {
+    let Some(mut world) = MeshWorld::start(tag, Switch::direct()) else {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     world.provision.site.decider.pending_retry_s = 5;
@@ -177,6 +191,11 @@ fn mesh_j05_revoked_node_returns_with_the_same_node_id() {
         .link
         .revoke(NODE_B, 1, RemovalReason::Removed, "j05-revoke")
         .expect("revoke commits");
+    if isolate_b {
+        world.switch.isolate(2);
+        world.pump_until(320, |_| false); // 8 s
+        world.switch.heal(2);
+    }
     world.pump_until(24_000, |snaps| snaps[2].phase == PHASE_HOLDOFF);
     assert_eq!(
         world.snaps[2].phase, PHASE_HOLDOFF,
