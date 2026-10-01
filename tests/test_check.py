@@ -52,6 +52,15 @@ class CellList(unittest.TestCase):
         build = check.core()[1]
         self.assertLessEqual(int(build.argv[-1]), 8)
 
+    def test_c6_antenna_variants_cover_measured_image_size(self):
+        # Both antenna paths link the GPIO driver and must fit its measured footprint.
+        cells = {cell["id"]: cell for cell in check.load_cells()["cells"]}
+        for name in ("experimental-c6-reference_node-devram",
+                     "reference_node-esp32c6-normal-off-external_antenna"):
+            with self.subTest(cell=name):
+                self.assertGreaterEqual(cells[name]["budget"]["app_bin_max"]
+                                        + check.APP_BIN_DRIFT, 1246032)
+
     def test_cells_cover_every_app_and_target_with_a_budget(self):
         data = check.load_cells()
         cells = data["cells"]
