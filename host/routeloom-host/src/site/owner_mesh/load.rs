@@ -15,6 +15,7 @@ pub(super) fn repeated_bursts(delay_ms: u64) {
 #[test]
 #[ignore = "H7 seven-node qualification repro; per-sender 99% remains red"]
 fn mesh_h7_m08_seven_node_star() {
+    assert!(peers_present(), "H7 requires real Owner peers");
     burst_world(10, 7, true);
 }
 
