@@ -886,6 +886,9 @@ struct Setup {
   NodeId gw2{routeloom::kInvalidNodeId};
   bool flat{false};
   bool remote_config{false};
+  bool crypto_enabled{false};
+  bool crypto_sync{false};
+  MonotonicMs crypto_ms{0};
   bool c_app{false};
   bool standalone{false};
   std::uint8_t channel_plan{0};
@@ -907,7 +910,13 @@ Setup parse_argv(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     const char* arg = argv[i];
     const char* value = nullptr;
-    if (arg == std::string("--node") && take_arg(argc, argv, i, value)) {
+    if (arg == std::string("--crypto-ms") && take_arg(argc, argv, i, value)) {
+      setup.crypto_ms = std::strtoull(value, nullptr, 0);
+      if (setup.crypto_ms > 10000) fatal("crypto-ms bound");
+      setup.crypto_enabled = true;
+    } else if (arg == std::string("--crypto-sync")) {
+      setup.crypto_sync = true;
+    } else if (arg == std::string("--node") && take_arg(argc, argv, i, value)) {
       setup.node = parse_u64(value);
       have_node = true;
     } else if (arg == std::string("--mac") && take_arg(argc, argv, i, value)) {
@@ -1194,6 +1203,7 @@ struct DeferredApplied final : public routeloom::AppliedEndpointSink {
   struct Open {
     std::uint64_t ticket{0};
     MonotonicMs due{0};
+    MonotonicMs now{0};
   };
   MonotonicMs delay_ms{0};
   MonotonicMs now{0};
@@ -1226,6 +1236,32 @@ struct DeferredApplied final : public routeloom::AppliedEndpointSink {
     }
   }
 };
+
+struct CryptoModel {
+  routeloom::CryptoWorker worker;
+  MonotonicMs due{0};
+  MonotonicMs now{0};
+  MonotonicMs delay{0};
+  std::uint32_t submitted{0};
+  std::uint32_t completed{0};
+  bool queued{false};
+  bool owner_blocked{false};
+  static void wake(void* context) noexcept {
+    auto& model = *static_cast<CryptoModel*>(context);
+    model.due = model.now + model.delay;
+    model.queued = true;
+    ++model.submitted;
+  }
+  bool poll(MonotonicMs tick) noexcept {
+    now = tick;
+    if (queued && now >= due) {
+      queued = false;
+      if (worker.execute()) ++completed;
+    }
+    return !owner_blocked || !queued;
+  }
+};
+CryptoModel crypto_model;
 
 void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
                    routeloom::espnow::Sdkv1Stores& stores,
@@ -1435,6 +1471,10 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   put_u32(out, g_c_app != nullptr ? g_c_app->check_failures : 0);
   put_u32(out, g_c_app != nullptr ? g_c_app->posted_runs : 0);
   put_u32(out, g_c_app != nullptr ? g_c_app->messages : 0);
+  put_u32(out, crypto_model.submitted);
+  put_u32(out, crypto_model.completed);
+  put_u32(out, crypto_model.owner_blocked ? static_cast<std::uint32_t>(crypto_model.delay) : 0);
+  out.push_back(crypto_model.worker.idle() ? 0 : 1);
   write_frame(out);
 }
 
@@ -1525,6 +1565,13 @@ int main(int argc, char** argv) {
   config.requested_role = setup.role;
   config.flat_group_routing = setup.flat;
   config.remote_config = setup.remote_config;
+  if (setup.crypto_enabled) {
+    crypto_model.now = now;
+    crypto_model.delay = setup.crypto_ms;
+    crypto_model.owner_blocked = setup.crypto_sync;
+    crypto_model.worker.bind(&CryptoModel::wake, &crypto_model, nullptr, nullptr);
+    config.crypto_worker = &crypto_model.worker;
+  }
   config.channel_plan = setup.channel_plan;
   config.radio.node.network = setup.netlow;
   config.radio.node.node = setup.node;
@@ -1610,7 +1657,16 @@ int main(int argc, char** argv) {
   // adoption from the G snapshots.
   for (;;) {
     std::uint8_t head[2];
-    if (!read_exact(head, 2)) return 0;
+    if (!read_exact(head, 2)) {
+      (void)crypto_model.worker.execute();
+      sdkv1::CoordinatorEvent stop{};
+      stop.kind = sdkv1::CoordinatorEventKind::Stop;
+      stop.now = now;
+      (void)owner.coordinator().step(stop);
+      stop.kind = sdkv1::CoordinatorEventKind::Poll;
+      (void)owner.coordinator().step(stop);
+      return 0;
+    }
     const std::size_t length = static_cast<std::size_t>(head[0]) |
                                (static_cast<std::size_t>(head[1]) << 8);
     if (length == 0 || length > kRpcMax) fatal("rpc bound");
@@ -1627,7 +1683,7 @@ int main(int argc, char** argv) {
         now = next;
         idf_stub::set_now_us(static_cast<std::int64_t>(now) * 1000);
         applied.now = now;
-        device.step(now);
+        if (crypto_model.poll(now)) device.step(now);
         if (!applied.open.empty()) applied.poll(device, now);
         if (setup.c_app) {
           sync_c_app();
@@ -1899,8 +1955,8 @@ int main(int argc, char** argv) {
           MessageId id{};
           if (device.send(dst, ByteView{&byte, 1}, options, id)) ++accepted;
         }
-        write_frame(Bytes{'h', accepted, static_cast<std::uint8_t>(
-                                          runtime.node().congestion_stats().queued)});
+        write_frame(Bytes{'h', accepted,
+                          static_cast<std::uint8_t>(runtime.node().congestion_stats().queued)});
         break;
       }
       case 'I':
