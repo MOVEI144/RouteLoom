@@ -374,7 +374,7 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   static espnow::EspNowRuntime runtime(config.radio, provider, node_observer);
   status = runtime.initialize();
   if (!status) return status;
-  runtime_ = &runtime;
+  bind_runtime(runtime);
   runtime.bind_wake_task(xTaskGetCurrentTaskHandle());
 
   // Post-RF randomness first: boot() arms the cookie sealer from it.
@@ -562,6 +562,14 @@ MonotonicMs Device::next_deadline(const MonotonicMs now_ms) const noexcept {
   return due < now_ms ? now_ms : due;
 }
 
+void Device::bind_runtime(espnow::EspNowRuntime& runtime) noexcept {
+  // post() may run before Owner startup finishes. Publish the runtime
+  // under the same lock that protects the producer's notification target.
+  portENTER_CRITICAL(&posted_lock_);
+  runtime_ = &runtime;
+  portEXIT_CRITICAL(&posted_lock_);
+}
+
 Status Device::post(const Job job, void* ctx) noexcept {
   if (job == nullptr) return Status::error(StatusCode::InvalidArgument, "post job missing");
   portENTER_CRITICAL(&posted_lock_);
@@ -571,8 +579,9 @@ Status Device::post(const Job job, void* ctx) noexcept {
         Posted{job, ctx};
     ++posted_count_;
   }
+  espnow::EspNowRuntime* const target = runtime_;
   portEXIT_CRITICAL(&posted_lock_);
-  if (!full && runtime_ != nullptr) runtime_->notify_owner();
+  if (!full && target != nullptr) target->notify_owner();
   return full ? Status::error(StatusCode::Busy, "post queue full") : Status::success();
 }
 

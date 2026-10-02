@@ -362,6 +362,7 @@ class Device {
  private:
   friend struct ::rl_dev;
   friend struct DeviceTestAccess;
+  void bind_runtime(espnow::EspNowRuntime& runtime) noexcept;
 #if ROUTELOOM_DEVICE_SLEEP
   class Observer final : public NodeObserver, public PowerEvents {
 #else

@@ -1,9 +1,11 @@
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <thread>
 
 #include "routeloom/aead_gcm.hpp"
 #include "routeloom/espnow_power.hpp"
@@ -111,7 +113,7 @@ esp_err_t nvs_commit(nvs_handle_t) { return ESP_ERR_INVALID_STATE; }
 namespace routeloom {
 struct DeviceTestAccess {
   static void attach_runtime(Device& device, espnow::EspNowRuntime& runtime) noexcept {
-    device.runtime_ = &runtime;
+    device.bind_runtime(runtime);
   }
   static PowerEvents& sleep_events(Device& device) noexcept {
     device.observer().bind(device);
@@ -544,6 +546,31 @@ void test_device_post_bound() {
   runtime.stop();
 }
 
+void test_device_post_during_runtime_publication() {
+  idf_stub::reset();
+  routeloom_test::TestSecurity security;
+  routeloom_test::CapturingObserver observer;
+  EspNowRuntime runtime(radio_config(), security, observer);
+  CHECK(runtime.initialize());
+  Device device;
+  std::atomic<bool> go{false};
+  std::array<Status, Device::kPostCapacity> results{};
+  PostLog log{};
+  PostJob job{&log, 7, false};
+  std::thread producer([&] {
+    while (!go.load(std::memory_order_acquire)) {
+    }
+    for (auto& result : results) result = device.post(record_job, &job);
+  });
+  go.store(true, std::memory_order_release);
+  DeviceTestAccess::attach_runtime(device, runtime);
+  producer.join();
+  for (const auto& result : results) CHECK(result);
+  device.step(kStart);
+  CHECK(log.count == Device::kPostCapacity);
+  runtime.stop();
+}
+
 void test_device_begin_clears_key_on_failure() {
   Device device;
   DeviceConfig config{};
@@ -572,6 +599,7 @@ int main() {
   test_member_adoption_restores_group_capability();
   failures += run_device_sleep_scenarios();
   test_device_post_bound();
+  test_device_post_during_runtime_publication();
   test_device_begin_clears_key_on_failure();
   return failures == 0 ? 0 : 1;
 }
