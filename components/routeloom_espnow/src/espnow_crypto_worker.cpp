@@ -14,7 +14,7 @@
 namespace routeloom::espnow {
 namespace {
 
-constexpr std::size_t kStackBytes = 6144;
+constexpr std::size_t kStackBytes = 4096;
 CryptoWorker mailbox;
 StaticTask_t task_storage;
 std::array<StackType_t, kStackBytes / sizeof(StackType_t)> stack;
