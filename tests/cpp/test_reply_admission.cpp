@@ -327,6 +327,10 @@ class CountingServiceSink final : public GatewayServiceSink {
 class CountingPort final : public ReplyPeerPort {
  public:
   explicit CountingPort(SimReplyPort& inner) noexcept : inner_(inner) {}
+  Status probe_acquire(ReplyBinding captured, MonotonicMs deadline,
+                       MonotonicMs now) noexcept override {
+    return inner_.probe_acquire(captured, deadline, now);
+  }
   Status acquire(ReplyBinding captured, MonotonicMs deadline, MonotonicMs now,
                  ReplyLeaseToken& out) noexcept override {
     ++acquires;
@@ -360,6 +364,62 @@ class CountingPort final : public ReplyPeerPort {
  private:
   SimReplyPort& inner_;
 };
+
+// A link-authenticated bad End tag must not issue even a provisional use.
+void test_invalid_end_does_not_reserve_reply() {
+  Harness h;
+  h.add(1);
+  auto* terminal = h.add(2);
+  h.link(1, 2);
+  CountingPort port(*h.port(2));
+  CHECK(terminal->set_reply_peer_port(&port).ok());
+  const auto valid = craft_transit(h.cipher, 1, 2, 1, 2, 700);
+  wire::LinkOpenedFrame sealed{};
+  CHECK(wire::open_link(valid.view(), 2, h.cipher, sealed).ok());
+  sealed.protected_payload[sealed.protected_payload_size - 1] ^= 1;
+  wire::EncodedFrame invalid{};
+  CHECK(wire::retry_local(sealed, 2, 4999, h.cipher, invalid).ok());
+  inject_v2(h, 2, 1, invalid);
+  CHECK(h.sec.at(2)->end_opens() == 1);
+  CHECK(port.acquires == 0);
+  CHECK(port.releases == 0);
+  CHECK(terminal->dedup_resident() == 0);
+  CHECK(terminal->txn_in_flight() == 0);
+  CHECK(h.observer(2)->messages.empty());
+  // A fresh Link around the original End still admits and delivers once.
+  CHECK(wire::open_link(valid.view(), 2, h.cipher, sealed).ok());
+  wire::EncodedFrame retry{};
+  CHECK(wire::retry_local(sealed, 2, 4998, h.cipher, retry).ok());
+  inject_v2(h, 2, 1, retry);
+  CHECK(h.observer(2)->messages.size() == 1);
+  CHECK(port.acquires == 1);
+}
+
+void test_terminal_reply_pressure_preserves_end() {
+  Harness h;
+  auto* terminal = h.add(2);
+  std::array<ReplyLeaseToken, kExpectedReplyBindingsMax> held{};
+  for (std::size_t i = 0; i < held.size(); ++i) {
+    ReplyBinding binding{};
+    CHECK(h.port(2)->snapshot_binding(10 + i, binding).ok());
+    CHECK(h.port(2)->acquire(binding, 1000, 0, held[i]).ok());
+  }
+  const auto frame = craft_transit(h.cipher, 13, 2, 13, 2, 701);
+  inject_v2(h, 2, 13, frame);
+  CHECK(h.sec.at(2)->end_opens() == 0);
+  CHECK(terminal->dedup_resident() == 0);
+  CHECK(terminal->txn_in_flight() == 0);
+  CHECK(h.port(2)->leases().live_use_count() == held.size());
+  CHECK(h.port(2)->release(held[0]).ok());
+  wire::LinkOpenedFrame sealed{};
+  CHECK(wire::open_link(frame.view(), 2, h.cipher, sealed).ok());
+  wire::EncodedFrame retry{};
+  CHECK(wire::retry_local(sealed, 2, 4999, h.cipher, retry).ok());
+  inject_v2(h, 2, 13, retry);
+  CHECK(h.sec.at(2)->end_opens() == 1);
+  CHECK(h.observer(2)->messages.size() == 1);
+  CHECK(terminal->dedup_stats().admitted_terminal == 1);
+}
 
 // Q117-05: a held transit forward dies with its 1500 ms transaction even
 // though the frame budget (5000 ms) is unspent — and the lease is released.
@@ -864,6 +924,8 @@ void test_send_to_retired_peer_reports_failure() {
 }  // namespace
 
 int main() {
+  test_invalid_end_does_not_reserve_reply();
+  test_terminal_reply_pressure_preserves_end();
   test_terminal_pool_pressure_preserves_end();
   test_terminal_reserves_receipt_without_route();
   test_forward_bounded_by_transaction_lifetime();

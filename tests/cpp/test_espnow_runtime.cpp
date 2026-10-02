@@ -974,9 +974,13 @@ void test_stale_binding_keeps_reserved_reply_sendable() {
   auto& port = EspNowRuntimeTestAccess::reply(runtime);
   routeloom::ReplyBinding binding{};
   CHECK(port.snapshot_binding(kPeer, binding).ok());
+  CHECK(port.probe_acquire(binding, 1000, 0).ok());
+  CHECK(EspNowRuntimeTestAccess::live_uses(runtime) == 0);
   routeloom::ReplyLeaseToken use{};
   CHECK(port.acquire(binding, 1000, 0, use).ok());
   EspNowRuntimeTestAccess::set_release_pending(runtime, kPeer);
+  CHECK(port.probe_acquire(binding, 1000, 0).code == routeloom::StatusCode::Conflict);
+  CHECK(EspNowRuntimeTestAccess::live_uses(runtime) == 1);
   CHECK(port.observe_authenticated_rx(binding).ok());
   const std::uint8_t frame = 0x42;
   CHECK(port.send_reply(use, 1, ByteView{&frame, 1}, 0).ok());

@@ -255,6 +255,16 @@ class SimReplyPort final : public routeloom::ReplyPeerPort {
     }
   }
 
+  routeloom::Status probe_acquire(routeloom::ReplyBinding captured,
+                                 routeloom::MonotonicMs deadline,
+                                 routeloom::MonotonicMs now) noexcept override {
+    const auto it = directory_.find(captured.peer);
+    if (it == directory_.end() || it->second != captured) {
+      return routeloom::Status::error(routeloom::StatusCode::Conflict,
+                                      "sim mapping changed");
+    }
+    return leases_.probe_acquire(captured, deadline, now);
+  }
   routeloom::Status acquire(routeloom::ReplyBinding captured,
                             routeloom::MonotonicMs deadline,
                             routeloom::MonotonicMs now,

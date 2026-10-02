@@ -230,7 +230,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
   if (frame.header.destination == config_.node) {
     // Terminal admission probes (design-q116 §8.1): the ACK + receipt
     // slots, control lane, APPLIED result slot and transaction deadline.
-    // Reply resources are provisional until End authentication succeeds.
+    // All capacity checks are read-only; End verification precedes reservations.
     MonotonicMs txn_deadline = 0;
     AppliedRecord* applied = frame.header.delivery == DeliveryClass::Applied
                                  ? find_applied(key)
@@ -250,10 +250,6 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       refuse();
       observer_.on_diagnostic("APPLIED_NO_RESULT_SLOT", peer,
                               &frame.header.message);
-      return;
-    }
-    if (!rx.valid) {
-      refuse_without_binding(peer, frame.header, "ADMISSION_NO_BINDING", now_ms);
       return;
     }
     // Capacity probes must not consume End replay or reclaim an
@@ -287,18 +283,38 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       observer_.on_diagnostic("DEDUP_OVERFLOW", peer, &frame.header.message);
       return;
     }
-    // Reserve reply resources provisionally before consuming End replay.
-    // End failure rolls back the use; no reply, pin or application is published.
-    if (!reserve_rx_reply(rx, /*needs_control_slot=*/true, 2, now_ms, res,
-                          txn_deadline)) {
+    if (scheduler_.free_slots() < 2 || !scheduler_.control_slot_available() ||
+        !txn_slot_available()) {
       refuse();
       observer_.on_diagnostic("ADMISSION_NO_ACK_SLOT", peer, &frame.header.message);
       return;
+    }
+    // A capacity refusal must leave End replay usable for same-round retry.
+    // Mapping/context failures still open End to report a missing End session;
+    // they cannot acquire reply work even if that End verifies successfully.
+    if (rx.valid && reply_peer_port_ != nullptr) {
+      const auto probe = reply_peer_port_->probe_acquire(rx.binding, txn_deadline, now_ms);
+      if (probe.code == StatusCode::NoCapacity || probe.code == StatusCode::WouldBlock ||
+          probe.code == StatusCode::CounterExhausted) {
+        refuse();
+        observer_.on_diagnostic("ADMISSION_NO_ACK_SLOT", peer, &frame.header.message);
+        return;
+      }
     }
     wire::PlainFrame plain{};
     const auto status = wire::open_end(frame, config_.node, security_, plain);
     if (!status) {
       note_end_rx_refusal(status, frame, peer);
+      return;
+    }
+    if (!rx.valid) {
+      refuse_without_binding(peer, frame.header, "ADMISSION_NO_BINDING", now_ms);
+      return;
+    }
+    if (!reserve_rx_reply(rx, /*needs_control_slot=*/true, 2, now_ms, res,
+                          txn_deadline)) {
+      refuse();
+      observer_.on_diagnostic("ADMISSION_NO_ACK_SLOT", peer, &frame.header.message);
       return;
     }
     if ((frame.header.flags & wire::kFlagEndProtected) != 0) {

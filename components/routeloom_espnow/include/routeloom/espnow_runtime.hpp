@@ -505,6 +505,11 @@ class EspNowRuntime final : public RadioPort,
                    ReplyLeaseToken& out) noexcept override {
       return owner_.reply_acquire(captured, deadline, now, out);
     }
+    Status probe_acquire(ReplyBinding captured, MonotonicMs deadline,
+                         MonotonicMs now) noexcept override {
+      ReplyLeaseToken unused{kInvalidReplyLeaseToken};
+      return owner_.reply_acquire(captured, deadline, now, unused, true);
+    }
     Status release(ReplyLeaseToken token) noexcept override {
       return owner_.reply_release(token);
     }
@@ -536,7 +541,8 @@ class EspNowRuntime final : public RadioPort,
   Status reply_context_current(NodeId peer, std::uint32_t context) noexcept;
   Status reply_observe_authenticated_rx(ReplyBinding captured) noexcept;
   Status reply_acquire(ReplyBinding captured, MonotonicMs deadline,
-                       MonotonicMs now, ReplyLeaseToken& out) noexcept;
+                       MonotonicMs now, ReplyLeaseToken& out,
+                       bool probe = false) noexcept;
   Status reply_release(ReplyLeaseToken token) noexcept;
   Status reply_validate(ReplyLeaseToken token, MonotonicMs now) noexcept;
   Status reply_send_reply(ReplyLeaseToken token, std::uint64_t tx_token,
