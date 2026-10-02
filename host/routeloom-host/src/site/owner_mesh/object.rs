@@ -261,6 +261,7 @@ fn mesh_m10_host_usb_object_upload() {
 }
 
 #[test]
+#[ignore = "requires ROUTELOOM_APP_OBJECT_TRANSFER=ON mesh peer"]
 fn mesh_m10_three_hop_with_control() {
     let topology = switch::Topology::line(4);
     let mut world = MeshWorld::start_plan(
