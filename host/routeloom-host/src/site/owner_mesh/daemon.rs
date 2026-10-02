@@ -18,7 +18,7 @@ impl MeshDaemon {
         let state = State {
             acl,
             rate_limiter: Mutex::new(send_store::AdmissionLimiter::with_profile(
-                send_store::AdmissionProfile::BenchV1,
+                send_store::AdmissionProfile::Control,
                 now,
             )),
             ..State::default()

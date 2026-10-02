@@ -249,6 +249,23 @@ fn mesh_k03_simultaneous_latest_and_group() {
 
 #[test]
 fn mesh_g7_authenticated_receive_reaches_daemon_store() {
+    let fixture = daemon::MeshDaemon::new(0);
+    let mut limiter = fixture.state.rate_limiter.lock().unwrap();
+    let principal = routeloom_peercred::Principal::UnixUid(501);
+    let destination = Some((1, 0, NODE_A));
+    for _ in 0..4 {
+        assert!(limiter.admit_submit(&principal, destination, 0).is_ok());
+    }
+    assert_eq!(
+        limiter
+            .admit_submit(&principal, destination, 0)
+            .unwrap_err()
+            .scope,
+        "destination",
+        "latest-value burst is bounded per destination"
+    );
+    assert!(limiter.admit_submit(&principal, destination, 5_000).is_ok());
+    drop(limiter);
     let Some(mut world) = load_world("g7-receive", 3) else {
         return;
     };
