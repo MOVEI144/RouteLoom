@@ -246,6 +246,11 @@ def package_drift(root: Path, manifest: dict) -> list[str]:
     """Version strings that are not generated but must equal the manifest."""
     version = manifest["sdk_version"]
     problems: list[str] = []
+    layout_path = "components/routeloom_espnow/include/routeloom/espnow_flash_layout.hpp"
+    layout = re.search(r'kPartitionLayoutId\[\] = "([^"]+)"',
+                       (root / layout_path).read_text(encoding="utf-8"))
+    if not layout or layout.group(1) != manifest["partition_layout"]:
+        problems.append(f"{layout_path}: partition layout differs from the manifest")
     for name in IDF_COMPONENTS:
         path = f"components/{name}/idf_component.yml"
         text = (root / path).read_text(encoding="utf-8")

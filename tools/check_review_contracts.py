@@ -57,8 +57,9 @@ def acceptance_test_sources(root: Path):
         if path.is_file() and path.suffix in {".cpp", ".py"}:
             # Checker mutation tests mention IDs as decoys; they are not
             # evidence for the protocol acceptance cases themselves.
-            if path.suffix == ".py" and "from check_review_contracts import" in path.read_text(
-                encoding="utf-8"
+            if path.suffix == ".py" and re.search(
+                r"^(?:from|import) (?:check|check_review_contracts)\b",
+                path.read_text(encoding="utf-8"), re.M
             ):
                 continue
             yield path

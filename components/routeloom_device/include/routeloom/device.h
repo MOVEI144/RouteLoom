@@ -21,9 +21,13 @@ extern "C" {
    rl_dev_node_id (a read-only identity).
 
    Structs: every struct starts with {struct_size, version}. version must be
-   RL_DEV_API_VERSION and struct_size at least the size this header
-   declares, otherwise the call returns RL_STATUS_INVALID_ARGUMENT; a larger
-   struct_size is accepted and its tail ignored. 1.x grows by appending tail
+   RL_DEV_API_VERSION and struct_size at least the required prefix, otherwise
+   the call returns RL_STATUS_INVALID_ARGUMENT. The prefix is sizeof the
+   struct except for API 1's additive tails: capabilities before
+   object_transfer, observer before on_object, and join_policy before
+   smart_join (offsetof each field). Only supplied tail fields are read or
+   written; a larger struct_size is accepted and its excess tail ignored.
+   1.x grows by appending tail
    fields and functions only; layouts are pinned by
    protocol/abi-golden/device-api1.json (ILP32 and LP64).
    rl_dev_struct_init() zeroes a struct and fills its header. Shared value

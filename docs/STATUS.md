@@ -4,15 +4,15 @@
 
 ## 現在の利用者向け状況（2026-10-02）
 
-基点 `origin/main`：`4a931258`（V2-STAB-B／#229 まで）。SDK は **2.0.0-dev**。C ABI 3、Device C API 1、wire major 2、HostLink 2、API1 envelope 1／caps_version 2。番号の正本は [manifest](../protocol/manifest.json)。
+確認基点：`0b5c71c8`（V2-STAB-D／#240 まで）。SDK は **2.0.0-dev**。C ABI 3、Device C API 1、wire major 2、HostLink 2、API1 envelope 1／caps_version 2。番号の正本は [manifest](../protocol/manifest.json)。
 
-C3/S3/C5/C6 の build cell は [CI 一覧](../tools/ci/cells.json)が正本。Device の起動、所属・接続・leave、Device C API と外部 consumer は merged。reference／bridge／examples と component の既定は DevRam（Development）、bench は MemberEdhoc（Candidate）。製品既定の切替は V2-17b／H2 待ち。本番認定は未完了。
+C3/S3/C5/C6 の build cell は [CI 一覧](../tools/ci/cells.json)が正本。Device の起動、所属・接続・leave、Device C API と外部 consumer は merged。reference／bridge／bench の既定は MemberEdhoc（Candidate）。component と quick-start／examples は DevRam（Development）。V2-17b の既定切替は merged、本番認定と H2 は未完了。
 
-[利用者文書 index](README.md)から入門、移行、運用、API reference と API1 kit を読む。V2-15／V2-16／V2-18／V2-19 は pending（main を確認した時点）。release pipeline の最終受入は V2-22、配布物を使う P06 と K05 の実機手順は H4 に残る。Pages の有効化は利用者の repo 設定で行う。
+[利用者文書 index](README.md)から入門、移行、運用、API reference と API1 kit を読む。V2-18（賢い参加）／V2-19（AppObject、既定 OFF）／V2-21（文書）／V2-22（配布基盤）は merged。V2-15 は別レビュー中、V2-16 crypto worker は v2.1。IP gateway／UART coprocessor／メッシュ OTA も v2.1。配布物を使う P06 と K05 の実機手順は H4 に残る。Pages の有効化は利用者の repo 設定で行う。
 
-最新の [STAB-B follow-up](hil/2026-10-01-stab-fix.md)では強制 2-hop relay reset **61/100**、通常 image の同時起動 **4/5**、channel 6→1 後の配送は各 member **0/20**。いずれも未合格。host sim／firmware build／短い診断 run を実機認定へ置き換えない。C5 は実機確認待ち。
+[STAB-B follow-up](hil/2026-10-01-stab-fix.md)では強制 2-hop relay reset **61/100**、通常 image の同時起動 **4/5**、channel 6→1 後の配送は各 member **0/20**。いずれも未合格。HC6／STAB-D 修正後の実機再受入は未実施。host sim／firmware build／短い診断 run を実機認定へ置き換えない。C5 は実機確認待ち。
 
-Member の API1 payload read は full network 引数が拒否されるため **K05-M red**。DevRam consumer の host smoke と区別する。5 台／3-hop Member 構成の収束も文書 workload の試験で失敗し、既存 M01-T3 の red に関係する。production の修正はこの文書 PR に含めない。
+Member の full network を使う API1 payload read（K05-M）、3-hop Member（M01-T3）、5 台の周期負荷（K01）は [E2E 行列](../tests/e2e/scenarios.json)で live。実 Owner の host 回帰を実機合格へ読み替えない。未検証の受入 half は同じ行列の `acceptance_pending`、その他の未完了条件は各 pending 行に残る。
 
 ## 過去の基点記録
 
@@ -32,7 +32,7 @@ Member の API1 payload read は full network 引数が拒否されるため **K
 
 zcbor 0.8.1 の同梱ソースには、libedhoc が渡す長さ0の protected header で null ポインタを `memmove` に渡さないための1行修正がある。libedhocにも EDHOC m2／m3／m4 の末尾余剰バイトを拒否する修正がある。upstreamとの差分と固定 blob id は `components/routeloom/third_party/VENDORED.json` と `tests/test_vendored_sources.py` で検査する。以下の「upstreamのまま」という記録は、これらの修正を除く。
 
-## 現在の証拠
+## 基点 `77b57926` の証拠
 
 | 項目 | 状態 |
 |---|---|
@@ -107,6 +107,6 @@ PR #155／#156／#158の最終レビュー修正はmerge済み。失効判定の
 
 機能×board×profileごとに `documented / implemented / host-tested / build-tested / hardware-tested / qualified` を区別する。C3 build成功をC5のRF合格へ継承しない。`ESP_OK`やCI greenは空中のPHY実測ではない。
 
-2.0.0-devでも認証・暗号を暗黙に無効化しない。DevRamは公開既定、LegacyFixtureは明示選択のみ。Member EDHOCを含むSDK v1 Ownerも[08 §4](design/sdk-v1/08-implementation-plan.md)の条件を満たすまで`SecurityProfile::Development`／`EXPERIMENTAL`として表示し、`Production`とは表示しない。
+2.0.0-devでも認証・暗号を暗黙に無効化しない。LegacyFixture は撤去済み。DevRam は `Development`、MemberEdhoc は `Candidate` と表示し、認定が完了するまで `Production` とは表示しない。既定と未完了条件は冒頭の現状と E2E 行列を参照する。
 
 [実装案内](implementation/README.md)／[受入試験](spec/acceptance.md)／[実装プロファイル](spec/release-profiles.md)を参照。
