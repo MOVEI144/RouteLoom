@@ -198,3 +198,16 @@ fn mesh_k04_crypto_reset_resumes_view_and_status() {
     assert!(world.now - start < 10000, "new view and status <10s");
     balanced(&world);
 }
+
+#[test]
+fn mesh_crypto_cutover_replays_certificate_verification() {
+    let mut world = start("crypto-cutover", Switch::direct(), &[], false);
+    converge(&mut world);
+    let staged_at = world.now;
+    let operation = super::cutover::stage_cutover(&mut world, "crypto-cutover");
+    let (operation, next_gk, network, _, _) =
+        super::cutover::cutover_finish_prepare(&mut world, operation, staged_at);
+    super::cutover::cutover_converged(&mut world, &operation, network, next_gk, None);
+    super::mesh::deliver_each(&mut world, 1, 0, 1, b"crypto-cutover-new");
+    balanced(&world);
+}
