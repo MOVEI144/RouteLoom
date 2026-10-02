@@ -32,6 +32,22 @@ class ReleaseFirmwareTest(unittest.TestCase):
             for filename in args["flash_files"].values():
                 self.assertEqual((stage / filename).read_bytes(),
                                  (build / filename).read_bytes())
+            with self.assertRaises(FileExistsError):
+                package_firmware(build, root / "sdkconfig", stage)
+
+    def test_rejects_absolute_flash_file_even_inside_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            build = root / "build"
+            build.mkdir()
+            source = build / "image.bin"
+            source.write_bytes(b"image")
+            (build / "flasher_args.json").write_text(json.dumps({"flash_files": {
+                "0x0": str(source), "0x8000": "partition.bin",
+                "0x10000": "ota.bin", "0x40000": "app.bin"}}))
+            with self.assertRaisesRegex(ValueError, "invalid flash image path"):
+                package_firmware(build, root / "sdkconfig", root / "stage")
+            self.assertEqual(source.read_bytes(), b"image")
 
 
 if __name__ == "__main__":

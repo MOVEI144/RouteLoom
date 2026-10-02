@@ -85,6 +85,11 @@ Vendored in this repository
              only; the ESP-IDF component does not compile it (firmware uses
              ESP-IDF's own Mbed TLS through PSA). Unmodified.
 
+Reviewed vendor inventory (checked against VENDORED.json):
+Vendor: libedhoc v2.3.2 | MIT | c8857b62d66be3664d1694bbe4eea37c56c05d9e
+Vendor: zcbor 0.8.1 | Apache-2.0 | d3093b5684f62268c7f27f8a5079f166772619de
+Vendor: TF-PSA-Crypto 1.1.0 | Apache-2.0 OR GPL-2.0-or-later | 29160dd877d29658279fd683b2ae57b320ddcf09
+
 Test data
 ---------
 
@@ -115,24 +120,97 @@ Build-time / linked dependencies (not vendored)
 Rust crates (host workspace; exact versions pinned in host/Cargo.lock)
 ---------------------------------------------------------------------
 
-Direct dependencies:
+The bundled SQLite amalgamation (public domain, https://sqlite.org) is
+compiled by libsqlite3-sys. No system SQLite is required. The following
+reviewed inventory includes target-specific dependencies. Release checks
+require an exact match with Cargo.lock and cargo metadata; update these
+credits when changing dependencies. License texts are distributed by the
+upstream crates under the listed SPDX expressions.
 
-* rusqlite — MIT (https://github.com/rusqlite/rusqlite)
-  Used with the "bundled" feature, which compiles the SQLite
-  amalgamation (public domain, https://sqlite.org) into the binary via
-  libsqlite3-sys (MIT). No system SQLite is required.
-* crossterm — MIT (https://github.com/crossterm-rs/crossterm)
-
-Transitive dependencies resolve to MIT, Apache-2.0, MIT OR Apache-2.0,
-Zlib, or "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT" licensed
-crates (e.g. bitflags, cc, cfg-if, errno, fallible-iterator,
-fallible-streaming-iterator, foldhash, hashbrown, hashlink, libc,
-libsqlite3-sys, linux-raw-sys, lock_api, log, mio, parking_lot,
-parking_lot_core, pkg-config, rustix, scopeguard, shlex, signal-hook,
-signal-hook-mio, signal-hook-registry, smallvec, plus Windows-only
-support crates). The authoritative list of resolved versions is
-host/Cargo.lock; each release also publishes a generated SBOM
-(CycloneDX JSON) enumerating every resolved crate and its license.
+Cargo: aead 0.5.2 | MIT OR Apache-2.0
+Cargo: aes 0.8.4 | MIT OR Apache-2.0
+Cargo: aes-gcm 0.10.3 | Apache-2.0 OR MIT
+Cargo: base16ct 0.2.0 | Apache-2.0 OR MIT
+Cargo: bitflags 2.13.2 | MIT OR Apache-2.0
+Cargo: block-buffer 0.10.4 | MIT OR Apache-2.0
+Cargo: cc 1.4.7 | MIT OR Apache-2.0
+Cargo: ccm 0.5.0 | Apache-2.0 OR MIT
+Cargo: cfg-if 1.0.5 | MIT OR Apache-2.0
+Cargo: cipher 0.4.4 | MIT OR Apache-2.0
+Cargo: const-oid 0.9.6 | Apache-2.0 OR MIT
+Cargo: cpufeatures 0.2.17 | MIT OR Apache-2.0
+Cargo: crossterm 0.28.1 | MIT
+Cargo: crossterm_winapi 0.9.1 | MIT
+Cargo: crypto-bigint 0.5.5 | Apache-2.0 OR MIT
+Cargo: crypto-common 0.1.6 | MIT OR Apache-2.0
+Cargo: ctr 0.9.2 | MIT OR Apache-2.0
+Cargo: der 0.7.10 | Apache-2.0 OR MIT
+Cargo: digest 0.10.7 | MIT OR Apache-2.0
+Cargo: ecdsa 0.16.9 | Apache-2.0 OR MIT
+Cargo: elliptic-curve 0.13.8 | Apache-2.0 OR MIT
+Cargo: errno 0.3.14 | MIT OR Apache-2.0
+Cargo: fallible-iterator 0.3.0 | MIT OR Apache-2.0
+Cargo: fallible-streaming-iterator 0.1.9 | MIT OR Apache-2.0
+Cargo: ff 0.13.1 | MIT OR Apache-2.0
+Cargo: find-msvc-tools 0.1.13 | MIT OR Apache-2.0
+Cargo: foldhash 0.1.5 | Zlib
+Cargo: generic-array 0.14.9 | MIT
+Cargo: ghash 0.5.1 | Apache-2.0 OR MIT
+Cargo: group 0.13.0 | MIT OR Apache-2.0
+Cargo: hashbrown 0.15.5 | MIT OR Apache-2.0
+Cargo: hashlink 0.10.0 | MIT OR Apache-2.0
+Cargo: hkdf 0.12.4 | MIT OR Apache-2.0
+Cargo: hmac 0.12.1 | MIT OR Apache-2.0
+Cargo: inout 0.1.4 | MIT OR Apache-2.0
+Cargo: libc 0.2.189 | MIT OR Apache-2.0
+Cargo: libsqlite3-sys 0.35.0 | MIT
+Cargo: linux-raw-sys 0.4.15 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+Cargo: lock_api 0.4.14 | MIT OR Apache-2.0
+Cargo: log 0.4.34 | MIT OR Apache-2.0
+Cargo: mio 1.2.3 | MIT
+Cargo: opaque-debug 0.3.1 | MIT OR Apache-2.0
+Cargo: p256 0.13.2 | Apache-2.0 OR MIT
+Cargo: parking_lot 0.12.5 | MIT OR Apache-2.0
+Cargo: parking_lot_core 0.9.12 | MIT OR Apache-2.0
+Cargo: pkg-config 0.3.34 | MIT OR Apache-2.0
+Cargo: polyval 0.6.2 | Apache-2.0 OR MIT
+Cargo: primeorder 0.13.6 | Apache-2.0 OR MIT
+Cargo: rand_core 0.6.4 | MIT OR Apache-2.0
+Cargo: redox_syscall 0.5.18 | MIT
+Cargo: rfc6979 0.4.0 | Apache-2.0 OR MIT
+Cargo: rusqlite 0.37.0 | MIT
+Cargo: rustix 0.38.44 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+Cargo: scopeguard 1.2.0 | MIT OR Apache-2.0
+Cargo: sec1 0.7.3 | Apache-2.0 OR MIT
+Cargo: sha2 0.10.9 | MIT OR Apache-2.0
+Cargo: shlex 2.0.1 | MIT OR Apache-2.0
+Cargo: signal-hook 0.3.18 | Apache-2.0 OR MIT
+Cargo: signal-hook-mio 0.2.5 | MIT OR Apache-2.0
+Cargo: signal-hook-registry 1.4.8 | MIT OR Apache-2.0
+Cargo: signature 2.2.0 | Apache-2.0 OR MIT
+Cargo: smallvec 1.16.1 | MIT OR Apache-2.0
+Cargo: subtle 2.6.1 | BSD-3-Clause
+Cargo: typenum 1.20.1 | MIT OR Apache-2.0
+Cargo: universal-hash 0.5.1 | MIT OR Apache-2.0
+Cargo: vcpkg 0.2.15 | MIT OR Apache-2.0
+Cargo: version_check 0.9.5 | MIT OR Apache-2.0
+Cargo: wasi 0.11.1+wasi-snapshot-preview1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+Cargo: winapi 0.3.9 | MIT OR Apache-2.0
+Cargo: winapi-i686-pc-windows-gnu 0.4.0 | MIT OR Apache-2.0
+Cargo: winapi-x86_64-pc-windows-gnu 0.4.0 | MIT OR Apache-2.0
+Cargo: windows-link 0.2.1 | MIT OR Apache-2.0
+Cargo: windows-sys 0.59.0 | MIT OR Apache-2.0
+Cargo: windows-sys 0.61.2 | MIT OR Apache-2.0
+Cargo: windows-targets 0.52.6 | MIT OR Apache-2.0
+Cargo: windows_aarch64_gnullvm 0.52.6 | MIT OR Apache-2.0
+Cargo: windows_aarch64_msvc 0.52.6 | MIT OR Apache-2.0
+Cargo: windows_i686_gnu 0.52.6 | MIT OR Apache-2.0
+Cargo: windows_i686_gnullvm 0.52.6 | MIT OR Apache-2.0
+Cargo: windows_i686_msvc 0.52.6 | MIT OR Apache-2.0
+Cargo: windows_x86_64_gnu 0.52.6 | MIT OR Apache-2.0
+Cargo: windows_x86_64_gnullvm 0.52.6 | MIT OR Apache-2.0
+Cargo: windows_x86_64_msvc 0.52.6 | MIT OR Apache-2.0
+Cargo: zeroize 1.9.0 | Apache-2.0 OR MIT
 
 ========================================================================
 The Apache-2.0 license grants no trademark rights (Section 6). RouteLoom
