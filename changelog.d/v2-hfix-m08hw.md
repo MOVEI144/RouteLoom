@@ -1,0 +1,1 @@
+- Mix node identity and the existing retry counter before selecting link retry jitter slots, so synchronized MAC failures do not keep nodes 21 apart colliding. Add real-Owner contention coverage with delayed callbacks and a continuous 25 ms gateway pump cadence. The unchanged C3 terminal quota still fails the 40-admitted-message overload.

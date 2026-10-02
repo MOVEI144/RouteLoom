@@ -3,9 +3,13 @@
 use super::recovery::{all_ready, run_for};
 use super::*;
 
-fn star_burst(count: u8, small: bool) {
+pub(super) fn star_burst(count: u8, small: bool, contention: bool) {
     let mut world = MeshWorld::start_with_args(
-        "uplink-star",
+        if contention {
+            "m08hw-star"
+        } else {
+            "uplink-star"
+        },
         Switch::new(&Topology::full(6)),
         &["--crypto-ms", "154"],
         &["--crypto-ms", "154"],
@@ -29,12 +33,19 @@ fn star_burst(count: u8, small: bool) {
                 && world.peers[peer].next_hop(testkit::GATEWAY) == testkit::GATEWAY
         })
         .expect("a bidirectional gateway tree link");
-    world
-        .switch
-        .drop_wire_kind(0, lost_peer, WIRE_HOP_ACCEPT, 1);
-    world
-        .switch
-        .drop_wire_kind(0, lost_peer, WIRE_END_RECEIPT, 1);
+    if !contention {
+        world
+            .switch
+            .drop_wire_kind(0, lost_peer, WIRE_HOP_ACCEPT, 1);
+        world
+            .switch
+            .drop_wire_kind(0, lost_peer, WIRE_END_RECEIPT, 1);
+    }
+    world.switch.collide_simultaneous = contention;
+    if contention {
+        // Callbacks retain RX while the gateway Owner is occupied.
+        world.owner_blocked_until[0] = world.now + 25;
+    }
     let results: Vec<_> = world
         .peers
         .iter_mut()
@@ -43,6 +54,11 @@ fn star_burst(count: u8, small: bool) {
         .collect();
     for _ in 0..30_000 {
         world.step(1);
+        if contention && world.now >= world.owner_blocked_until[0] {
+            // Model a 25 ms gateway pump cadence throughout the burst, while
+            // driver callbacks continue to enqueue between Owner passes.
+            world.owner_blocked_until[0] = world.now + 25;
+        }
     }
     let received = world.peers[0].receipts();
     let keys: std::collections::BTreeSet<_> = received
@@ -50,7 +66,15 @@ fn star_burst(count: u8, small: bool) {
         .map(|&(source, session, seq, _)| (source, session, seq))
         .collect();
     assert_eq!(keys.len(), received.len(), "one receive per key");
-    assert_eq!(world.switch.wire_dropped, 2, "both ACK losses fired");
+    if contention {
+        assert!(world.switch.collision_dropped > 0, "contention fault fired");
+        eprintln!(
+            "M08 contention: collision_dropped={} callback_delay=10ms owner_period=25ms",
+            world.switch.collision_dropped
+        );
+    } else {
+        assert_eq!(world.switch.wire_dropped, 2, "both ACK losses fired");
+    }
     let mut passed = true;
     let mut total_delivered = 0;
     for (index, results) in results.iter().enumerate() {
@@ -89,7 +113,7 @@ fn star_burst(count: u8, small: bool) {
         "uplink star: capacity={capacity} pins={pins} received={} terminal_refusals={refused}",
         received.len()
     );
-    if small {
+    if small && usize::from(count.min(8)) * 5 > pins as usize {
         assert!(refused > 0, "receiver quota caused the refusal");
         assert_eq!(received.len(), pins as usize);
     } else {
@@ -100,13 +124,13 @@ fn star_burst(count: u8, small: bool) {
 
 #[test]
 fn mesh_uplink_star_burst_delivers() {
-    star_burst(4, false);
+    star_burst(4, false, false);
 }
 
 #[test]
 #[ignore = "small32: 40 admitted sends exceed 28 terminal pins; 99% remains red"]
 fn mesh_uplink_star_overload_small32() {
-    star_burst(16, true);
+    star_burst(16, true, false);
 }
 
 #[test]

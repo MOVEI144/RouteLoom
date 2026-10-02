@@ -996,6 +996,23 @@ impl MeshWorld {
         // below — a reconnect never replays what a down leg dropped,
         // but a live delayed leg keeps what it held).
         let mut hold: Vec<(u64, SwitchDelivery)> = Vec::new();
+        let mut incoming = vec![0usize; nodes];
+        if self.switch.collide_simultaneous {
+            for (from, tick) in ticks.iter().enumerate() {
+                let Some(tick) = tick else { continue };
+                for tx in &tick.tx {
+                    if let Some(to) = self.macs.iter().position(|mac| *mac == tx.dst_mac) {
+                        if to != from
+                            && booted[to]
+                            && self.switch.audible[from][to]
+                            && channels[to] == channels[from]
+                        {
+                            incoming[to] += 1;
+                        }
+                    }
+                }
+            }
+        }
         // A directed leg eats one frame: drop budgets hit before the
         // audibility check (an armed loss fires even on a live leg;
         // the counters prove which rule ate what).
@@ -1100,6 +1117,11 @@ impl MeshWorld {
                     self.switch.leg_dropped[from][to] += 1;
                 } else if self.switch.drop_next[from][to] > 0 {
                     self.switch.drop_next[from][to] -= 1;
+                    self.callbacks[from].push((callback_at, 0));
+                    self.switch.dropped += 1;
+                    self.switch.leg_dropped[from][to] += 1;
+                } else if leg_up && incoming[to] > 1 {
+                    self.switch.collision_dropped += 1;
                     self.callbacks[from].push((callback_at, 0));
                     self.switch.dropped += 1;
                     self.switch.leg_dropped[from][to] += 1;

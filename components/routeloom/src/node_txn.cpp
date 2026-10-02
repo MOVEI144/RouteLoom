@@ -573,11 +573,14 @@ MonotonicMs MeshNode::link_retry_not_before_ms(
       congested
           ? kLinkRetryJitterCongestedMaxMs - kLinkRetryJitterCongestedMinMs + 1
           : kLinkRetryJitterNormalMaxMs + 1;
-  // Deterministic spread, same convention as the route-advertisement jitter
-  // (~node.cpp:3834): node id decorrelates peers, the counter decorrelates
-  // successive retries — no RNG needed.
-  const std::uint32_t offset = static_cast<std::uint32_t>(
-      (config_.node * 31ULL + ++retry_jitter_counter_ * 7ULL) % bound);
+  // Mix identity and attempt before reducing to the slot range. Linear
+  // modulo-21 jitter locks nodes 21 apart into identical retry schedules;
+  // its counter step of seven also visits only three normal slots.
+  std::uint32_t spread = static_cast<std::uint32_t>(config_.node) ^
+                         static_cast<std::uint32_t>(config_.node >> 32U) ^
+                         (++retry_jitter_counter_ * 0x9E3779B9U);
+  spread ^= spread >> 16U;
+  const std::uint32_t offset = static_cast<std::uint32_t>(spread % bound);
   const std::uint32_t jitter =
       congested ? kLinkRetryJitterCongestedMinMs + offset : offset;
   // A retry delayed past its own deadline never gets its last attempt.
