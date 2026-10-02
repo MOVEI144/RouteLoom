@@ -302,6 +302,7 @@ impl UsbHost {
                 info.boot = self.hello_boot;
                 info.network = self.hello_network;
                 info.capability = self.hello_capability;
+                info.version = Some(2);
             }
             let Some(inner) = inbound.inner else { continue };
             if let Some(daemon) = &self.daemon {

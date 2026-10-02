@@ -5,7 +5,7 @@ use crate::send_store::OperationStore;
 use crate::{api1, dispatch, send_store};
 
 pub(super) struct MeshDaemon {
-    pub(super) state: State,
+    pub(super) state: Arc<State>,
     dispatcher: dispatch::Dispatcher,
 }
 
@@ -17,12 +17,17 @@ impl MeshDaemon {
         .unwrap();
         let state = State {
             acl,
+            receive_log: Mutex::new(crate::receive_log::ReceiveLog::new(crate::mint_id128())),
             rate_limiter: Mutex::new(send_store::AdmissionLimiter::with_profile(
                 send_store::AdmissionProfile::Control,
                 now,
             )),
             ..State::default()
         };
+        Self::with_state(Arc::new(state))
+    }
+
+    pub(super) fn with_state(state: Arc<State>) -> Self {
         let lineage = state.operation_store.lock().unwrap().lineage();
         Self {
             state,
