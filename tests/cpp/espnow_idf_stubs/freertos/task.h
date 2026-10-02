@@ -10,6 +10,11 @@ typedef void (*TaskFunction_t)(void *);
 #define tskIDLE_PRIORITY 0
 #define portMAX_DELAY ((TickType_t)0xFFFFFFFFu)
 
+TaskHandle_t xTaskCreateStatic(TaskFunction_t fn, const char* name,
+                             uint32_t stack_depth, void* param,
+                             UBaseType_t prio, StackType_t* stack,
+                             StaticTask_t* storage);
+
 BaseType_t xTaskCreate(TaskFunction_t fn, const char *name,
                        uint32_t stack_depth, void *param,
                        UBaseType_t prio, TaskHandle_t *handle);

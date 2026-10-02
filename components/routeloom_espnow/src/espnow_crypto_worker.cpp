@@ -39,8 +39,11 @@ CryptoWorker* start_crypto_worker(CryptoWorker::Wake completion,
                                   void* completion_context) noexcept {
   if (task != nullptr) return &mailbox;
   mailbox.bind(&wake_worker, nullptr, completion, completion_context);
-  task = xTaskCreateStatic(&run, "rl_crypto", kStackBytes, nullptr, tskIDLE_PRIORITY, stack.data(),
-                           &task_storage);
+  // IDF's idle hook waits for an interrupt without yielding to ready
+  // priority-0 tasks. Keep crypto above idle so protocol deadlines do not
+  // include idle time slices; the Owner can still run at priority 1.
+  task = xTaskCreateStatic(&run, "rl_crypto", kStackBytes, nullptr, tskIDLE_PRIORITY + 1,
+                           stack.data(), &task_storage);
   if (task == nullptr) return nullptr;
   return &mailbox;
 }

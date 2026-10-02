@@ -923,6 +923,18 @@ target_link_libraries(routeloom_crypto_worker_tests PRIVATE routeloom_core Threa
 target_compile_options(routeloom_crypto_worker_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_crypto_worker_tests COMMAND routeloom_crypto_worker_tests)
 
+add_executable(routeloom_espnow_crypto_worker_tests test_espnow_crypto_worker.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_crypto_worker.cpp)
+target_link_libraries(routeloom_espnow_crypto_worker_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_espnow_crypto_worker_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+target_compile_definitions(routeloom_espnow_crypto_worker_tests PRIVATE
+    CONFIG_FREERTOS_SUPPORT_STATIC_ALLOCATION=1)
+target_compile_options(routeloom_espnow_crypto_worker_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_espnow_crypto_worker_tests COMMAND routeloom_espnow_crypto_worker_tests)
+
 add_executable(routeloom_edhoc_tests test_edhoc.cpp edhoc_probe.c)
 target_link_libraries(routeloom_edhoc_tests PRIVATE routeloom_core routeloom_edhoc_headers
     Threads::Threads)
