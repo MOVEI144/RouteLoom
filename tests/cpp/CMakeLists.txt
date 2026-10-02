@@ -921,6 +921,7 @@ target_link_libraries(routeloom_periodic_load_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_periodic_load_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(routeloom_periodic_load_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_periodic_load_tests COMMAND routeloom_periodic_load_tests)
+set_tests_properties(routeloom_periodic_load_tests PROPERTIES SKIP_RETURN_CODE 77)
 set_tests_properties(routeloom_routing_scale_100_node_tests routeloom_group_100_node_tests
     routeloom_periodic_load_tests PROPERTIES LABELS long)
 add_executable(routeloom_deadline_tests test_deadlines.cpp)
