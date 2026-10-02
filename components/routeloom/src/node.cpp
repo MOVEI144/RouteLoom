@@ -396,28 +396,8 @@ MeshNode::DedupEntry* MeshNode::allocate_dedup(
     const std::uint32_t deadline_remaining_ms, const MonotonicMs now_ms) noexcept {
   if (auto* existing = find_dedup(key, type, round)) return existing;
 
-  // Class admission gates (02 §2.5) run before admitting work: terminal
-  // pins may never reach into the transit reserve, and one previous-hop peer
-  // may not monopolize retained non-terminal state.
-  //
-  // The reserve bounds the number of PINS (02 §2.10 "Terminal pins >= N"),
-  // not the pool size: a pool crowded with evictable Resolved/Evidence
-  // transit records must not refuse delivery to this node's own application
-  // while the sweep below could reclaim one of them (#39 collateral refusal).
-  if (phase == DedupPhase::Terminal && count_terminal_pins() >= kDedupTerminalPinMax) {
-    // RX admission can precede the periodic sweep after an occupied Owner.
-    // A pin whose full retention elapsed no longer consumes the quota.
-    auto* expired = dedup_.find([&](const DedupEntry& value) {
-      return value.phase == DedupPhase::Terminal && value.expires_at_ms <= now_ms;
-    });
-    if (expired == nullptr) {
-      saturating_inc(dedup_stats_.refused_terminal_reserve);
-      observer_.on_diagnostic("DEDUP_TERMINAL_RESERVE", upstream, &key.id);
-      return nullptr;
-    }
-    dedup_.release(expired);
-    saturating_inc(dedup_stats_.expired);
-  }
+  // Per-upstream admission may recycle only its own evictable records.
+  // Terminal capacity is probed before End replay consumption in handle_data.
   if (phase != DedupPhase::Terminal &&
       count_transit_upstream(upstream) >= kDedupPerUpstreamMax &&
       !evict_dedup_for_upstream(upstream, now_ms)) {
@@ -427,21 +407,15 @@ MeshNode::DedupEntry* MeshNode::allocate_dedup(
   }
 
   auto* entry = dedup_.allocate();
-  if (entry == nullptr) {
-    if (!evict_dedup_for_admission(now_ms)) {
-      // True overflow: only Live/Terminal records remain. Refusal pressure
-      // becomes BUSY backpressure at the call site — never dedup weakening.
-      saturating_inc(dedup_stats_.refused_pool_full);
-      observer_.on_diagnostic("DEDUP_OVERFLOW", upstream, &key.id);
-      return nullptr;
-    }
+  if (entry == nullptr && evict_dedup_for_admission(now_ms)) {
     entry = dedup_.allocate();
-    if (entry == nullptr) {
-      // Unreachable: the sweep just freed a slot. Counted, never silent.
-      saturating_inc(dedup_stats_.refused_pool_full);
-      observer_.on_diagnostic("DEDUP_OVERFLOW", upstream, &key.id);
-      return nullptr;
-    }
+  }
+  if (entry == nullptr) {
+    // Live/Terminal records are never evicted. An unsuccessful allocation,
+    // including after the sweep, is counted and refused before acceptance.
+    saturating_inc(dedup_stats_.refused_pool_full);
+    observer_.on_diagnostic("DEDUP_OVERFLOW", upstream, &key.id);
+    return nullptr;
   }
   entry->key = key;
   entry->type = type;

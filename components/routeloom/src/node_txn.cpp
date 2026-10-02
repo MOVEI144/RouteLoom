@@ -405,6 +405,15 @@ Status MeshNode::reserve_rx_reply(const RxBinding& rx,
                                      const std::size_t pool_slots,
                                      const MonotonicMs now_ms,
                                      AdmissionReservation& out) noexcept {
+  return reserve_rx_reply(rx, needs_control_slot, pool_slots, now_ms, out, UINT64_MAX);
+}
+
+Status MeshNode::reserve_rx_reply(const RxBinding& rx,
+                                     const bool needs_control_slot,
+                                     const std::size_t pool_slots,
+                                     const MonotonicMs now_ms,
+                                     AdmissionReservation& out,
+                                     const MonotonicMs deadline_ms) noexcept {
   out.node = this;
   out.txn = kInvalidTxnHandle;
   out.use = kInvalidReplyLeaseToken;
@@ -430,13 +439,14 @@ Status MeshNode::reserve_rx_reply(const RxBinding& rx,
   if (now_ms > UINT64_MAX - kReplyLeaseTtlMs) {
     return Status::error(StatusCode::CounterExhausted, "ttl unrepresentable");
   }
+  const MonotonicMs deadline = std::min(now_ms + kReplyLeaseTtlMs, deadline_ms);
   ReplyLeaseToken use{kInvalidReplyLeaseToken};
   Status status = reply_peer_port_->acquire(rx.binding,
-                                            now_ms + kReplyLeaseTtlMs,
+                                            deadline,
                                             now_ms, use);
   if (!status) return status;
   out.use = use;
-  status = begin_txn(use, now_ms + kReplyLeaseTtlMs, out.txn);
+  status = begin_txn(use, deadline, out.txn);
   return status;
 }
 
@@ -563,11 +573,14 @@ MonotonicMs MeshNode::link_retry_not_before_ms(
       congested
           ? kLinkRetryJitterCongestedMaxMs - kLinkRetryJitterCongestedMinMs + 1
           : kLinkRetryJitterNormalMaxMs + 1;
-  // Deterministic spread, same convention as the route-advertisement jitter
-  // (~node.cpp:3834): node id decorrelates peers, the counter decorrelates
-  // successive retries — no RNG needed.
-  const std::uint32_t offset = static_cast<std::uint32_t>(
-      (config_.node * 31ULL + ++retry_jitter_counter_ * 7ULL) % bound);
+  // Mix identity and attempt before reducing to the slot range. Linear
+  // modulo-21 jitter locks nodes 21 apart into identical retry schedules;
+  // its counter step of seven also visits only three normal slots.
+  std::uint32_t spread = static_cast<std::uint32_t>(config_.node) ^
+                         static_cast<std::uint32_t>(config_.node >> 32U) ^
+                         (++retry_jitter_counter_ * 0x9E3779B9U);
+  spread ^= spread >> 16U;
+  const std::uint32_t offset = static_cast<std::uint32_t>(spread % bound);
   const std::uint32_t jitter =
       congested ? kLinkRetryJitterCongestedMinMs + offset : offset;
   // A retry delayed past its own deadline never gets its last attempt.

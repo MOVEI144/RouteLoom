@@ -251,6 +251,9 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   class SecurityOwnerUsbSink {
    public:
     virtual ~SecurityOwnerUsbSink() = default;
+    // Delay AUTH_OK only for local boot work. Unassigned/recovery owners
+    // must allow a host session so USB can complete membership.
+    virtual bool host_session_ready() const noexcept { return true; }
     // One decoded H→G down: the relay object borrows the 0x61 inner
     // bytes (valid during the call); `raw_object` is the same bytes for
     // the gateway engine. Returns queue admission for the 0x63.

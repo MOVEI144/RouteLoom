@@ -42,8 +42,15 @@ pub(super) fn terminal_events(
         .map(|(_, state, reason, at)| (*state, *reason, *at))
 }
 
-fn sent_world(tag: &str) -> Option<MeshWorld> {
-    let mut world = MeshWorld::start_plan(tag, Switch::direct(), &staggered_boot(3), false)?;
+fn sent_world(tag: &str, gateway_args: &[&str]) -> Option<MeshWorld> {
+    let mut world = MeshWorld::start_booted(
+        tag,
+        Switch::direct(),
+        &staggered_boot(3),
+        false,
+        &[],
+        &[gateway_args, &[]],
+    )?;
     converge(&mut world, tag);
     // Settle the end-to-end session with one delivered send first, so the
     // bursts below measure the send path rather than session setup.
@@ -67,7 +74,7 @@ fn sent_world(tag: &str) -> Option<MeshWorld> {
 /// mesh TX queue cannot take are refused explicitly.
 #[test]
 fn mesh_send_burst_every_accepted_send_terminates() {
-    let Some(mut world) = sent_world("m11") else {
+    let Some(mut world) = sent_world("m11", &[]) else {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     let mut key = 0x5100_u64;
@@ -115,7 +122,7 @@ fn mesh_send_burst_every_accepted_send_terminates() {
 /// reclaimed; no key reaches a destination twice.
 #[test]
 fn mesh_send_thousand_per_boot_without_duplicates() {
-    let Some(mut world) = sent_world("m12") else {
+    let Some(mut world) = sent_world("m12", &[]) else {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     let reboots = world.peers[0].reboots;
@@ -189,7 +196,7 @@ fn mesh_send_thousand_per_boot_without_duplicates() {
 /// terminal notification. Both requests describe one mesh delivery.
 #[test]
 fn mesh_send_inflight_replay_terminates_both_requests() {
-    let Some(mut world) = sent_world("m11-replay") else {
+    let Some(mut world) = sent_world("m11-replay", &[]) else {
         return;
     };
     let rx = world.snaps[1].rx_count;
@@ -210,13 +217,27 @@ fn mesh_send_inflight_replay_terminates_both_requests() {
 /// each reset and at least 95 of 100 are delivered.
 #[test]
 fn mesh_m06_gateway_reset_cycles_deliver() {
-    let Some(mut world) = sent_world("m06-gw-cycles") else {
-        return; // no C++ peers: skip (ignore-equivalent)
+    gateway_reset_cycles(10);
+}
+
+#[test]
+fn mesh_m06_gateway_reauth_first_send_delivers() {
+    gateway_reset_cycles(1);
+}
+
+fn gateway_reset_cycles(cycles: u32) {
+    let tag = if cycles == 1 {
+        "m06-gw-startup"
+    } else {
+        "m06-gw-cycles"
     };
+    let mut world = sent_world(tag, &["--crypto-ms", "154"])
+        .expect("gateway reset acceptance requires live C++ peers");
     let mut key = 0x6600_u64;
     let mut delivered = 0;
     let mut per_cycle = Vec::new();
-    for _ in 0..10 {
+    let mut first_outcomes = Vec::new();
+    for _ in 0..cycles {
         let sessions = world.usb_auth_total();
         world.peers[0].power_cut();
         let reset_at = world.now;
@@ -228,6 +249,9 @@ fn mesh_m06_gateway_reset_cycles_deliver() {
             world.pump_until(80, |_| false);
         }
         world.pump_until(((DEADLINE_MS + GRACE_MS) / 25) as u32, |_| false);
+        let first_outcome = terminals(&world, sends[0]);
+        assert_eq!(first_outcome.len(), 1, "first send ends exactly once");
+        first_outcomes.push(first_outcome[0]);
         let mut got = 0;
         let mut first = None;
         for request in &sends {
@@ -245,18 +269,27 @@ fn mesh_m06_gateway_reset_cycles_deliver() {
         per_cycle.push((got, first));
         delivered += got;
     }
-    eprintln!("M06: {delivered}/100, per cycle: {per_cycle:?}");
+    let total = cycles * 10;
+    eprintln!(
+        "M06: {delivered}/{total}, per cycle: {per_cycle:?}, first sends: {first_outcomes:?}"
+    );
     assert!(
-        delivered >= 95
+        delivered * 100 >= total * 95
             && per_cycle
                 .iter()
                 .all(|(_, first)| first.is_some_and(|t| t <= 15_000)),
-        "delivered {delivered}/100, (per cycle, first delivery ms): {per_cycle:?}"
+        "delivered {delivered}/{total}, (per cycle, first delivery ms): {per_cycle:?}"
+    );
+    assert!(
+        first_outcomes
+            .iter()
+            .all(|(state, _)| *state == Some(DELIVERY_DELIVERED)),
+        "every first send immediately after reauth delivers: {first_outcomes:?}"
     );
 }
 
 fn reauth_within(world: &mut MeshWorld, before: usize, since: u64) {
-    while world.usb_auth_total() <= before && world.now < since + 20_000 {
+    while world.usb_auth_total() <= before && world.now < since + 5_000 {
         world.step(25);
     }
     assert!(

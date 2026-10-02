@@ -7,7 +7,8 @@
 //! The gateway verifies every plan with the adopted site's SAK and
 //! distributes it; releasing the commit is a separate, explicit request
 //! once the members answered READY. One request is in flight at a time;
-//! nothing here is persisted (the gateway's ledger is the durable state).
+//! The gateway's ledger is authoritative. Its matched active channel is
+//! persisted for signed join packages and restored after daemon restart.
 
 use routeloom_protocol::host_ops::{
     encode_channel_plan, ChannelPlanReport, ChannelPlanRequest, CAP_CHANNEL_PLAN_V1,
@@ -15,7 +16,7 @@ use routeloom_protocol::host_ops::{
 };
 use routeloom_provision::sdkv1::channel_plan::{ChannelPlan, SignedChannelPlan};
 
-use super::SiteAuthority;
+use super::{store::Batch, Identity, SiteAuthority};
 use crate::receive_log::hex_lower;
 
 /// A plan is built only from a report at most this old.
@@ -37,6 +38,33 @@ const VALIDITY_MS: u64 = 120_000;
 const MAX_OUTAGE_MS: u32 = 500;
 /// The device's kChannelMaskAll24 (channels 1..=13).
 const CAPABILITY_MASK: u32 = 0x3FFF;
+pub(super) const META_ACTIVE_CHANNEL: &str = "channel_plan_active";
+
+pub(super) fn encode_channel(network: u64, channel: u8, epoch: u32) -> Vec<u8> {
+    let mut bytes = network.to_be_bytes().to_vec();
+    bytes.push(channel);
+    bytes.extend_from_slice(&epoch.to_be_bytes());
+    bytes
+}
+
+pub(super) fn restore_channel(
+    id: &mut Identity,
+    snapshot: &super::store::Snapshot,
+) -> Result<(), String> {
+    let Some(bytes) = snapshot.meta.get(META_ACTIVE_CHANNEL) else {
+        return Ok(());
+    };
+    if bytes.len() != 13 || !(1..=13).contains(&bytes[8]) {
+        return Err("site store channel plan corrupt".into());
+    }
+    let network = u64::from_be_bytes(bytes[..8].try_into().map_err(|_| "channel network")?);
+    let epoch = u32::from_be_bytes(bytes[9..].try_into().map_err(|_| "channel epoch")?);
+    if network == id.network && epoch >= id.channel_epoch {
+        id.channel = bytes[8];
+        id.channel_epoch = epoch;
+    }
+    Ok(())
+}
 
 /// The 0x69 sub of an inner body, if any (the site lane's router test).
 pub fn channel_plan_sub(inner: &[u8]) -> Option<u8> {
@@ -137,6 +165,52 @@ impl ChannelPlanDesk {
 }
 
 impl SiteAuthority {
+    /// A matching authenticated gateway report publishes its durable active
+    /// channel to subsequent signed join packages, after host commit/readback.
+    pub fn channel_plan_report(
+        &mut self,
+        request: u64,
+        report: ChannelPlanReport,
+        now_mono: u64,
+    ) -> Result<bool, String> {
+        if self
+            .channel_plan
+            .in_flight
+            .is_none_or(|(id, _, _)| id != request)
+        {
+            return Ok(false);
+        }
+        if report.result == 0
+            && (1..=13).contains(&report.active_channel)
+            && report.active_epoch >= self.id.channel_epoch
+            && (report.active_channel, report.active_epoch)
+                != (self.id.channel, self.id.channel_epoch)
+        {
+            if report.active_epoch == self.id.channel_epoch {
+                let snapshot = self.store.load().map_err(|e| e.to_string())?;
+                if snapshot.meta.get(META_ACTIVE_CHANNEL).is_some_and(|bytes| {
+                    bytes.len() == 13 && bytes[..8] == self.id.network.to_be_bytes()
+                }) {
+                    return Err("channel plan conflicts with the committed epoch".into());
+                }
+            }
+            let bytes = encode_channel(self.id.network, report.active_channel, report.active_epoch);
+            self.store
+                .commit(&Batch {
+                    meta: vec![(META_ACTIVE_CHANNEL, bytes.clone())],
+                    ..Batch::default()
+                })
+                .map_err(|e| e.to_string())?;
+            let snapshot = self.store.load().map_err(|e| e.to_string())?;
+            if snapshot.meta.get(META_ACTIVE_CHANNEL) != Some(&bytes) {
+                return Err("channel plan commit readback mismatch".into());
+            }
+            self.id.channel = report.active_channel;
+            self.id.channel_epoch = report.active_epoch;
+        }
+        Ok(self.channel_plan.on_report(request, report, now_mono))
+    }
+
     /// Queues a status read of the gateway's plan authority.
     pub fn channel_plan_refresh(&mut self) -> Result<(), String> {
         self.channel_plan.queue(ChannelPlanRequest::Status)
@@ -331,6 +405,67 @@ impl SiteAuthority {
 mod tests {
     use super::*;
     use crate::site::{store::MemoryStore, testkit};
+
+    #[test]
+    fn active_channel_requires_matching_report_and_commit() {
+        let mut site = testkit::authority(Box::<MemoryStore>::default(), 100);
+        let before = (site.id.channel, site.id.channel_epoch);
+        let report = ChannelPlanReport {
+            active_channel: 11,
+            active_epoch: before.1 + 1,
+            ..ChannelPlanReport::default()
+        };
+        site.channel_plan.note_sent(7, "status", 100);
+        assert!(!site.channel_plan_report(8, report.clone(), 100).unwrap());
+        assert_eq!((site.id.channel, site.id.channel_epoch), before);
+        let mut failed = MemoryStore::default();
+        failed.fail_next = 1;
+        let original = std::mem::replace(&mut site.store, Box::new(failed));
+        assert!(site.channel_plan_report(7, report.clone(), 100).is_err());
+        assert!(site.channel_plan.busy());
+        assert_eq!((site.id.channel, site.id.channel_epoch), before);
+        site.store = original;
+        assert!(site.channel_plan_report(7, report.clone(), 100).unwrap());
+        assert_eq!(
+            (site.id.channel, site.id.channel_epoch),
+            (11, report.active_epoch)
+        );
+        for (channel, epoch, result) in [
+            (6, before.1, 0),
+            (6, report.active_epoch + 1, 1),
+            (14, report.active_epoch + 1, 0),
+        ] {
+            site.channel_plan.note_sent(9, "status", 100);
+            assert!(site
+                .channel_plan_report(
+                    9,
+                    ChannelPlanReport {
+                        active_channel: channel,
+                        active_epoch: epoch,
+                        result,
+                        ..report.clone()
+                    },
+                    100
+                )
+                .unwrap());
+            assert_eq!(
+                (site.id.channel, site.id.channel_epoch),
+                (11, report.active_epoch)
+            );
+        }
+        site.channel_plan.note_sent(10, "status", 100);
+        assert!(site
+            .channel_plan_report(
+                10,
+                ChannelPlanReport {
+                    active_channel: 6,
+                    ..report
+                },
+                100
+            )
+            .is_err());
+        assert_eq!(site.id.channel, 11);
+    }
 
     #[test]
     fn report_counter_overflow_refuses_an_offer() {

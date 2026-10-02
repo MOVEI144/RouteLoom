@@ -87,6 +87,10 @@ pub(super) struct Switch {
     /// MAC callbacks are separate from airtime and RX, as on the driver.
     pub(super) callback_delay_ms: Vec<Vec<u64>>,
     pub(super) callback_delay_kind: Option<u8>,
+    /// Lose simultaneous audible unicasts to the same receiver in one step.
+    /// This is a contention fault, not a calibrated RF propagation model.
+    pub(super) collide_simultaneous: bool,
+    pub(super) collision_dropped: u64,
     /// Bounded, directed loss of an authenticated Wire frame kind.
     pub(super) drop_wire: Vec<(usize, usize, u8, u32)>,
     pub(super) wire_dropped: u32,
@@ -142,6 +146,8 @@ impl Switch {
             ack_drop_next: vec![vec![0; n]; n],
             callback_delay_ms: vec![vec![0; n]; n],
             callback_delay_kind: None,
+            collide_simultaneous: false,
+            collision_dropped: 0,
             drop_wire: Vec::new(),
             wire_dropped: 0,
             drop_link_step: None,

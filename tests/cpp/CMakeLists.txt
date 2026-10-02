@@ -71,6 +71,11 @@ target_compile_definitions(routeloom_usb_tests PRIVATE
     ROUTELOOM_USB_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/usb-golden")
 add_test(NAME routeloom_usb_tests COMMAND routeloom_usb_tests)
 
+add_executable(routeloom_usb_boot_gate_tests test_usb_boot_gate.cpp)
+target_link_libraries(routeloom_usb_boot_gate_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_usb_boot_gate_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_usb_boot_gate_tests COMMAND routeloom_usb_boot_gate_tests)
+
 add_executable(routeloom_power_tests test_power.cpp)
 target_link_libraries(routeloom_power_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_power_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)

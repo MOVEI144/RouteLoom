@@ -286,7 +286,12 @@ bool "relay-c3 (96 records)"
 ### CONFIG_ROUTELOOM_DEDUP_PROFILE_GATEWAY
 
 ```text
-bool "gateway-s3 (256 records)"
+bool "gateway (256 records; build RAM guard required)"
+            help
+                This is a capacity override, not a qualified board profile.
+                The stock S3 bridge with this override failed the H7 RAM
+                guard. Select only a configuration that passes its guard;
+                the resource profile default remains unchanged.
 ```
 
 ### CONFIG_ROUTELOOM_DEDUP_CAPACITY

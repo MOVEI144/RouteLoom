@@ -1750,25 +1750,31 @@ Status SecurityCoordinator::emit_end_send(const HandshakeResult& result,
 Status SecurityCoordinator::pump_end_tx(const MonotonicMs now) noexcept {
   JoinObjectSlot& slot = member().end_tx;
   if (slot.mode() != JoinObjectSlot::Mode::Sending) return Status::success();
+  if (now - slot.started_ms() >= HandshakeEngine::kLinkTimeoutMs) {
+    slot.reset();
+    return Status::success();
+  }
   if (member().end_tx_last_attempt_ms != 0 &&
       now - member().end_tx_last_attempt_ms < 250) {
     return Status::success();
   }
   member().end_tx_last_attempt_ms = now;
   const std::uint16_t pending = slot.pending_mask();
-  for (std::size_t i = 0; i < slot.chunk_total(); ++i) {
+  // Rotate unconfirmed chunks while earlier replies are in flight,
+  // so a delayed prefix receipt cannot starve the tail.
+  const std::size_t total = slot.chunk_total();
+  std::size_t i = slot.sends() % total;
+  for (std::size_t offset = 0; offset < total; ++offset, i = i + 1 == total ? 0 : i + 1) {
     if ((pending & static_cast<std::uint16_t>(1U << i)) == 0) continue;
     JoinChunk chunk{};
-    if (!slot.chunk_at(i, chunk).ok()) {
-      return Status::error(StatusCode::ProtocolError, "end tx chunk");
-    }
     std::array<std::uint8_t, kMaxApplicationPayload> body{};
     std::size_t written = 0;
-    if (!join_chunk_encode(JoinCarrier::WireRelay, chunk,
-                           MutableByteView{body.data(), body.size()}, written)
-             .ok()) {
-      return Status::error(StatusCode::ProtocolError, "end tx chunk encode");
+    Status encoded = slot.chunk_at(i, chunk);
+    if (encoded.ok()) {
+      encoded = join_chunk_encode(JoinCarrier::WireRelay, chunk,
+                                 MutableByteView{body.data(), body.size()}, written);
     }
+    if (!encoded.ok()) return encoded;
     MessageId id{};
     const Status sent = deps_.mesh->send_bootstrap(member().end_tx_peer,
                                                    FrameType::BootstrapChunk,
@@ -1900,8 +1906,10 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
           JoinReply reply{};
           if (join_reply_decode(JoinCarrier::WireRelay, payload, reply).ok() &&
               reply.lane == ObjectLane::EndSession) {
+            const auto due = member().end_tx.pending_mask();
             const auto outcome = member().end_tx.on_reply(reply, now);
-            if (outcome == JoinObjectSlot::ReplyOutcome::Progress ||
+            if ((outcome == JoinObjectSlot::ReplyOutcome::Progress &&
+                 member().end_tx.pending_mask() != due) ||
                 outcome == JoinObjectSlot::ReplyOutcome::Restart) {
               // A receipt freed the next contiguous chunk; send it on the
               // next poll without waiting for the no-receipt retry timer.

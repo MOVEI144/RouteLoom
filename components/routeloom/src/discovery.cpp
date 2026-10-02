@@ -452,8 +452,8 @@ Status NeighborDiscovery::begin_discovery_filtered(const MonotonicMs now_ms,
   // Cold-start spread (radio.md §13): a fresh requester exchange defers its
   // first DISCOVER by a uniform [0, cold_start_jitter_max_ms) draw so
   // simultaneous boots do not burst in lock-step. A zero draw keeps the
-  // send synchronous so its failure is reported to the caller; a deferred
-  // send flows through the same discover_due path as a retry.
+  // send synchronous; a local refusal or deferred send flows through
+  // the same discover_due path as a retry.
   // A sweep round follows this node's own completed exchange: it is not in
   // lock-step with anyone, so it takes no jitter.
   std::uint32_t jitter_ms = 0;
@@ -468,7 +468,14 @@ Status NeighborDiscovery::begin_discovery_filtered(const MonotonicMs now_ms,
   }
   if (jitter_ms == 0 && !sweep) {
     outbound_.stage_deadline_ms = now_ms + config_.offer_window_ms;
-    return send_discover(now_ms);
+    const Status sent = send_discover(now_ms);
+    if (!transport_refused(sent)) return sent;
+    // No DISCOVER reached the radio: retain the bounded exchange and
+    // retry once the physical TX lane drains.
+    outbound_.discover_due_ms = add_sat(now_ms, 50);
+    outbound_.stage_deadline_ms = add_sat(outbound_.discover_due_ms,
+        config_.offer_window_ms + config_.auth_timeout_ms);
+    return Status::success();
   }
   outbound_.discover_due_ms = now_ms + jitter_ms;
   outbound_.stage_deadline_ms = outbound_.discover_due_ms +
@@ -2628,11 +2635,17 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
       if (entropy_.fill(
               MutableByteView{outbound_.our_nonce.data(), 16})
               .ok()) {
-        outbound_.discover_due_ms = 0;
-        // A sweep's OFFERs queue behind the new binding's traffic.
-        outbound_.stage_deadline_ms =
-            now_ms + config_.offer_window_ms * (outbound_.sweep ? 2U : 1U);
-        send_discover(now_ms);
+        const Status sent = send_discover(now_ms);
+        if (transport_refused(sent)) {
+          // A local refusal is not an unanswered RF attempt. Preserve
+          // the exchange deadline so a permanently busy port stays bounded.
+          outbound_.discover_due_ms = add_sat(now_ms, 50);
+        } else {
+          outbound_.discover_due_ms = 0;
+          // A sweep's OFFERs queue behind the new binding's traffic.
+          outbound_.stage_deadline_ms =
+              add_sat(now_ms, config_.offer_window_ms * (outbound_.sweep ? 2U : 1U));
+        }
       } else {
         fail_outbound(now_ms, "DISCOVERY_FAILED");
       }

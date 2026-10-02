@@ -281,7 +281,21 @@ fn committed_cutover_reopens_with_old_network_rrs_history() {
     let path = dir.join("site.db");
     let store = super::store::SqliteSiteStore::open(&path).unwrap();
     let (service, transport) = service_with(Box::new(store));
-    service.with(|a| a.handle_rrs_get(0, T0).unwrap());
+    service.with(|a| {
+        a.channel_plan.note_sent(7, "status", T0);
+        a.channel_plan_report(
+            7,
+            routeloom_protocol::host_ops::ChannelPlanReport {
+                active_channel: 11,
+                active_epoch: 2,
+                ..Default::default()
+            },
+            T0,
+        )
+        .unwrap();
+        a.handle_rrs_get(0, T0).unwrap();
+        a.channel_plan.note_sent(8, "status", T0);
+    });
     let (op, _) = prepare_gateway(&service, &transport, T0, "history");
     let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
     tick(&service, committed_at);
@@ -292,6 +306,20 @@ fn committed_cutover_reopens_with_old_network_rrs_history() {
             .as_str(),
         Some("committed")
     );
+    service.with(|a| {
+        assert!(!a.channel_plan.busy());
+        assert!(!a
+            .channel_plan_report(
+                8,
+                routeloom_protocol::host_ops::ChannelPlanReport {
+                    active_channel: 6,
+                    active_epoch: 3,
+                    ..Default::default()
+                },
+                committed_at,
+            )
+            .unwrap());
+    });
     drop(service);
     let store = super::store::SqliteSiteStore::open(&path).unwrap();
     let reopened = super::SiteAuthority::open(
@@ -301,7 +329,10 @@ fn committed_cutover_reopens_with_old_network_rrs_history() {
         committed_at + 1_000,
     );
     assert!(reopened.is_ok(), "{}", reopened.err().unwrap_or_default());
-    assert_eq!(reopened.unwrap().network() >> 32, 4);
+    let reopened = reopened.unwrap();
+    assert_eq!(reopened.network() >> 32, 4);
+    let package = reopened.site_package(ROLE_ENDPOINT, committed_at + 1_000);
+    assert_eq!((package.channel, package.channel_epoch), (11, 2));
     std::fs::remove_dir_all(dir).unwrap();
 }
 

@@ -723,10 +723,17 @@ void test_initiator_retries_m3_until_m4_arrives() {
   CHECK(pair.a->sink.installs == 1 && pair.b->sink.installs == 1);
 }
 
-void test_responder_waits_for_m4_admission() {
+void test_responder_waits_for_m4_admission(const SecurityScope scope) {
   Pair pair = Pair::make();
   const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
-  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  if (scope == SecurityScope::Link) {
+    CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  } else {
+    HandshakeRequest request{};
+    request.scope = scope;
+    request.peer = kNodeB;
+    CHECK_OK(pair.a->engine.request(request, kT0));
+  }
   HandshakeResult m1{}, m2{}, m3{}, m4{}, result{};
   CHECK_OK(pair.a->engine.take_result(m1));
   CHECK_OK(deliver_to(*pair.b, *pair.a, m1, frozen, kT0 + 50));
@@ -736,16 +743,16 @@ void test_responder_waits_for_m4_admission() {
   CHECK_OK(deliver_to(*pair.b, *pair.a, m3, frozen, kT0 + 150));
   CHECK_OK(pair.b->engine.take_result(m4));
   CHECK(m4.event == HandshakeEvent::Send && m4.phase == 4 && m4.step == 4);
-  CHECK(pair.b->bank.live_count(SecurityScope::Link) == 0);
+  CHECK(pair.b->bank.live_count(scope) == 0);
   CHECK(pair.b->engine.take_result(result).code == StatusCode::NotFound);
   CHECK_OK(pair.b->engine.poll(kT0 + 550));
   HandshakeResult retry{};
   CHECK_OK(pair.b->engine.take_result(retry));
   CHECK(retry.event == HandshakeEvent::Send && retry.step == 4 &&
         retry.message_size == m4.message_size);
-  CHECK(pair.b->bank.live_count(SecurityScope::Link) == 0);
+  CHECK(pair.b->bank.live_count(scope) == 0);
   CHECK_OK(pair.b->engine.accept_send(retry.token, retry.phase, retry.step));
-  CHECK(pair.b->bank.live_count(SecurityScope::Link) == 1);
+  CHECK(pair.b->bank.live_count(scope) == 1);
   CHECK_OK(pair.b->engine.take_result(result));
   CHECK(result.event == HandshakeEvent::Established);
   const auto due = pair.b->engine.next_deadline(kT0 + 550);
@@ -754,6 +761,12 @@ void test_responder_waits_for_m4_admission() {
   HandshakeResult quiet_retry{};
   CHECK_OK(pair.b->engine.take_result(quiet_retry));
   CHECK(quiet_retry.event == HandshakeEvent::Send && quiet_retry.step == 4);
+  CHECK(quiet_retry.message_size == m4.message_size);
+  CHECK(std::memcmp(quiet_retry.message.data(), m4.message.data(), m4.message_size) == 0);
+  CHECK_OK(deliver_to(*pair.a, *pair.b, quiet_retry, frozen, due + 50));
+  CHECK_OK(pair.a->engine.take_result(result));
+  CHECK(result.event == HandshakeEvent::Established);
+  CHECK(pair.a->sink.installs == 1 && pair.b->sink.installs == 1);
 }
 
 void test_m1_park_yields_to_live_m4() {
@@ -2271,7 +2284,9 @@ int main() {
   test_worker_cancel_completed_m4();
   test_link_edhoc_full();
   test_initiator_retries_m3_until_m4_arrives();
-  test_responder_waits_for_m4_admission();
+  for (const auto scope : {SecurityScope::Link, SecurityScope::EndToEnd}) {
+    test_responder_waits_for_m4_admission(scope);
+  }
   test_m1_park_yields_to_live_m4();
   test_new_link_carrier_supersedes_quiet_m4();
   for (const auto scope : {SecurityScope::EndToEnd, SecurityScope::Link}) {

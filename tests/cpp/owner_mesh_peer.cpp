@@ -59,6 +59,8 @@
 //                              scope): resolve `gateway` through
 //                              Device::gateway(), then send once Ready;
 //                              the snapshot tail reports both outcomes
+//   q                          terminal capacity evidence; reply q <pool u32>
+//                              <pin_limit u32><quota_refusals u64>
 //   Q                          quit (exit 0)
 //   O <remaining_ms u32le><corrupt_end u8>
 //                              retry the last End envelope with a fresh Link counter
@@ -1786,6 +1788,15 @@ int main(int argc, char** argv) {
     Bytes payload(length);
     if (!read_exact(payload.data(), length)) return 0;
     switch (payload[0]) {
+      case 'q': {
+        if (length != 1) fatal("bad q");
+        Bytes reply{'q'};
+        put_u32(reply, kDedupCapacity);
+        put_u32(reply, kDedupTerminalPinMax);
+        put_u64(reply, runtime.node().dedup_stats().refused_terminal_reserve);
+        write_frame(reply);
+        break;
+      }
       case 'd': {
         if (length != 1) fatal("bad d");
         Bytes reply{'d'};

@@ -332,10 +332,12 @@ MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
           };
           foreground_pending = !control_.empty() || flows_.find(pending) != nullptr;
           for (const auto& candidate : overflow_) foreground_pending |= pending(candidate);
-          // A sent foreground exchange still needs its hop/end receipt;
-          // an empty queue does not mean that its airtime turn is over.
+          // Queued or transmitted foreground work still owns its airtime
+          // turn. A route wait has no frame ready and must not starve objects.
           foreground_pending |= node.deliveries_.find([](const Delivery& delivery) noexcept {
-            return delivery.options.priority != Priority::Bulk && !sleep_terminal(delivery.state);
+            return delivery.options.priority != Priority::Bulk &&
+                   delivery.state >= DeliveryState::Queued &&
+                   delivery.state <= DeliveryState::WaitingForEndReceipt;
           }) != nullptr;
           foreground_pending |= node.awaiting_hop_.find([](const AwaitingHop& hop) noexcept {
             return classify(hop.job) != SchedClass::Bulk;
@@ -383,7 +385,8 @@ MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
         selected_flow_ = flow;
         selected_ = head;
         selected_control_ = false;
-        cursor_ = (ci + 1) % kSchedClassCount;
+        // Spare-airtime objects do not change the foreground DRR turn.
+        if (!object) cursor_ = (ci + 1) % kSchedClassCount;
         return head;
       }
     }

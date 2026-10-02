@@ -2112,6 +2112,14 @@ impl SiteAuthority {
                 (META_ACTIVE_SITE_CERT, state.next_site_cert.clone()),
                 (META_CUTOVER_EPOCHS, epochs),
                 ("site_binding", binding),
+                (
+                    super::channel_plan::META_ACTIVE_CHANNEL,
+                    super::channel_plan::encode_channel(
+                        state.new_network,
+                        self.id.channel,
+                        self.id.channel_epoch,
+                    ),
+                ),
             ],
             group_keys: vec![GroupKeyRow {
                 epoch: state.next_gk_epoch,
@@ -2147,6 +2155,7 @@ impl SiteAuthority {
         }
         self.gks.publish_cutover_activation(now_ms, time.mono_ms);
         self.id.network = state.new_network;
+        self.channel_plan = Default::default();
         self.id.site_cert = state.next_site_cert.clone();
         self.id.site_claims = next_claims;
         self.cutover_grace_network = state.old_network;

@@ -1,0 +1,2 @@
+- Prevent delayed End chunk replies from starving later chunks on long mesh paths; keep chunk sends within the existing exchange timeout and replay lost End EDHOC M4 within the existing retry budget.
+- Add real-Owner cold-boot worker coverage with radio/callback latency for reverse unfiltered star delivery and bidirectional five-hop delivery. Stock gateway_small overload beyond its 28 terminal pins and hardware qualification remain pending.

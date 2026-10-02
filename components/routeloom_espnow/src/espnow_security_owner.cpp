@@ -628,6 +628,18 @@ Status EspNowSecurityOwner::attach_usb(usb::UsbBridge& bridge) noexcept {
   return Status::success();
 }
 
+bool EspNowSecurityOwner::host_session_ready() const noexcept {
+  if (runtime_ != nullptr && runtime_->node().started()) return true;
+  if (!booted_ || boot_pending_) return false;
+  const auto mode = coordinator().mode();
+  // Lifecycle and Joiner each verify stored credentials on the worker.
+  // BootCheck needs no host; subsequent join/recovery states may need USB.
+  if (mode == sdkv1::CoordinatorMode::ZeroTouch &&
+      coordinator().joiner_snapshot().state == sdkv1::JoinState::BootCheck) return false;
+  return (mode != sdkv1::CoordinatorMode::Member && mode != sdkv1::CoordinatorMode::Dev) ||
+         (runtime_ != nullptr && runtime_->node().started());
+}
+
 Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool rlboot_prepared,
                                  const bool usb_direct, const MonotonicMs now_ms) noexcept {
   if (!begun_ || booted_) {

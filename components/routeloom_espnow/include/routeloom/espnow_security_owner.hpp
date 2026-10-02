@@ -193,6 +193,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
                          ByteView frame, MonotonicMs received_ms) noexcept override;
   // SecurityOwnerUsbSink: decoded 0x61/0x62 (admission for the 0x63) and
   // session death. Self-addressed downs demux to the LocalJoin attempt.
+  bool host_session_ready() const noexcept override;
   Status join_down(NodeId to_proxy, const sdkv1::RelayObject& object, ByteView raw_object,
                    MonotonicMs now_ms) noexcept override;
   Status join_abort(NodeId proxy, sdkv1::RelayToken token, std::uint8_t reason,
