@@ -82,13 +82,10 @@ class AppObject final : public ConfigEndpointSink {
   struct Rx {
     MutableByteView storage{};
     ObjectAssembler assembler{};
-    Key key{};
-    object_wire::Start start{};
     std::array<std::uint8_t, 8> bitmap{};
-    MonotonicMs deadline_ms{0};
     MonotonicMs progress_ms{0};
+    // Reserved before admission and retained past the assembly deadline.
     std::uint8_t record{0};
-    bool ready{false};
   };
   struct Record {
     Key key{};

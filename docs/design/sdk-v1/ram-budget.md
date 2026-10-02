@@ -146,3 +146,33 @@ firmwareの既定：reference_node・bench_nodeはrelay、exampleはendpoint、b
 - 表の「推定残量」は実測ではない。imageの値はCIの`ram-report.json`で確かめる。
 - 実行時のheap最小値・最大block・task stackの余裕は測っていない（HILの受入項目のまま）。
 - `docs/reference/resource-profiles.json`は設計上の上限（sizeofではない）で、dedupの割当は1件152 Bの許容のまま残した（実際の136 Bを上回るので条件を満たす）。
+
+### V2-19: integration review footprint (ESP-IDF v6.0.3)
+
+Measured against `61af1d0c` (current main integrated), with the same C3 bridge
+cell and defaults. Flash is the app binary; static RAM is `.bss + .data`.
+No RAM floor, RTC budget or drift allowance changes.
+
+| C3 bridge | app.bin before → after | static RAM before → after | static free after |
+|---|---:|---:|---:|
+| OFF | 1,220,464 → 1,220,688 B (+224 B) | 219,052 → 219,052 B (0 B) | 52,896 B |
+| ON | 1,231,648 → 1,231,872 B (+224 B) | 229,468 → 229,388 B (−80 B) | 42,560 B |
+
+ON adds 10,336 B of static RAM over OFF, 5,216 B above the 5 KiB target.
+The receiver now uses its reserved completion record for identity and manifest
+metadata, and its assembler for deadline/completion state. RX capacity, all
+source floors and four protected completion records are retained. The two
+4,096 B arenas remain: mesh RX is cleared after its callback, while USB egress
+must retain a verified copy until HostLink credit permits sending; upload TX
+also holds an immutable loan until its result. Sharing them would require an
+explicit loan/return contract across those lifetimes. Neither heap/stack
+relocation nor shortened dedup retention is used to meet the target.
+
+The 224 B flash increase makes AppObject yield to ready foreground flows,
+including at OFF relays. The real-Owner two-hop comparison measures Reliable
+p99 at 200 → 225 ms (+12.5%), with no control timeout or End failure increase;
+these are host-harness measurements, not RF qualification. H3 remains separate.
+
+The C6 reference ON cell measures app.bin 1,255,328 B, static free 156,253 B
+and RTC 136 B after main integration. Its flash soft baseline is updated from
+1,252,784 B to that measured value; RAM/RTC budgets and drift are unchanged.

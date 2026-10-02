@@ -167,7 +167,7 @@ void AppObject::start_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
     if (!record.used || !(record.key == k)) continue;
     if (!same_start(record.start, start)) {
       for (auto& rx : rx_) {
-        if (rx.assembler.active() && rx.key == k) finish_rx(rx, AckStatus::Conflict);
+        if (rx.assembler.active() && records_[rx.record].key == k) finish_rx(rx, AckStatus::Conflict);
       }
       queue_ack(k.peer, {k.id, AckStatus::Conflict, 0, 0}, now_ms);
     } else { record.ack_pending = true; }
@@ -195,7 +195,7 @@ void AppObject::start_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
   // slot is occupied. Retain the boot floor if new admission is Busy.
   if (floor != nullptr && k.boot > floor->boot) {
     for (auto& rx : rx_) {
-      if (rx.assembler.active() && rx.key.peer == k.peer) finish_rx(rx, AckStatus::Failed);
+      if (rx.assembler.active() && records_[rx.record].key.peer == k.peer) finish_rx(rx, AckStatus::Failed);
     }
     floor->boot = k.boot;
     floor->highest = 0;
@@ -213,7 +213,7 @@ void AppObject::start_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
   bool buffer_present = false;
   for (auto& rx : rx_) {
     buffer_present |= rx.storage.data != nullptr;
-    if (rx.assembler.active() && rx.key.peer == k.peer) {
+    if (rx.assembler.active() && records_[rx.record].key.peer == k.peer) {
       queue_ack(k.peer, {k.id, AckStatus::Busy, 0, 0}, now_ms); return;
     }
     if (rx.storage.data != nullptr && !rx.assembler.active()) slot = &rx;
@@ -237,18 +237,17 @@ void AppObject::start_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
   if (!slot->assembler.begin(slot->storage, {slot->bitmap.data(), slot->bitmap.size()},
                              start.total, object_wire::kChunkBytes, deadline)) return;
   floor->highest = start.id; floor->boot = k.boot;
-  slot->key = k; slot->start = start; slot->progress_ms = now_ms;
-  slot->deadline_ms = deadline; slot->record = static_cast<std::uint8_t>(record_index);
-  slot->ready = false;
-  records_[record_index] = {k, start, slot->deadline_ms + kRecordSlackMs, AckStatus::Incomplete, 0, true, true};
+  slot->progress_ms = now_ms;
+  slot->record = static_cast<std::uint8_t>(record_index);
+  records_[record_index] = {k, start, deadline + kRecordSlackMs, AckStatus::Incomplete, 0, true, true};
 }
 void AppObject::chunk_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noexcept {
   object_wire::Chunk chunk{};
   if (!object_wire::decode({frame.payload.data(), frame.payload_size}, chunk)) return;
   const Key k = key(frame, chunk.id);
   for (auto& rx : rx_) {
-    if (!rx.assembler.active() || !(rx.key == k)) continue;
-    if (now_ms >= rx.deadline_ms || now_ms - rx.progress_ms >= kNoProgressMs) {
+    if (!rx.assembler.active() || !(records_[rx.record].key == k)) continue;
+    if (rx.assembler.expired(now_ms) || now_ms - rx.progress_ms >= kNoProgressMs) {
       finish_rx(rx, AckStatus::Expired); return;
     }
     const auto before = rx.assembler.received();
@@ -258,10 +257,9 @@ void AppObject::chunk_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
     if (rx.assembler.received() != before) rx.progress_ms = now_ms;
     auto& record = records_[rx.record]; record.bitmap = bits(rx); record.ack_pending = true;
     if (rx.assembler.complete()) {
-      if (!rx.assembler.verify({rx.start.digest.data(), rx.start.digest.size()})) {
+      if (!rx.assembler.verify({records_[rx.record].start.digest.data(), records_[rx.record].start.digest.size()})) {
         finish_rx(rx, AckStatus::Failed); return;
       }
-      rx.ready = true;
     }
     return;
   }
@@ -305,7 +303,7 @@ void AppObject::ack_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noexce
 void AppObject::finish_rx(Rx& rx, AckStatus status) noexcept {
   auto& record = records_[rx.record]; record.status = status;
   record.bitmap = bits(rx); record.ack_pending = true;
-  rx.assembler.reset(); rx.ready = false;
+  rx.assembler.reset();
 }
 void AppObject::finish_tx(ObjectState state, StatusCode reason) noexcept {
   result_ = {tx_.start.id, state, reason}; result_ready_ = true;
@@ -393,13 +391,14 @@ void AppObject::poll(MonotonicMs now_ms) noexcept {
   if (fallback_ != nullptr) fallback_->poll(now_ms);
   for (auto& rx : rx_) {
     if (!rx.assembler.active()) continue;
-    if (!live(rx.key)) { finish_rx(rx, AckStatus::Failed); continue; }
-    if (now_ms >= rx.deadline_ms || now_ms - rx.progress_ms >= kNoProgressMs) {
+    if (!live(records_[rx.record].key)) { finish_rx(rx, AckStatus::Failed); continue; }
+    if (rx.assembler.expired(now_ms) || now_ms - rx.progress_ms >= kNoProgressMs) {
       finish_rx(rx, AckStatus::Expired); continue;
     }
-    if (rx.ready && observer_.object_receive_ready()) {
-      const ObjectRxInfo info{rx.key.peer, rx.start.id, rx.key.boot, rx.key.epoch,
-                              rx.start.app_tag, rx.start.encoding};
+    if (rx.assembler.complete() && observer_.object_receive_ready()) {
+      const auto& record = records_[rx.record];
+      const ObjectRxInfo info{record.key.peer, record.start.id, record.key.boot, record.key.epoch,
+                              record.start.app_tag, record.start.encoding};
       in_call_ = true; observer_.on_object(info, rx.assembler.data()); in_call_ = false;
       finish_rx(rx, AckStatus::Complete);
     }

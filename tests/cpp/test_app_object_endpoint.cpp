@@ -9,6 +9,8 @@
 #include "test_sim.hpp"
 
 using namespace routeloom;
+static_assert(sizeof(AppObject) <= profile::kEndSessions * 20 + 864,
+              "AppObject metadata budget excludes caller-owned payload buffers");
 namespace {
 // Endpoint boundaries include one authenticated driver-queue handoff; radio
 // delivery is covered by the Owner mesh scenarios.
