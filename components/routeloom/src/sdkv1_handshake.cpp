@@ -2854,18 +2854,16 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
   }
   for (auto& record : records_) {
     if (!record.used) continue;
-    if (record.state == RecordState::EdhocM4Sent && record.scope == SecurityScope::Link) {
+    if (record.state == RecordState::EdhocM4Sent && record.scope == SecurityScope::Link &&
+        (!edhoc_flight_.active || edhoc_flight_.owner_token != record.token)) {
       std::uint32_t rx_context = 0;
       std::memcpy(&rx_context, record.last_tx.data() + kM4RxContextOffset,
                   sizeof(rx_context));
       // Proof in the exact installed context ends the retry duty; another
       // exchange cannot confirm it merely by taking the crypto workspace.
       if (sink_.has_authenticated_rx(record.scope, record.peer, rx_context)) {
-        if (!edhoc_flight_.active || edhoc_flight_.owner_token != record.token) {
-          drop_record(record);
-          return Status::success();
-        }
-        record.retransmit_at = record.deadline;
+        drop_record(record);
+        return Status::success();
       }
     }
     if (now < record.deadline) continue;
