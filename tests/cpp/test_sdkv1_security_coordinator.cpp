@@ -148,8 +148,8 @@ struct SecurityCoordinatorTestAccess {
   static Status pump_end_chunks(SecurityCoordinator& coordinator, MonotonicMs now) noexcept {
     return coordinator.pump_end_tx(now);
   }
-  static JoinObjectSlot::ReplyOutcome acknowledge_end_prefix(
-      SecurityCoordinator& coordinator, std::uint16_t received, MonotonicMs now) noexcept {
+  static Status acknowledge_end_prefix(SecurityCoordinator& coordinator,
+                                       std::uint16_t received, MonotonicMs now) noexcept {
     JoinReply reply{};
     reply.lane = ObjectLane::EndSession;
     reply.phase = JoinAuthPhase::EdhocMessage;
@@ -157,8 +157,17 @@ struct SecurityCoordinatorTestAccess {
     reply.id = 456;
     reply.status = JoinReplyStatus::Progress;
     reply.received = received;
-    return coordinator.member().end_tx.on_reply(reply, now);
+    SecurityCoordinator::StagedFrame frame{};
+    frame.type = FrameType::BootstrapReply;
+    std::size_t written = 0;
+    const Status encoded = join_reply_encode(JoinCarrier::WireRelay, reply,
+        {frame.payload.data(), frame.payload.size()}, written);
+    if (!encoded) return encoded;
+    frame.payload_size = written;
+    coordinator.handle_bootstrap_frame(frame, now);
+    return Status::success();
   }
+
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
   static JoinRelayGateway& gateway(SecurityCoordinator& coordinator) noexcept {
     return coordinator.member().gateway;
@@ -2943,8 +2952,8 @@ void test_link_chunks_wait_for_receipts() {
   }
 }
 
-void test_end_chunks_wait_for_receipts() {
-  current = "end_chunks_wait_for_receipts";
+void test_end_chunks_progress_without_prefix_reply() {
+  current = "end_chunks_progress_without_prefix_reply";
   Fixture f{};
   CHECK(f.init_stores());
   CHECK(f.identity.commit(identity_record()).ok());
@@ -2964,9 +2973,6 @@ void test_end_chunks_wait_for_receipts() {
   CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + 20).ok());
   CHECK(f.mesh.sends.size() == 1);
   const std::size_t grid = join_chunk_data_max(JoinCarrier::WireRelay);
-  CHECK(SecurityCoordinatorTestAccess::acknowledge_end_prefix(
-            coordinator, static_cast<std::uint16_t>(grid), now + 21) ==
-        JoinObjectSlot::ReplyOutcome::Progress);
   CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + 250).ok());
   CHECK(f.mesh.sends.size() == 2);
   if (f.mesh.sends.size() == 2) {
@@ -2978,6 +2984,17 @@ void test_end_chunks_wait_for_receipts() {
                                      f.mesh.sends[1].bytes.size()}, chunk).ok());
     CHECK(chunk.offset == grid);
   }
+  CHECK(SecurityCoordinatorTestAccess::acknowledge_end_prefix(
+            coordinator, static_cast<std::uint16_t>(grid), now + 251).ok());
+  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + 251).ok());
+  CHECK(f.mesh.sends.size() == 3);
+  CHECK(SecurityCoordinatorTestAccess::acknowledge_end_prefix(
+            coordinator, static_cast<std::uint16_t>(grid), now + 252).ok());
+  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + 252).ok());
+  CHECK(f.mesh.sends.size() == 3);  // duplicate progress cannot accelerate retries
+  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(
+            coordinator, now + HandshakeEngine::kLinkTimeoutMs).ok());
+  CHECK(f.mesh.sends.size() == 3);  // expired objects do not keep sending
 }
 
 // --- Join milestones (observation_v1) --------------------------------------------
@@ -3222,7 +3239,7 @@ int main() {
   test_direct_join_aead_and_usb_attach_retry();
   test_link_retry_uses_original_transaction();
   test_link_chunks_wait_for_receipts();
-  test_end_chunks_wait_for_receipts();
+  test_end_chunks_progress_without_prefix_reply();
   test_milestones_fresh_is_unknown();
   test_milestones_dev_adopt_and_stop();
   test_milestones_join_leg_adopt_confirm();

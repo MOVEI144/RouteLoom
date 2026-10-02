@@ -4,28 +4,37 @@ use super::recovery::{all_ready, run_for};
 use super::*;
 
 fn star_burst(count: u8, small: bool) {
-    let mut world = MeshWorld::start(
+    let mut world = MeshWorld::start_with_args(
         "uplink-star",
-        Switch::new(&Topology {
-            nodes: 6,
-            edges: (1..6).map(|peer| (0, peer)).collect(),
-        }),
+        Switch::new(&Topology::full(6)),
+        &["--crypto-ms", "154"],
+        &["--crypto-ms", "154"],
     )
     .expect("uplink qualification requires real Owner peers");
-    world.pump_until(9000, all_ready);
-    assert!(all_ready(&world.snaps));
-    let (capacity, pins, refused_before) = world.peers[0].terminal_capacity();
-    if small {
-        assert_eq!((capacity, pins), (32, 28), "requires gateway_small peer");
-    }
     for row in &mut world.switch.delay_ms {
         row.fill(10);
     }
     for row in &mut world.switch.callback_delay_ms {
         row.fill(10);
     }
-    world.switch.drop_wire_kind(0, 1, WIRE_HOP_ACCEPT, 1);
-    world.switch.drop_wire_kind(0, 1, WIRE_END_RECEIPT, 1);
+    world.pump_until(9000, all_ready);
+    assert!(all_ready(&world.snaps));
+    let (capacity, pins, refused_before) = world.peers[0].terminal_capacity();
+    if small {
+        assert_eq!((capacity, pins), (32, 28), "requires gateway_small peer");
+    }
+    let lost_peer = (1..world.peers.len())
+        .find(|&peer| {
+            world.peers[0].next_hop(world.nodes[peer]) == world.nodes[peer]
+                && world.peers[peer].next_hop(testkit::GATEWAY) == testkit::GATEWAY
+        })
+        .expect("a bidirectional gateway tree link");
+    world
+        .switch
+        .drop_wire_kind(0, lost_peer, WIRE_HOP_ACCEPT, 1);
+    world
+        .switch
+        .drop_wire_kind(0, lost_peer, WIRE_END_RECEIPT, 1);
     let results: Vec<_> = world
         .peers
         .iter_mut()
@@ -109,6 +118,12 @@ fn mesh_uplink_five_hop_cold_line_delivers() {
         &["--crypto-ms", "154"],
     )
     .expect("uplink qualification requires real Owner peers");
+    for row in &mut world.switch.delay_ms {
+        row.fill(10);
+    }
+    for row in &mut world.switch.callback_delay_ms {
+        row.fill(10);
+    }
     let started = world.now;
     world.pump_until(9000, all_ready);
     assert!(all_ready(&world.snaps), "cold line: {:?}", world.snaps);
@@ -116,12 +131,6 @@ fn mesh_uplink_five_hop_cold_line_delivers() {
         "uplink line: all End/authority channels ready in {} ms vt",
         world.now - started
     );
-    for row in &mut world.switch.delay_ms {
-        row.fill(10);
-    }
-    for row in &mut world.switch.callback_delay_ms {
-        row.fill(10);
-    }
     let before = world.switch.leg_delivered.clone();
     for index in 0..100_u32 {
         // Paced sends stay within the unchanged terminal retention budget.

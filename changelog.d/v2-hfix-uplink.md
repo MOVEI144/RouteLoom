@@ -1,2 +1,2 @@
-- Add real-Owner coverage for reverse gateway-scoped star delivery with lost hop/End acknowledgements and bidirectional five-hop delivery with the crypto worker.
-- Retain the stock gateway_small overload as an explicit failing qualification case: 40 simultaneously admitted sends exceed the unchanged 28 terminal pins. Hardware reverse/far-end qualification remains pending.
+- Prevent delayed End chunk replies from starving later chunks on long mesh paths; keep chunk sends within the existing exchange timeout and replay lost End EDHOC M4 within the existing retry budget.
+- Add real-Owner cold-boot worker coverage with radio/callback latency for reverse unfiltered star delivery and bidirectional five-hop delivery. Stock gateway_small overload beyond its 28 terminal pins and hardware qualification remain pending.

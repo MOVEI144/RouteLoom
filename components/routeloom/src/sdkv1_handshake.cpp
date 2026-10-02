@@ -3020,7 +3020,6 @@ MonotonicMs HandshakeEngine::next_deadline(const MonotonicMs now) const noexcept
         sooner(record.retransmit_at > ecc_at ? record.retransmit_at : ecc_at);
       }
     } else if (!(crypto_stage_active_ && record.token == crypto_token_) &&
-               (record.state != RecordState::EdhocM4Sent || record.scope == SecurityScope::Link) &&
                (record.last_tx_size != 0 ||
                 (edhoc_flight_.active && edhoc_flight_.owner_token == record.token &&
                  big_tx_owner_ == record.token && big_tx_size_ != 0))) {
@@ -3076,7 +3075,7 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
   }
   for (auto& record : records_) {
     if (!record.used) continue;
-    if (record.state == RecordState::EdhocM4Sent && record.scope == SecurityScope::Link &&
+    if (record.state == RecordState::EdhocM4Sent &&
         (!edhoc_flight_.active || edhoc_flight_.owner_token != record.token)) {
       std::uint32_t rx_context = 0;
       std::memcpy(&rx_context, record.last_tx.data() + kM4RxContextOffset,
@@ -3112,11 +3111,10 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
   }
   for (auto& record : records_) {
     // The chunk receiver acknowledges a repeated completed M3 without
-    // redelivering it. Bounded quiet link M4 retries must reach the peer
+    // redelivering it. Bounded quiet M4 retries must reach the peer
     // even when that chunk receipt suppresses the duplicate-triggered reply.
     if (!record.used || (crypto_stage_active_ && record.token == crypto_token_) ||
-        now < record.retransmit_at ||
-        (record.state == RecordState::EdhocM4Sent && record.scope != SecurityScope::Link)) continue;
+        now < record.retransmit_at) continue;
     const bool small_tx = record.last_tx_size != 0;
     const bool big_tx = (record.state == RecordState::EdhocWaitM4 ||
                          record.state == RecordState::EdhocM4Pending) && edhoc_flight_.active &&
