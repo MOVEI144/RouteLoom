@@ -141,23 +141,54 @@ fn mesh_hfinal_relay_reset_delayed_resume() {
 /// amid public host send history. A closed operation expires before retry.
 #[test]
 fn mesh_hfinal_rejoin_during_thousand_send_history() {
-    rejoin_history(false);
+    rejoin_history(false, false);
 }
 
 #[test]
 fn mesh_hfinal_rejoin_710ms_v2_16_control() {
-    rejoin_history(true);
+    rejoin_history(true, false);
 }
 
-fn rejoin_history(occupied: bool) {
+#[test]
+fn mesh_hfinal_rejoin_with_delayed_crypto_worker() {
+    rejoin_history(false, true);
+}
+
+fn rejoin_history(occupied: bool, worker: bool) {
     use super::send::{legacy_send, terminal_events};
     use crate::site::PolicyPatch;
     use routeloom_protocol::manifest as reasons;
 
-    let mut world = MeshWorld::start("hfinal-rejoin", Switch::direct())
-        .expect("HFINAL requires real Owner peers");
+    let mut world = if worker {
+        MeshWorld::start_with_args(
+            "hfinal-rejoin-worker",
+            Switch::direct(),
+            &["--crypto-ms", "154"],
+            &["--crypto-ms", "154"],
+        )
+    } else {
+        MeshWorld::start("hfinal-rejoin", Switch::direct())
+    }
+    .expect("HFINAL requires real Owner peers");
     world.pump_until(9000, all_ready);
-    assert!(all_ready(&world.snaps));
+    assert!(
+        all_ready(&world.snaps),
+        "worker baseline: {:?}",
+        world
+            .snaps
+            .iter()
+            .map(|s| (
+                s.mode,
+                s.phase,
+                s.join_state,
+                s.link_failed,
+                s.link_last_error,
+                s.crypto_submitted,
+                s.crypto_completed,
+                s.crypto_pending
+            ))
+            .collect::<Vec<_>>()
+    );
     super::mesh::deliver_each(&mut world, 0, 1, 3, b"healthy-baseline");
     let identity = world.snaps[1].id_fp;
     let generation = world.snaps[1].own_generation;
@@ -210,6 +241,7 @@ fn rejoin_history(occupied: bool) {
                 })
                 .0;
             assert!(applied, "gateway committed reopened policy generation");
+            let rejoin_started = world.now;
             let (status, join) = world.peers[1].device_op(false, world.now).unwrap();
             assert_eq!(status, 0);
             if occupied {
@@ -237,7 +269,19 @@ fn rejoin_history(occupied: bool) {
             assert_eq!(world.snaps[1].op_result, reasons::REASON_JOINED);
             assert_eq!(world.snaps[1].id_fp, identity);
             assert_eq!(world.snaps[1].own_generation, generation);
+            assert_eq!(world.snaps[1].site_generation, generation);
+            assert!(world.snaps[1].has_site && world.snaps[1].stores_healthy);
             super::mesh::deliver_each(&mut world, 1, 0, 20, b"restored-member");
+            assert!(
+                world.now - rejoin_started <= 60_000,
+                "rejoin and 20 receipts within operation deadline"
+            );
+            if worker {
+                assert!(world.snaps.iter().all(|s| s.crypto_submitted > 0
+                    && s.crypto_completed > 0
+                    && s.crypto_owner_ms <= 25
+                    && s.crypto_pending <= 1));
+            }
         }
         requests.push(legacy_send(
             &mut world,
