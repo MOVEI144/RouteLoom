@@ -1,0 +1,903 @@
+{
+ "board": "relay",
+ "identity": {
+  "chip": "esp32c6",
+  "mac": "10:bd:a3:ff:fe:b1:48:a8",
+  "log": "flash-relay-preflight.log"
+ },
+ "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00",
+ "destination": 2,
+ "cycles": 10,
+ "sends": 10,
+ "hold_s": 0.5,
+ "send_gap_s": 2.0,
+ "started_unix": 1790788913.5850766,
+ "baseline": [
+  {
+   "label": "B0",
+   "admission_attempts": 1,
+   "response": {
+    "accepted": true,
+    "request": 41
+   },
+   "admitted_unix": 1790788914.588553,
+   "delivery": {
+    "request": 41,
+    "destination": 2,
+    "state": "delivered",
+    "reason": "END_RECEIVED",
+    "msg_session": 1850376684,
+    "msg_seq": 75,
+    "updated_ms": 1790788914640
+   },
+   "latency_ms": 53.21
+  },
+  {
+   "label": "B1",
+   "admission_attempts": 1,
+   "response": {
+    "accepted": true,
+    "request": 42
+   },
+   "admitted_unix": 1790788916.6437378,
+   "delivery": {
+    "request": 42,
+    "destination": 2,
+    "state": "delivered",
+    "reason": "END_RECEIVED",
+    "msg_session": 1850376684,
+    "msg_seq": 76,
+    "updated_ms": 1790788916699
+   },
+   "latency_ms": 106.03
+  },
+  {
+   "label": "B2",
+   "admission_attempts": 1,
+   "response": {
+    "accepted": true,
+    "request": 43
+   },
+   "admitted_unix": 1790788918.7515707,
+   "delivery": {
+    "request": 43,
+    "destination": 2,
+    "state": "delivered",
+    "reason": "END_RECEIVED",
+    "msg_session": 1850376684,
+    "msg_seq": 77,
+    "updated_ms": 1790788918807
+   },
+   "latency_ms": 105.18
+  }
+ ],
+ "cycle_results": [
+  {
+   "cycle": 0,
+   "released_unix": 1790788921.3582895,
+   "actual_hold_s": 0.501,
+   "sends": [
+    {
+     "label": "C0-0",
+     "state": "failed",
+     "reason": "HOP_ACCEPT_TIMEOUT",
+     "latency_ms": 2536.76,
+     "offset_s": 2.538
+    },
+    {
+     "label": "C0-1",
+     "state": "failed",
+     "reason": "HOP_ACCEPT_TIMEOUT",
+     "latency_ms": 881.24,
+     "offset_s": 5.422
+    },
+    {
+     "label": "C0-2",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.24,
+     "offset_s": 7.528
+    },
+    {
+     "label": "C0-3",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.86,
+     "offset_s": 9.637
+    },
+    {
+     "label": "C0-4",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.39,
+     "offset_s": 11.743
+    },
+    {
+     "label": "C0-5",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.78,
+     "offset_s": 13.849
+    },
+    {
+     "label": "C0-6",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.14,
+     "offset_s": 15.957
+    },
+    {
+     "label": "C0-7",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.2,
+     "offset_s": 18.064
+    },
+    {
+     "label": "C0-8",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.23,
+     "offset_s": 20.172
+    },
+    {
+     "label": "C0-9",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.4,
+     "offset_s": 22.278
+    }
+   ],
+   "recovery_s": 7.424,
+   "delivered": 8,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 1,
+   "released_unix": 1790788948.1396127,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C1-0",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 4819.5,
+     "offset_s": 4.821
+    },
+    {
+     "label": "C1-1",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.82,
+     "offset_s": 6.929
+    },
+    {
+     "label": "C1-2",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.08,
+     "offset_s": 9.035
+    },
+    {
+     "label": "C1-3",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.04,
+     "offset_s": 11.142
+    },
+    {
+     "label": "C1-4",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 106.18,
+     "offset_s": 13.251
+    },
+    {
+     "label": "C1-5",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 53.06,
+     "offset_s": 15.306
+    },
+    {
+     "label": "C1-6",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.76,
+     "offset_s": 17.414
+    },
+    {
+     "label": "C1-7",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.53,
+     "offset_s": 19.521
+    },
+    {
+     "label": "C1-8",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.44,
+     "offset_s": 21.627
+    },
+    {
+     "label": "C1-9",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 53.22,
+     "offset_s": 23.682
+    }
+   ],
+   "recovery_s": 0.002,
+   "delivered": 10,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 2,
+   "released_unix": 1790788976.3263786,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C2-0",
+     "state": "failed",
+     "reason": "HOP_ACCEPT_TIMEOUT",
+     "latency_ms": 3008.23,
+     "offset_s": 3.01
+    },
+    {
+     "label": "C2-1",
+     "state": "failed",
+     "reason": "HOP_ACCEPT_TIMEOUT",
+     "latency_ms": 775.98,
+     "offset_s": 5.788
+    },
+    {
+     "label": "C2-2",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.1,
+     "offset_s": 7.895
+    },
+    {
+     "label": "C2-3",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.99,
+     "offset_s": 10.002
+    },
+    {
+     "label": "C2-4",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.29,
+     "offset_s": 12.11
+    },
+    {
+     "label": "C2-5",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.82,
+     "offset_s": 14.216
+    },
+    {
+     "label": "C2-6",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 103.94,
+     "offset_s": 16.321
+    },
+    {
+     "label": "C2-7",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.78,
+     "offset_s": 18.428
+    },
+    {
+     "label": "C2-8",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.14,
+     "offset_s": 20.533
+    },
+    {
+     "label": "C2-9",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.06,
+     "offset_s": 22.64
+    }
+   ],
+   "recovery_s": 7.79,
+   "delivered": 8,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 3,
+   "released_unix": 1790789003.4699702,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C3-0",
+     "state": "failed",
+     "reason": "HOP_ACCEPT_TIMEOUT",
+     "latency_ms": 3107.8,
+     "offset_s": 3.109
+    },
+    {
+     "label": "C3-1",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.84,
+     "offset_s": 5.216
+    },
+    {
+     "label": "C3-2",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.52,
+     "offset_s": 7.324
+    },
+    {
+     "label": "C3-3",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.12,
+     "offset_s": 9.432
+    },
+    {
+     "label": "C3-4",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.03,
+     "offset_s": 11.539
+    },
+    {
+     "label": "C3-5",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.59,
+     "offset_s": 13.647
+    },
+    {
+     "label": "C3-6",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.66,
+     "offset_s": 15.753
+    },
+    {
+     "label": "C3-7",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.27,
+     "offset_s": 17.859
+    },
+    {
+     "label": "C3-8",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 106.22,
+     "offset_s": 19.967
+    },
+    {
+     "label": "C3-9",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.96,
+     "offset_s": 22.074
+    }
+   ],
+   "recovery_s": 5.111,
+   "delivered": 9,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 4,
+   "released_unix": 1790789030.0466368,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C4-0",
+     "state": "failed",
+     "reason": "HOP_ACCEPT_TIMEOUT",
+     "latency_ms": 2599.31,
+     "offset_s": 2.601
+    },
+    {
+     "label": "C4-1",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.71,
+     "offset_s": 4.708
+    },
+    {
+     "label": "C4-2",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.71,
+     "offset_s": 6.816
+    },
+    {
+     "label": "C4-3",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.23,
+     "offset_s": 8.923
+    },
+    {
+     "label": "C4-4",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.22,
+     "offset_s": 11.03
+    },
+    {
+     "label": "C4-5",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 106.03,
+     "offset_s": 13.139
+    },
+    {
+     "label": "C4-6",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 106.12,
+     "offset_s": 15.247
+    },
+    {
+     "label": "C4-7",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 158.12,
+     "offset_s": 17.407
+    },
+    {
+     "label": "C4-8",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.35,
+     "offset_s": 19.514
+    },
+    {
+     "label": "C4-9",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.39,
+     "offset_s": 21.621
+    }
+   ],
+   "recovery_s": 4.603,
+   "delivered": 9,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 5,
+   "released_unix": 1790789056.171872,
+   "actual_hold_s": 0.501,
+   "sends": [
+    {
+     "label": "C5-0",
+     "state": "expired",
+     "reason": "DEADLINE_EXPIRED",
+     "latency_ms": 5028.26,
+     "offset_s": 5.03
+    },
+    {
+     "label": "C5-1",
+     "state": "failed",
+     "reason": "HOP_ACCEPT_TIMEOUT",
+     "latency_ms": 984.77,
+     "offset_s": 8.017
+    },
+    {
+     "label": "C5-2",
+     "state": "failed",
+     "reason": "HOP_ACCEPT_TIMEOUT",
+     "latency_ms": 571.47,
+     "offset_s": 10.59
+    },
+    {
+     "label": "C5-3",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.1,
+     "offset_s": 12.697
+    },
+    {
+     "label": "C5-4",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.49,
+     "offset_s": 14.804
+    },
+    {
+     "label": "C5-5",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.94,
+     "offset_s": 16.911
+    },
+    {
+     "label": "C5-6",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 106.28,
+     "offset_s": 19.019
+    },
+    {
+     "label": "C5-7",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.33,
+     "offset_s": 21.127
+    },
+    {
+     "label": "C5-8",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 157.51,
+     "offset_s": 23.286
+    },
+    {
+     "label": "C5-9",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.12,
+     "offset_s": 25.393
+    }
+   ],
+   "recovery_s": 12.592,
+   "delivered": 7,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 6,
+   "released_unix": 1790789086.0678496,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C6-0",
+     "state": "failed",
+     "reason": "HOP_ACCEPT_TIMEOUT",
+     "latency_ms": 3160.92,
+     "offset_s": 3.162
+    },
+    {
+     "label": "C6-1",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.37,
+     "offset_s": 5.269
+    },
+    {
+     "label": "C6-2",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.28,
+     "offset_s": 7.376
+    },
+    {
+     "label": "C6-3",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.42,
+     "offset_s": 9.484
+    },
+    {
+     "label": "C6-4",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.16,
+     "offset_s": 11.591
+    },
+    {
+     "label": "C6-5",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.96,
+     "offset_s": 13.698
+    },
+    {
+     "label": "C6-6",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.16,
+     "offset_s": 15.805
+    },
+    {
+     "label": "C6-7",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.3,
+     "offset_s": 17.913
+    },
+    {
+     "label": "C6-8",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.14,
+     "offset_s": 20.02
+    },
+    {
+     "label": "C6-9",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 106.0,
+     "offset_s": 22.128
+    }
+   ],
+   "recovery_s": 5.164,
+   "delivered": 9,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 7,
+   "released_unix": 1790789112.6998272,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C7-0",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 2896.84,
+     "offset_s": 2.898
+    },
+    {
+     "label": "C7-1",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.26,
+     "offset_s": 5.006
+    },
+    {
+     "label": "C7-2",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.07,
+     "offset_s": 7.112
+    },
+    {
+     "label": "C7-3",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 106.08,
+     "offset_s": 9.22
+    },
+    {
+     "label": "C7-4",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.51,
+     "offset_s": 11.328
+    },
+    {
+     "label": "C7-5",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.42,
+     "offset_s": 13.434
+    },
+    {
+     "label": "C7-6",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.84,
+     "offset_s": 15.542
+    },
+    {
+     "label": "C7-7",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.22,
+     "offset_s": 17.649
+    },
+    {
+     "label": "C7-8",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.51,
+     "offset_s": 19.757
+    },
+    {
+     "label": "C7-9",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 106.47,
+     "offset_s": 21.866
+    }
+   ],
+   "recovery_s": 0.002,
+   "delivered": 10,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 8,
+   "released_unix": 1790789139.068962,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C8-0",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 2701.77,
+     "offset_s": 2.703
+    },
+    {
+     "label": "C8-1",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.4,
+     "offset_s": 4.811
+    },
+    {
+     "label": "C8-2",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.11,
+     "offset_s": 6.918
+    },
+    {
+     "label": "C8-3",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.52,
+     "offset_s": 9.025
+    },
+    {
+     "label": "C8-4",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.37,
+     "offset_s": 11.133
+    },
+    {
+     "label": "C8-5",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.55,
+     "offset_s": 13.24
+    },
+    {
+     "label": "C8-6",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.72,
+     "offset_s": 15.348
+    },
+    {
+     "label": "C8-7",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.25,
+     "offset_s": 17.455
+    },
+    {
+     "label": "C8-8",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.38,
+     "offset_s": 19.562
+    },
+    {
+     "label": "C8-9",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.9,
+     "offset_s": 21.67
+    }
+   ],
+   "recovery_s": 0.002,
+   "delivered": 10,
+   "idempotency_full": 0
+  },
+  {
+   "cycle": 9,
+   "released_unix": 1790789165.2425516,
+   "actual_hold_s": 0.5,
+   "sends": [
+    {
+     "label": "C9-0",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 4680.12,
+     "offset_s": 4.682
+    },
+    {
+     "label": "C9-1",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.73,
+     "offset_s": 6.788
+    },
+    {
+     "label": "C9-2",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 106.61,
+     "offset_s": 8.897
+    },
+    {
+     "label": "C9-3",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 106.31,
+     "offset_s": 11.005
+    },
+    {
+     "label": "C9-4",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.67,
+     "offset_s": 13.112
+    },
+    {
+     "label": "C9-5",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.41,
+     "offset_s": 15.219
+    },
+    {
+     "label": "C9-6",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 104.72,
+     "offset_s": 17.325
+    },
+    {
+     "label": "C9-7",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.84,
+     "offset_s": 19.433
+    },
+    {
+     "label": "C9-8",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.51,
+     "offset_s": 21.54
+    },
+    {
+     "label": "C9-9",
+     "state": "delivered",
+     "reason": "END_RECEIVED",
+     "latency_ms": 105.69,
+     "offset_s": 23.648
+    }
+   ],
+   "recovery_s": 0.002,
+   "delivered": 10,
+   "idempotency_full": 0
+  }
+ ],
+ "finished_unix": 1790789192.9195716,
+ "boot_failure_lines": [],
+ "summary": {
+  "baseline_delivered": 3,
+  "baseline_sends": 3,
+  "cycles": 10,
+  "sends_per_cycle": 10,
+  "delivered_total": 90,
+  "delivered_per_cycle": [
+   8,
+   10,
+   8,
+   9,
+   9,
+   7,
+   9,
+   10,
+   10,
+   10
+  ],
+  "cycles_recovered": 10,
+  "recovery_s_min": 0.002,
+  "recovery_s_max": 12.592,
+  "recovery_s_median": 5.111,
+  "idempotency_full_total": 0,
+  "boot_failures": 0
+ }
+}

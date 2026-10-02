@@ -1,0 +1,86 @@
+[
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/radio-driver/bridge-backup.log",
+    "retained_path": "build-review-raw/radio-driver/bridge-backup.log",
+    "bytes": 53248,
+    "sha256": "ecc3fac6dffa89dc3f40f000183d810571ca3a15d484247a3072bf9b96af6a2e"
+  },
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/radio-driver/bridge-readback.log",
+    "retained_path": "build-review-raw/radio-driver/bridge-readback.log",
+    "bytes": 53257,
+    "sha256": "c57911bc6930a6b68d2844697436d66c5c3977ab45951e69f03413c6a85c7d7b"
+  },
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/radio-driver/endpoint-backup.log",
+    "retained_path": "build-review-raw/radio-driver/endpoint-backup.log",
+    "bytes": 53343,
+    "sha256": "37874aa113f7c7de097c4c9efa2811c46e2990ca08197baf723601fa8625c0f5"
+  },
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/radio-driver/endpoint-readback.log",
+    "retained_path": "build-review-raw/radio-driver/endpoint-readback.log",
+    "bytes": 53352,
+    "sha256": "10fbf4172902c5890f956961eef4ec4cd617ca23c515ee50fd6de996f4fc7e55"
+  },
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/radio-driver/relay-backup.log",
+    "retained_path": "build-review-raw/radio-driver/relay-backup.log",
+    "bytes": 53364,
+    "sha256": "1011f94409f6d6435a5fa76714ce45d5808b8bfc6b95a946ca2b45eff1c14f02"
+  },
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/radio-driver/relay-readback.log",
+    "retained_path": "build-review-raw/radio-driver/relay-readback.log",
+    "bytes": 53349,
+    "sha256": "b41b992ccd9261ceffc339e4ab9dfb1a4f30e2739401163bf83d01a281465063"
+  },
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/radio-power/bridge-backup.log",
+    "retained_path": "build-review-raw/radio-power/bridge-backup.log",
+    "bytes": 53241,
+    "sha256": "aa2a8cb225988374a580cf40220647e683b4809b4fbf4d836e56830512133630"
+  },
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/radio-power/bridge-readback.log",
+    "retained_path": "build-review-raw/radio-power/bridge-readback.log",
+    "bytes": 53250,
+    "sha256": "c8a8c4d736723b09575a13d56ac8c4ee7e4119622d6e0df6721b0084d8d4893b"
+  },
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/radio-power/endpoint-backup.log",
+    "retained_path": "build-review-raw/radio-power/endpoint-backup.log",
+    "bytes": 53357,
+    "sha256": "73c4c9c8c8ede3ce1775bf412fd4136a4b0751914a52cfb2f93258c78d9d1876"
+  },
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/radio-power/endpoint-readback.log",
+    "retained_path": "build-review-raw/radio-power/endpoint-readback.log",
+    "bytes": 53345,
+    "sha256": "38191804f6a9151cffc7804c8a06cb1b99db34001354b87e5f4999412c17c80b"
+  },
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/radio-power/relay-backup.log",
+    "retained_path": "build-review-raw/radio-power/relay-backup.log",
+    "bytes": 53391,
+    "sha256": "1e0d15fa80197d0aa17295a4c556224b8aaf5e6bf5accc3aa856b9543be8ca9f"
+  },
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/radio-power/relay-readback.log",
+    "retained_path": "build-review-raw/radio-power/relay-readback.log",
+    "bytes": 53342,
+    "sha256": "ab77f05513f7ad3fc7da00f2dfe3f06d79592378924f4fe263873f50d1476cd2"
+  },
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/relay-reset/console.log",
+    "retained_path": "build-review-raw/relay-reset/console.log",
+    "bytes": 166794,
+    "sha256": "994224771ad82449cfc6dca054e8503bd9020319b0dabbf0cf998d9583f22288"
+  },
+  {
+    "original_path": "artifacts/hil/2026-10-01-stab-review/relay-reset/result.json",
+    "retained_path": "build-review-raw/relay-reset/result.json",
+    "bytes": 870275,
+    "sha256": "6444d12300150bfa119508a7e349cd993d4e49ded6c5554aee046b6f107f3063"
+  }
+]

@@ -11,7 +11,7 @@
 //! Custody honesty (§4.4 step 1, §4.10): the file-backed [`signer`] is a
 //! DEVELOPMENT path — a plaintext P-256 key file guarded by POSIX
 //! permissions is not production custody. Production custody is an offline
-//! machine or HSM behind the same [`RootSigner`] seam; the trait is the
+//! machine or HSM behind the same [`signer::RootSigner`] seam; the trait is the
 //! boundary, the HSM adapter is deliberately not implemented here.
 //!
 //! Modules:

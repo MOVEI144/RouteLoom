@@ -1,4 +1,4 @@
-//! [`SiteAdmin`] over the routeloom-host API1 socket, and the parsers of
+//! [`crate::site::SiteAdmin`] over the routeloom-host API1 socket, and the parsers of
 //! the daemon's Site Authority JSON (public so the daemon's own tests can
 //! check that what it emits is what this client reads).
 

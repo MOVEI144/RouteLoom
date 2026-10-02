@@ -653,25 +653,31 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
     observation_ = observation_build_(observation_slot, *this, observation_profile);
   }
 #if CONFIG_ROUTELOOM_ROLE_GATEWAY
-  // The gateway and config endpoints were attached in begin().
+  // The gateway and config endpoints were attached in begin(). A requested
+  // bit whose feature this image compiled out is a build choice, not a
+  // fault: the bit stays unadvertised and the node runs without it.
+  const auto optional = [](const Status& attached) {
+    if (attached.code == StatusCode::Unsupported) {
+      ESP_LOGW(kTag, "capability not advertised: %s", attached.detail);
+    } else if (!attached) {
+      fail(attached.detail);
+    }
+  };
   if ((config.usb_capability & usb::kCapM1DiagnosticsV1) != 0) {
     status = bridge_->attach_diagnostics();
     if (!status) fail(status.detail);
   }
   if ((config.usb_capability & usb::kCapNodeStatusV1) != 0) {
-    status = bridge_->attach_node_status();
-    if (!status) fail(status.detail);
+    optional(bridge_->attach_node_status());
   }
   if ((config.usb_capability & usb::kCapObservationV1) != 0) {
-    status = bridge_->attach_observation(*observation_);
-    if (!status) fail(status.detail);
+    optional(bridge_->attach_observation(*observation_));
   }
   // Receive assurance rides the observation profile id.
   status = bridge_->set_rx_assurance_profile(observation_profile);
   if (!status) fail(status.detail);
   if ((config.usb_capability & usb::kCapGroupDeliveryV1) != 0) {
-    status = bridge_->attach_group();
-    if (!status) fail(status.detail);
+    optional(bridge_->attach_group());
   }
 #else
   // Subtype-7 remote observation answers from the same source; the

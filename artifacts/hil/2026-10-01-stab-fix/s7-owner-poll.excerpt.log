@@ -1,0 +1,12 @@
+0 console-relay.log [2026-09-30T23:23:02.142+00:00] I (60477) RouteLoom: owner polls=14410 empty=14151 rxq_max=1 max_us rx=3033 bootstrap=15325 node=4063 security=689147
+0 console-relay.log [2026-09-30T23:24:02.219+00:00] I (120479) RouteLoom: owner polls=29358 empty=29033 rxq_max=1 max_us rx=3033 bootstrap=15325 node=4063 security=689147
+0 console-endpoint.log [2026-09-30T23:23:02.150+00:00] I (60470) RouteLoom: owner polls=13904 empty=13670 rxq_max=8 max_us rx=6525 bootstrap=496390 node=3779 security=689132
+0 console-endpoint.log [2026-09-30T23:24:02.230+00:00] I (120473) RouteLoom: owner polls=28861 empty=28561 rxq_max=8 max_us rx=6525 bootstrap=496390 node=3779 security=689132
+1 console-relay.log [2026-09-30T23:25:25.414+00:00] I (60478) RouteLoom: owner polls=14647 empty=14632 rxq_max=1 max_us rx=46 bootstrap=13758 node=671 security=689153
+1 console-relay.log [2026-09-30T23:26:25.499+00:00] I (120478) RouteLoom: owner polls=29742 empty=29713 rxq_max=1 max_us rx=55 bootstrap=13758 node=698 security=689153
+1 console-endpoint.log [2026-09-30T23:25:25.413+00:00] I (60468) RouteLoom: owner polls=14463 empty=14339 rxq_max=1 max_us rx=2802 bootstrap=4912 node=2998 security=689542
+1 console-endpoint.log [2026-09-30T23:26:25.498+00:00] I (120470) RouteLoom: owner polls=29400 empty=29222 rxq_max=1 max_us rx=2802 bootstrap=4912 node=2998 security=689542
+4 console-relay.log [2026-09-30T23:28:00.711+00:00] I (60480) RouteLoom: owner polls=13917 empty=13653 rxq_max=6 max_us rx=14460 bootstrap=5419 node=3493 security=689136
+4 console-relay.log [2026-09-30T23:29:00.794+00:00] I (120480) RouteLoom: owner polls=28870 empty=28546 rxq_max=6 max_us rx=14460 bootstrap=5419 node=3493 security=689136
+4 console-endpoint.log [2026-09-30T23:28:00.713+00:00] I (60470) RouteLoom: owner polls=14466 empty=14302 rxq_max=1 max_us rx=3956 bootstrap=14510 node=3391 security=689138
+4 console-endpoint.log [2026-09-30T23:29:00.799+00:00] I (120473) RouteLoom: owner polls=29426 empty=29201 rxq_max=1 max_us rx=3956 bootstrap=14510 node=3391 security=689138

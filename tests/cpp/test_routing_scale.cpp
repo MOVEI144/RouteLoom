@@ -443,6 +443,29 @@ static_assert(scoped_lifetime_sufficient(kFastPeriodMs, kFastLifetimeMs,
                                          kScopedDefaultRefreshTicks),
               "compressed test profile must satisfy the scoped lease rule");
 
+void test_fresh_binding_refreshes_a_stale_indirect_gateway() {
+  SimWorld w;
+  scoped_profile(w, 1, 5000, 90000);
+  for (NodeId id = 1; id <= 3; ++id) w.add(id);
+  w.start_all();
+  w.link(1, 3, 1, 1);
+  w.link(3, 2, 1, 1);
+  w.run(6000);
+  CHECK(w.at(2)->routes().best(1).generation == 1);
+  CHECK(w.at(2)->routes().best(1).next_hop == 3);
+  // The gateway reboots and binds directly to 2. Its old generation via 3
+  // is still feasible, so the ordinary gateway bootstrap pull is suppressed.
+  w.net.disconnect(1, 3);
+  w.remove_node(1);
+  w.add(1, 2);
+  CHECK_OK(w.at(1)->start(w.now));
+  w.link(1, 2, 1, 1);
+  w.run(250);
+  const auto fresh = w.at(2)->routes().best(1);
+  CHECK(fresh.valid && fresh.generation == 2 && fresh.next_hop == 1);
+  CHECK(w.at(1)->routes().best(2).generation == 1);
+}
+
 void test_tree_formation_and_cadence() {
   SimWorld w;
   scoped_profile(w, 1, kFastPeriodMs, kFastLifetimeMs);
@@ -2063,6 +2086,7 @@ int main(int argc, char** argv) {
     test_scoped_config_enforced();
     test_tombstone_outlives_lease();
     test_lost_route_and_previous_selection();
+    test_fresh_binding_refreshes_a_stale_indirect_gateway();
     test_tree_formation_and_cadence();
     test_repair_after_parent_loss();
     test_parent_switch_keeps_downward_reachability();

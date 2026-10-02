@@ -1,0 +1,24 @@
+[2026-09-30T14:28:35.598+00:00] !! opened
+[2026-09-30T14:28:39.202+00:00] W (673020) rl_migrate: migration event PHASE_PREPARING peer=0
+[2026-09-30T14:28:39.202+00:00] W (673021) RouteLoomRef: diagnostic reason=PHASE_PREPARING peer=0 message=none
+[2026-09-30T14:28:44.007+00:00] W (677847) rl_migrate: migration event CHANNEL_NOTICE peer=1
+[2026-09-30T14:28:44.007+00:00] W (677847) RouteLoomRef: diagnostic reason=CHANNEL_NOTICE peer=1 message=none
+[2026-09-30T14:28:44.208+00:00] W (678035) rl_migrate: migration event PHASE_COMMITTED peer=0
+[2026-09-30T14:28:44.208+00:00] W (678036) RouteLoomRef: diagnostic reason=PHASE_COMMITTED peer=0 message=none
+[2026-09-30T14:29:08.637+00:00] W (702609) rl_migrate: migration event PHASE_SWITCHING peer=0
+[2026-09-30T14:29:08.637+00:00] W (702609) RouteLoomRef: diagnostic reason=PHASE_SWITCHING peer=0 message=none
+[2026-09-30T14:29:08.637+00:00] I (702619) rl_migrate: radio generation now 2 after verified cutover
+[2026-09-30T14:29:08.637+00:00] W (702620) rl_migrate: migration event PHASE_VERIFYING peer=0
+[2026-09-30T14:29:08.637+00:00] W (702622) RouteLoomRef: diagnostic reason=PHASE_VERIFYING peer=0 message=none
+[2026-09-30T14:29:10.840+00:00] W (704742) rl_migrate: migration event VERIFY_PASSED peer=1
+[2026-09-30T14:29:10.840+00:00] W (704742) RouteLoomRef: diagnostic reason=VERIFY_PASSED peer=1 message=none
+[2026-09-30T14:29:10.840+00:00] W (704744) rl_migrate: migration event PHASE_STABLE peer=0
+[2026-09-30T14:29:10.840+00:00] W (704748) RouteLoomRef: diagnostic reason=PHASE_STABLE peer=0 message=none
+[2026-09-30T14:29:26.662+00:00] I (720501) RouteLoom: stack hwm rl_owner 8648 B
+[2026-09-30T14:29:26.662+00:00] I (720501) RouteLoom: owner polls=176267 empty=173795 rxq_max=4 max_us rx=132597 bootstrap=343051 node=15021 security=695580
+[2026-09-30T14:29:26.662+00:00] I (720506) RouteLoom: owner expiry_slots=63455040 hop_accept_expired=30
+[2026-09-30T14:29:26.662+00:00] I (720512) RouteLoom: HIL HEAP free=90672 largest=73728 min=89872 B
+[2026-09-30T14:29:26.662+00:00] I (720518) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=2 busy=0 quarantined=0 fenced=0 tx_ok=273 tx_failed=69 stale=0 send_errors=0 last_error=0x0 rx=1656 rx_other_channel=0
+[2026-09-30T14:29:26.662+00:00] I (720534) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=22 stale=0 probes=91 send_failures=770 kind_rejects=0
+[2026-09-30T14:29:26.662+00:00] I (720546) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=186 seq=1
+[2026-09-30T14:29:26.662+00:00] I (720553) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0

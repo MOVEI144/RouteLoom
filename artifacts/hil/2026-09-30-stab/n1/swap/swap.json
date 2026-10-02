@@ -1,0 +1,12 @@
+{
+  "bridge": {
+    "bundle": "sb-br-n1",
+    "app_sha256": "a81ed1ab28f9b632ccc447e3a2524c3c64c379b608fe9e243c3460e16022cc47",
+    "app_bytes": 1211776,
+    "nvs_preserved": {
+      "rlcfg": true,
+      "rlkeys": true,
+      "rlsec": true
+    }
+  }
+}

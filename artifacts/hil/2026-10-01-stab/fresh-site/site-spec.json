@@ -1,0 +1,11 @@
+{
+  "format": "routeloom-lab-site-spec-v1",
+  "site_id": "04417e572004a015",
+  "device_ca_id": "04417e572004a016",
+  "site_ca_id": "04417e572004a017",
+  "network_low32": "73746162",
+  "channel": 6,
+  "gateways": [
+    "0000000000000001"
+  ]
+}

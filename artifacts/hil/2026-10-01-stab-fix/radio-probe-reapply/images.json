@@ -1,0 +1,23 @@
+{
+  "source_sha": "088937883563767072253f4f8c4b3b586811dfaf",
+  "images": {
+    "bridge": {
+      "original_ota_sha256": "08fcb0ca3305f7082286a6a9b1dc81babaeeb076396167c7bae63bdca9328d50",
+      "probe_sha256": "f076dded6c89cc157b1044c3379cd7ed948c54cd53d19dd49cc7da49b6730f18"
+    },
+    "relay": {
+      "original_ota_sha256": "2955689c37e345ca742d8ed4d0b3a99acc7afdef5d1fb360e04255121750c79c",
+      "probe_sha256": "52a78ffaecd0245ab6ee0d47c58eb3ad05fa4184b5b8aecff610ef6a8e4eafc5"
+    },
+    "endpoint": {
+      "original_ota_sha256": "16a9619db6de22970f20ace5d72797677d0400481be029af7b7ed53688aa1ced",
+      "probe_sha256": "52a78ffaecd0245ab6ee0d47c58eb3ad05fa4184b5b8aecff610ef6a8e4eafc5"
+    }
+  },
+  "restored": {
+    "bridge": true,
+    "relay": true,
+    "endpoint": true
+  },
+  "restore_errors": []
+}

@@ -853,7 +853,9 @@ impl MeshWorld {
             .service
             .with(|a| a.drop_gateway_relays(testkit::GATEWAY, self.now));
         self.provision.usb.close();
+        let daemon = self.usb_host.daemon.take();
         self.usb_host = UsbHost::new(&self.hostlink_dir);
+        self.usb_host.daemon = daemon;
         self.usb_incarnation += 1;
         let incarnation = self.usb_incarnation;
         let join = UsbSiteAdapter::new(testkit::GATEWAY, incarnation);

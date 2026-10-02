@@ -1,0 +1,16 @@
+[2026-10-01T01:57:15.754Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-10-01T01:57:15.755Z] I (97) boot:  7 ota_1            OTA app          00 11 00210000of partition table
+[2026-10-01T01:57:15.759Z] I (113) boot: No factory image, trying OTA 0
+[2026-10-01T01:57:15.767Z] I (117) esp_image: segment 0: paddr=00040020 vaddr=42040020 size=0fe08h ( 65032) map
+[2026-10-01T01:57:15.780Z] I (137) esp_image: segment 1: paddr=0004fe30 vaddr=40800000 size=001e8h (   488) load
+[2026-10-01T01:57:15.783Z] I (138) esp_image: segment 2: paddr=00050020 vaddr=42000020 size=39de0h (237024) map
+[2026-10-01T01:57:15.827Z] I (185) esp_image: segment 3: paddr=00089e08 vaddr=408001e8 size=12de4h ( 77284) load
+[2026-10-01T01:57:15.844Z] I (201) esp_image: segment 4: paddr=0009cbf4 vaddr=40812fd0 size=02b88h ( 11144) load
+[2026-10-01T01:57:15.847Z] I (205) esp_image: segment 5: paddr=0009f784 vaddr=50000000 size=00044h (    68) load
+[2026-10-01T01:57:15.855Z] I (206) esp_image: segment 6: paddr=0009f7d0 vaddr=5000004c size=00024h (    36) load
+[2026-10-01T01:57:15.860Z] I (217) boot: Loaded app from partition at offset 0x40000
+[2026-10-01T01:57:15.864Z] I (220) boot: Set actual ota_seq=1 in otadata[0]
+[2026-10-01T01:57:15.869Z] I (222) boot: Disabling RNG early entropy source...
+[2026-10-01T01:57:15.881Z] I (239) cpu_start: Unicore app
+[2026-10-01T01:57:17.479Z] !! serial read error on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00: pyserial read failed: device reports readiness to read but returned no data (device disconnected or multiple access on port?)
+[2026-10-01T01:57:18.754Z] !! capture closed

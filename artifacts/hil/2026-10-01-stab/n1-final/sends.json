@@ -1,0 +1,96 @@
+{
+  "adapter": {
+    "device": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00",
+    "connected": true,
+    "session": {
+      "authenticated": true,
+      "id": 11716107948491904067,
+      "node": 1,
+      "boot": 20,
+      "network": 6231974242,
+      "capability": 7719,
+      "version": 2
+    },
+    "credit": {
+      "observed": true,
+      "grant_frames": 20,
+      "grant_bytes": 17564
+    },
+    "rx_frames": 88,
+    "tx_frames": 21,
+    "tx_bytes": 1787,
+    "protocol_errors": 1,
+    "last_error": "InvalidCobs"
+  },
+  "sends": [
+    {
+      "accepted": true,
+      "request": 1
+    },
+    {
+      "accepted": true,
+      "request": 2
+    },
+    {
+      "accepted": true,
+      "request": 3
+    },
+    {
+      "accepted": true,
+      "request": 4
+    },
+    {
+      "accepted": true,
+      "request": 5
+    }
+  ],
+  "deliveries": [
+    {
+      "request": 1,
+      "destination": 3,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 169563976,
+      "msg_seq": 1,
+      "updated_ms": 1790803344251
+    },
+    {
+      "request": 2,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 169563976,
+      "msg_seq": 4,
+      "updated_ms": 1790803344698
+    },
+    {
+      "request": 3,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 169563976,
+      "msg_seq": 8,
+      "updated_ms": 1790803344710
+    },
+    {
+      "request": 4,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 169563976,
+      "msg_seq": 19,
+      "updated_ms": 1790803344739
+    },
+    {
+      "request": 5,
+      "destination": 3,
+      "state": "delivered",
+      "reason": "END_RECEIVED",
+      "msg_session": 169563976,
+      "msg_seq": 27,
+      "updated_ms": 1790803345302
+    }
+  ],
+  "delivered": 4,
+  "node_status_bit": false
+}

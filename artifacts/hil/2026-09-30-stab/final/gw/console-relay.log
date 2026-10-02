@@ -1,0 +1,447 @@
+[2026-09-30T14:20:36.699+00:00] !! opened
+[2026-09-30T14:20:39.903+00:00] I (193772) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:20:39.903+00:00] W (193772) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:20:40.904+00:00] W (194760) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:20:41.104+00:00] W (194937) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:20:41.104+00:00] I (195006) RouteLoomRef: message origin=1 session=4074323218 sequence=6 bytes=6
+[2026-09-30T14:20:41.104+00:00] I (195019) RouteLoomRef: message origin=1 session=4074323218 sequence=1 bytes=6
+[2026-09-30T14:20:43.106+00:00] I (196985) RouteLoomRef: message origin=1 session=4074323218 sequence=10 bytes=6
+[2026-09-30T14:20:45.108+00:00] I (198989) RouteLoomRef: message origin=1 session=4074323218 sequence=11 bytes=6
+[2026-09-30T14:20:47.111+00:00] I (200989) RouteLoomRef: message origin=1 session=4074323218 sequence=12 bytes=6
+[2026-09-30T14:20:49.114+00:00] I (202998) RouteLoomRef: message origin=1 session=4074323218 sequence=13 bytes=6
+[2026-09-30T14:20:49.114+00:00] W (203090) RouteLoomRef: diagnostic reason=ROUTE_HELD_DOWN peer=1 message=none
+[2026-09-30T14:20:51.117+00:00] I (204995) RouteLoomRef: message origin=1 session=4074323218 sequence=14 bytes=6
+[2026-09-30T14:20:53.120+00:00] I (207004) RouteLoomRef: message origin=1 session=4074323218 sequence=15 bytes=6
+[2026-09-30T14:20:55.122+00:00] I (209005) RouteLoomRef: message origin=1 session=4074323218 sequence=16 bytes=6
+[2026-09-30T14:20:57.125+00:00] I (211010) RouteLoomRef: message origin=1 session=4074323218 sequence=17 bytes=6
+[2026-09-30T14:21:01.931+00:00] W (215786) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:21:01.931+00:00] I (215803) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:21:01.931+00:00] W (215804) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:21:04.134+00:00] W (217937) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:21:04.734+00:00] W (218543) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:21:04.734+00:00] W (218564) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:21:04.734+00:00] I (218715) RouteLoomRef: message origin=1 session=2945238388 sequence=2 bytes=6
+[2026-09-30T14:21:04.734+00:00] I (218728) RouteLoomRef: message origin=1 session=2945238388 sequence=1 bytes=6
+[2026-09-30T14:21:05.335+00:00] I (219278) RouteLoomRef: message origin=1 session=2945238388 sequence=7 bytes=6
+[2026-09-30T14:21:07.337+00:00] I (221277) RouteLoomRef: message origin=1 session=2945238388 sequence=10 bytes=6
+[2026-09-30T14:21:09.340+00:00] I (223282) RouteLoomRef: message origin=1 session=2945238388 sequence=11 bytes=6
+[2026-09-30T14:21:11.343+00:00] I (225286) RouteLoomRef: message origin=1 session=2945238388 sequence=12 bytes=6
+[2026-09-30T14:21:13.345+00:00] I (227287) RouteLoomRef: message origin=1 session=2945238388 sequence=13 bytes=6
+[2026-09-30T14:21:15.348+00:00] I (229291) RouteLoomRef: message origin=1 session=2945238388 sequence=14 bytes=6
+[2026-09-30T14:21:17.350+00:00] I (231292) RouteLoomRef: message origin=1 session=2945238388 sequence=15 bytes=6
+[2026-09-30T14:21:19.352+00:00] I (233300) RouteLoomRef: message origin=1 session=2945238388 sequence=16 bytes=6
+[2026-09-30T14:21:23.758+00:00] W (237712) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:21:23.758+00:00] I (237733) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:21:23.758+00:00] W (237733) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:21:25.961+00:00] W (239919) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:21:26.362+00:00] W (240342) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:21:26.362+00:00] W (240356) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:21:26.562+00:00] I (240433) RouteLoomRef: message origin=1 session=49845421 sequence=1 bytes=6
+[2026-09-30T14:21:26.562+00:00] I (240466) RouteLoomRef: message origin=1 session=49845421 sequence=2 bytes=6
+[2026-09-30T14:21:26.562+00:00] I (240490) RouteLoom: stack hwm rl_owner 10328 B
+[2026-09-30T14:21:26.562+00:00] I (240491) RouteLoom: owner polls=59265 empty=58792 rxq_max=1 max_us rx=3462 bootstrap=14478 node=3267 security=695580
+[2026-09-30T14:21:26.562+00:00] I (240495) RouteLoom: owner expiry_slots=21334320 hop_accept_expired=1
+[2026-09-30T14:21:26.562+00:00] I (240501) RouteLoom: HIL HEAP free=90568 largest=73728 min=90064 B
+[2026-09-30T14:21:26.562+00:00] I (240507) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=92 tx_failed=10 stale=0 send_errors=0 last_error=0x0 rx=323 rx_other_channel=0
+[2026-09-30T14:21:26.562+00:00] I (240523) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=4 stale=0 probes=22 send_failures=34 kind_rejects=0
+[2026-09-30T14:21:26.562+00:00] I (240534) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=169 seq=1
+[2026-09-30T14:21:26.562+00:00] I (240542) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T14:21:26.962+00:00] W (240809) RouteLoomRef: diagnostic reason=BOOTSTRAP_NO_ACK_SLOT peer=1 message=present
+[2026-09-30T14:21:26.962+00:00] W (240914) RouteLoomRef: diagnostic reason=BOOTSTRAP_NO_ACK_SLOT peer=1 message=present
+[2026-09-30T14:21:27.763+00:00] I (241572) RouteLoomRef: message origin=1 session=49845421 sequence=8 bytes=6
+[2026-09-30T14:21:29.565+00:00] I (243568) RouteLoomRef: message origin=1 session=49845421 sequence=10 bytes=6
+[2026-09-30T14:21:31.568+00:00] I (245571) RouteLoomRef: message origin=1 session=49845421 sequence=11 bytes=6
+[2026-09-30T14:21:33.771+00:00] I (247575) RouteLoomRef: message origin=1 session=49845421 sequence=12 bytes=6
+[2026-09-30T14:21:35.774+00:00] I (249578) RouteLoomRef: message origin=1 session=49845421 sequence=13 bytes=6
+[2026-09-30T14:21:37.777+00:00] I (251580) RouteLoomRef: message origin=1 session=49845421 sequence=14 bytes=6
+[2026-09-30T14:21:39.780+00:00] I (253585) RouteLoomRef: message origin=1 session=49845421 sequence=15 bytes=6
+[2026-09-30T14:21:41.583+00:00] I (255586) RouteLoomRef: message origin=1 session=49845421 sequence=16 bytes=6
+[2026-09-30T14:21:48.392+00:00] W (262209) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:21:48.392+00:00] I (262230) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:21:48.392+00:00] W (262230) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:21:50.395+00:00] W (264277) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:21:50.996+00:00] W (264843) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:21:50.996+00:00] W (264870) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:21:50.996+00:00] I (264923) RouteLoomRef: message origin=1 session=4019957037 sequence=3 bytes=6
+[2026-09-30T14:21:50.996+00:00] I (264943) RouteLoomRef: message origin=1 session=4019957037 sequence=2 bytes=6
+[2026-09-30T14:21:51.396+00:00] W (265296) RouteLoomRef: diagnostic reason=BOOTSTRAP_NO_ACK_SLOT peer=1 message=present
+[2026-09-30T14:21:51.396+00:00] W (265340) RouteLoomRef: diagnostic reason=BOOTSTRAP_NO_ACK_SLOT peer=1 message=present
+[2026-09-30T14:21:51.997+00:00] I (265864) RouteLoomRef: message origin=1 session=4019957037 sequence=9 bytes=6
+[2026-09-30T14:21:52.397+00:00] W (266298) RouteLoomRef: diagnostic reason=BOOTSTRAP_NO_ACK_SLOT peer=1 message=present
+[2026-09-30T14:21:52.397+00:00] W (266369) RouteLoomRef: diagnostic reason=BOOTSTRAP_NO_ACK_SLOT peer=1 message=present
+[2026-09-30T14:21:54.000+00:00] I (267860) RouteLoomRef: message origin=1 session=4019957037 sequence=11 bytes=6
+[2026-09-30T14:21:56.002+00:00] I (269862) RouteLoomRef: message origin=1 session=4019957037 sequence=12 bytes=6
+[2026-09-30T14:21:58.004+00:00] W (271868) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:21:58.004+00:00] W (271880) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:22:00.007+00:00] W (273881) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:22:00.207+00:00] W (274203) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:22:00.808+00:00] W (274687) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:22:02.009+00:00] W (275884) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:22:02.209+00:00] W (276202) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:22:04.011+00:00] W (277886) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:22:04.211+00:00] W (278204) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:22:05.813+00:00] W (279690) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:22:06.013+00:00] W (279887) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:22:06.214+00:00] W (280213) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:22:08.016+00:00] W (281889) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:22:08.216+00:00] W (282207) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=none
+[2026-09-30T14:22:12.420+00:00] W (286245) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:22:12.420+00:00] I (286264) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:22:12.420+00:00] W (286264) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:22:14.623+00:00] W (288430) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:22:15.825+00:00] W (289696) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:22:15.825+00:00] W (289709) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:22:15.825+00:00] W (289718) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:22:15.825+00:00] W (289732) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:22:15.825+00:00] W (289745) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:22:15.825+00:00] W (289758) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:22:15.825+00:00] W (289771) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:22:15.825+00:00] W (289780) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:22:16.025+00:00] W (289914) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:22:16.025+00:00] W (289967) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:22:16.425+00:00] W (290247) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:22:16.425+00:00] W (290249) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:22:16.425+00:00] W (290415) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:22:16.425+00:00] I (290426) RouteLoomRef: message origin=1 session=1766529018 sequence=18 bytes=6
+[2026-09-30T14:22:16.626+00:00] I (290450) RouteLoomRef: message origin=1 session=1766529018 sequence=1 bytes=6
+[2026-09-30T14:22:16.626+00:00] I (290465) RouteLoomRef: message origin=1 session=1766529018 sequence=2 bytes=6
+[2026-09-30T14:22:16.826+00:00] W (290746) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:22:18.227+00:00] I (292160) RouteLoomRef: message origin=1 session=1766529018 sequence=21 bytes=6
+[2026-09-30T14:22:20.230+00:00] I (294159) RouteLoomRef: message origin=1 session=1766529018 sequence=22 bytes=6
+[2026-09-30T14:22:22.232+00:00] I (296164) RouteLoomRef: message origin=1 session=1766529018 sequence=23 bytes=6
+[2026-09-30T14:22:24.235+00:00] I (298163) RouteLoomRef: message origin=1 session=1766529018 sequence=24 bytes=6
+[2026-09-30T14:22:26.237+00:00] I (300168) RouteLoomRef: message origin=1 session=1766529018 sequence=25 bytes=6
+[2026-09-30T14:22:26.638+00:00] I (300490) RouteLoom: stack hwm rl_owner 8648 B
+[2026-09-30T14:22:26.638+00:00] I (300490) RouteLoom: owner polls=73776 empty=72957 rxq_max=4 max_us rx=7039 bootstrap=342762 node=3267 security=695580
+[2026-09-30T14:22:26.638+00:00] I (300494) RouteLoom: owner expiry_slots=26558280 hop_accept_expired=10
+[2026-09-30T14:22:26.638+00:00] I (300500) RouteLoom: HIL HEAP free=90928 largest=73728 min=90048 B
+[2026-09-30T14:22:26.638+00:00] I (300507) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=124 tx_failed=12 stale=0 send_errors=0 last_error=0x0 rx=551 rx_other_channel=0
+[2026-09-30T14:22:26.638+00:00] I (300523) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=6 stale=0 probes=34 send_failures=47 kind_rejects=0
+[2026-09-30T14:22:26.638+00:00] I (300534) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=171 seq=1
+[2026-09-30T14:22:26.638+00:00] I (300541) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T14:22:28.240+00:00] I (302172) RouteLoomRef: message origin=1 session=1766529018 sequence=26 bytes=6
+[2026-09-30T14:22:30.243+00:00] I (304177) RouteLoomRef: message origin=1 session=1766529018 sequence=27 bytes=6
+[2026-09-30T14:22:34.648+00:00] I (308559) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:22:34.648+00:00] W (308560) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:22:35.649+00:00] W (309566) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:22:35.849+00:00] W (309802) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:22:36.050+00:00] I (309862) RouteLoomRef: message origin=1 session=2114339284 sequence=1 bytes=6
+[2026-09-30T14:22:36.450+00:00] I (310446) RouteLoomRef: message origin=1 session=2114339284 sequence=7 bytes=6
+[2026-09-30T14:22:38.452+00:00] I (312444) RouteLoomRef: message origin=1 session=2114339284 sequence=10 bytes=6
+[2026-09-30T14:22:40.455+00:00] I (314445) RouteLoomRef: message origin=1 session=2114339284 sequence=11 bytes=6
+[2026-09-30T14:22:42.457+00:00] I (316449) RouteLoomRef: message origin=1 session=2114339284 sequence=12 bytes=6
+[2026-09-30T14:22:44.460+00:00] I (318455) RouteLoomRef: message origin=1 session=2114339284 sequence=13 bytes=6
+[2026-09-30T14:22:46.463+00:00] I (320454) RouteLoomRef: message origin=1 session=2114339284 sequence=14 bytes=6
+[2026-09-30T14:22:48.466+00:00] I (322458) RouteLoomRef: message origin=1 session=2114339284 sequence=15 bytes=6
+[2026-09-30T14:22:50.468+00:00] I (324471) RouteLoomRef: message origin=1 session=2114339284 sequence=16 bytes=6
+[2026-09-30T14:22:52.471+00:00] I (326469) RouteLoomRef: message origin=1 session=2114339284 sequence=17 bytes=6
+[2026-09-30T14:22:57.078+00:00] I (330976) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:22:57.078+00:00] W (330976) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:22:57.278+00:00] W (331187) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:22:57.278+00:00] W (331200) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:22:57.278+00:00] I (331249) RouteLoomRef: message origin=1 session=3022860647 sequence=1 bytes=6
+[2026-09-30T14:22:58.880+00:00] I (332729) RouteLoomRef: message origin=1 session=3022860647 sequence=7 bytes=6
+[2026-09-30T14:23:00.883+00:00] I (334732) RouteLoomRef: message origin=1 session=3022860647 sequence=8 bytes=6
+[2026-09-30T14:23:02.886+00:00] I (336735) RouteLoomRef: message origin=1 session=3022860647 sequence=9 bytes=6
+[2026-09-30T14:23:04.888+00:00] I (338738) RouteLoomRef: message origin=1 session=3022860647 sequence=10 bytes=6
+[2026-09-30T14:23:06.891+00:00] I (340742) RouteLoomRef: message origin=1 session=3022860647 sequence=11 bytes=6
+[2026-09-30T14:23:08.893+00:00] I (342743) RouteLoomRef: message origin=1 session=3022860647 sequence=12 bytes=6
+[2026-09-30T14:23:10.896+00:00] I (344750) RouteLoomRef: message origin=1 session=3022860647 sequence=13 bytes=6
+[2026-09-30T14:23:12.898+00:00] I (346754) RouteLoomRef: message origin=1 session=3022860647 sequence=14 bytes=6
+[2026-09-30T14:23:14.900+00:00] I (348761) RouteLoomRef: message origin=1 session=3022860647 sequence=15 bytes=6
+[2026-09-30T14:23:19.305+00:00] W (353282) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:23:19.305+00:00] I (353300) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:23:19.305+00:00] W (353301) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:23:21.508+00:00] W (355391) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:23:21.508+00:00] W (355470) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:23:21.508+00:00] W (355493) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:23:21.709+00:00] I (355529) RouteLoomRef: message origin=1 session=828683450 sequence=1 bytes=6
+[2026-09-30T14:23:21.709+00:00] I (355542) RouteLoomRef: message origin=1 session=828683450 sequence=2 bytes=6
+[2026-09-30T14:23:23.111+00:00] I (357017) RouteLoomRef: message origin=1 session=828683450 sequence=8 bytes=6
+[2026-09-30T14:23:25.114+00:00] I (359019) RouteLoomRef: message origin=1 session=828683450 sequence=9 bytes=6
+[2026-09-30T14:23:26.516+00:00] I (360491) RouteLoom: stack hwm rl_owner 8648 B
+[2026-09-30T14:23:26.516+00:00] I (360491) RouteLoom: owner polls=88642 empty=87610 rxq_max=4 max_us rx=7039 bootstrap=342762 node=3267 security=695580
+[2026-09-30T14:23:26.516+00:00] I (360495) RouteLoom: owner expiry_slots=31910040 hop_accept_expired=10
+[2026-09-30T14:23:26.516+00:00] I (360501) RouteLoom: HIL HEAP free=90928 largest=73728 min=90048 B
+[2026-09-30T14:23:26.716+00:00] I (360508) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=141 tx_failed=14 stale=0 send_errors=0 last_error=0x0 rx=703 rx_other_channel=0
+[2026-09-30T14:23:26.716+00:00] I (360524) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=9 stale=0 probes=44 send_failures=49 kind_rejects=0
+[2026-09-30T14:23:26.716+00:00] I (360535) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=174 seq=1
+[2026-09-30T14:23:26.716+00:00] I (360542) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T14:23:27.116+00:00] I (361024) RouteLoomRef: message origin=1 session=828683450 sequence=10 bytes=6
+[2026-09-30T14:23:29.119+00:00] I (363029) RouteLoomRef: message origin=1 session=828683450 sequence=11 bytes=6
+[2026-09-30T14:23:31.121+00:00] I (365028) RouteLoomRef: message origin=1 session=828683450 sequence=12 bytes=6
+[2026-09-30T14:23:33.124+00:00] I (367034) RouteLoomRef: message origin=1 session=828683450 sequence=13 bytes=6
+[2026-09-30T14:23:35.126+00:00] I (369032) RouteLoomRef: message origin=1 session=828683450 sequence=14 bytes=6
+[2026-09-30T14:23:37.128+00:00] I (371044) RouteLoomRef: message origin=1 session=828683450 sequence=15 bytes=6
+[2026-09-30T14:23:41.534+00:00] W (375417) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:23:41.534+00:00] I (375503) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:23:41.534+00:00] W (375504) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:23:49.343+00:00] W (383315) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:49.744+00:00] W (383604) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:50.144+00:00] W (384011) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:50.545+00:00] W (384411) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:50.945+00:00] W (384827) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:51.346+00:00] W (385331) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:51.946+00:00] W (385827) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:52.347+00:00] W (386333) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:52.947+00:00] W (386942) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:53.348+00:00] W (387233) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:53.748+00:00] W (387640) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:54.149+00:00] W (388034) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:54.549+00:00] W (388457) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:55.150+00:00] W (388961) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:55.550+00:00] W (389465) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:56.151+00:00] W (389972) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:56.752+00:00] W (390578) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:56.952+00:00] W (390866) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:57.353+00:00] W (391265) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:57.753+00:00] W (391669) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:58.154+00:00] W (392086) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:58.755+00:00] W (392590) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:59.155+00:00] W (393088) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:23:59.756+00:00] W (393595) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:00.357+00:00] W (394206) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:00.557+00:00] W (394490) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:00.957+00:00] W (394900) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:01.358+00:00] W (395304) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:01.758+00:00] W (395727) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:02.359+00:00] W (396222) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:02.759+00:00] W (396730) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:03.360+00:00] W (397231) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:03.560+00:00] I (397413) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T14:24:03.560+00:00] W (397414) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T14:24:03.961+00:00] W (397846) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:04.361+00:00] W (398196) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:04.562+00:00] W (398533) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:04.962+00:00] W (398939) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:13.575+00:00] I (407408) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-30T14:24:13.575+00:00] W (407408) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-30T14:24:13.575+00:00] I (407410) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T14:24:13.575+00:00] W (407415) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T14:24:20.790+00:00] W (414670) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:24:20.790+00:00] I (414755) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:24:20.790+00:00] W (414756) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:24:26.601+00:00] I (420494) RouteLoom: stack hwm rl_owner 8648 B
+[2026-09-30T14:24:26.601+00:00] I (420494) RouteLoom: owner polls=103077 empty=101760 rxq_max=4 max_us rx=7039 bootstrap=342762 node=3267 security=695580
+[2026-09-30T14:24:26.601+00:00] I (420498) RouteLoom: owner expiry_slots=37106640 hop_accept_expired=10
+[2026-09-30T14:24:26.601+00:00] I (420505) RouteLoom: HIL HEAP free=90928 largest=73728 min=90048 B
+[2026-09-30T14:24:26.601+00:00] I (420511) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=159 tx_failed=23 stale=0 send_errors=0 last_error=0x0 rx=877 rx_other_channel=0
+[2026-09-30T14:24:26.601+00:00] I (420527) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=11 stale=0 probes=52 send_failures=297 kind_rejects=0
+[2026-09-30T14:24:26.601+00:00] I (420538) RouteLoom: HIL ROUTE peer=1 phase=5 via=0 metric=0 generation=0 seq=0
+[2026-09-30T14:24:26.601+00:00] I (420546) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T14:24:33.816+00:00] W (427620) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:24:33.816+00:00] I (427674) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:24:33.816+00:00] W (427674) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:24:35.218+00:00] W (429030) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:24:35.619+00:00] W (429462) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:24:45.856+00:00] W (439660) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:46.056+00:00] W (439942) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:46.457+00:00] W (440349) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:46.857+00:00] W (440750) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:47.258+00:00] W (441165) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:47.858+00:00] W (441663) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:48.259+00:00] W (442171) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:48.860+00:00] W (442669) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:49.461+00:00] W (443278) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:49.661+00:00] W (443574) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:50.061+00:00] W (443976) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:50.462+00:00] W (444381) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:50.862+00:00] W (444810) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:51.463+00:00] W (445310) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:51.864+00:00] W (445808) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:52.465+00:00] W (446311) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:53.066+00:00] W (446969) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:53.266+00:00] W (447202) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:53.667+00:00] W (447615) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:54.067+00:00] W (448021) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:54.468+00:00] W (448438) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:55.069+00:00] W (448936) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:55.469+00:00] W (449439) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:56.070+00:00] W (449974) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:56.671+00:00] W (450556) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:56.872+00:00] W (450841) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:24:58.474+00:00] I (452346) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T14:24:58.474+00:00] W (452347) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T14:25:05.085+00:00] I (458909) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T14:25:05.085+00:00] W (458909) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T14:25:17.704+00:00] I (471566) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T14:25:17.704+00:00] W (471567) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T14:25:20.909+00:00] I (474808) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:25:20.909+00:00] W (474808) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:25:21.509+00:00] W (475418) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:25:21.710+00:00] W (475576) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:25:21.710+00:00] I (475661) RouteLoomRef: message origin=1 session=464874482 sequence=10 bytes=7
+[2026-09-30T14:25:25.715+00:00] W (479551) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:25:25.715+00:00] I (479569) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:25:25.715+00:00] W (479570) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:25:26.516+00:00] I (480496) RouteLoom: stack hwm rl_owner 8648 B
+[2026-09-30T14:25:26.516+00:00] I (480496) RouteLoom: owner polls=117261 empty=115633 rxq_max=4 max_us rx=7039 bootstrap=343051 node=3267 security=695580
+[2026-09-30T14:25:26.516+00:00] I (480500) RouteLoom: owner expiry_slots=42212880 hop_accept_expired=12
+[2026-09-30T14:25:26.516+00:00] I (480507) RouteLoom: HIL HEAP free=90928 largest=73728 min=89940 B
+[2026-09-30T14:25:26.716+00:00] I (480513) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=199 tx_failed=66 stale=0 send_errors=0 last_error=0x0 rx=1056 rx_other_channel=0
+[2026-09-30T14:25:26.717+00:00] I (480529) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=15 stale=0 probes=64 send_failures=740 kind_rejects=0
+[2026-09-30T14:25:26.717+00:00] I (480540) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=178 seq=0
+[2026-09-30T14:25:26.717+00:00] I (480548) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T14:25:27.718+00:00] W (481678) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:25:27.718+00:00] W (481702) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:25:27.918+00:00] I (481749) RouteLoomRef: message origin=1 session=3786381710 sequence=1 bytes=7
+[2026-09-30T14:25:27.918+00:00] I (481762) RouteLoomRef: message origin=1 session=3786381710 sequence=2 bytes=7
+[2026-09-30T14:25:28.719+00:00] I (482621) RouteLoomRef: message origin=1 session=3786381710 sequence=6 bytes=7
+[2026-09-30T14:25:30.721+00:00] I (484627) RouteLoomRef: message origin=1 session=3786381710 sequence=9 bytes=7
+[2026-09-30T14:25:32.724+00:00] I (486630) RouteLoomRef: message origin=1 session=3786381710 sequence=10 bytes=7
+[2026-09-30T14:25:34.727+00:00] I (488638) RouteLoomRef: message origin=1 session=3786381710 sequence=11 bytes=7
+[2026-09-30T14:25:36.730+00:00] I (490644) RouteLoomRef: message origin=1 session=3786381710 sequence=12 bytes=7
+[2026-09-30T14:25:38.732+00:00] I (492659) RouteLoomRef: message origin=1 session=3786381710 sequence=13 bytes=7
+[2026-09-30T14:25:40.735+00:00] I (494664) RouteLoomRef: message origin=1 session=3786381710 sequence=14 bytes=7
+[2026-09-30T14:25:42.737+00:00] I (496671) RouteLoomRef: message origin=1 session=3786381710 sequence=15 bytes=7
+[2026-09-30T14:25:47.543+00:00] W (501385) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:25:47.543+00:00] I (501403) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:25:47.543+00:00] W (501403) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:25:49.546+00:00] W (503528) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:25:50.147+00:00] W (504051) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:25:50.147+00:00] W (504073) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:25:50.147+00:00] I (504137) RouteLoomRef: message origin=1 session=3550612762 sequence=2 bytes=7
+[2026-09-30T14:25:50.347+00:00] I (504158) RouteLoomRef: message origin=1 session=3550612762 sequence=1 bytes=7
+[2026-09-30T14:25:51.148+00:00] I (505005) RouteLoomRef: message origin=1 session=3550612762 sequence=7 bytes=7
+[2026-09-30T14:25:53.151+00:00] I (507007) RouteLoomRef: message origin=1 session=3550612762 sequence=10 bytes=7
+[2026-09-30T14:25:55.154+00:00] I (509027) RouteLoomRef: message origin=1 session=3550612762 sequence=11 bytes=7
+[2026-09-30T14:25:57.156+00:00] I (511035) RouteLoomRef: message origin=1 session=3550612762 sequence=12 bytes=7
+[2026-09-30T14:25:59.159+00:00] I (513042) RouteLoomRef: message origin=1 session=3550612762 sequence=13 bytes=7
+[2026-09-30T14:26:01.162+00:00] I (515053) RouteLoomRef: message origin=1 session=3550612762 sequence=14 bytes=7
+[2026-09-30T14:26:03.165+00:00] I (517066) RouteLoomRef: message origin=1 session=3550612762 sequence=15 bytes=7
+[2026-09-30T14:26:05.167+00:00] I (519073) RouteLoomRef: message origin=1 session=3550612762 sequence=16 bytes=7
+[2026-09-30T14:26:10.374+00:00] I (524225) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:26:10.374+00:00] W (524225) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:26:11.375+00:00] W (525182) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:26:12.176+00:00] W (526023) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:26:12.176+00:00] W (526036) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:26:12.176+00:00] W (526046) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:26:12.176+00:00] W (526067) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:26:12.577+00:00] W (526564) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:26:12.777+00:00] W (526659) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:26:12.777+00:00] W (526740) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:26:12.777+00:00] W (526767) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:26:12.977+00:00] I (526781) RouteLoomRef: message origin=1 session=1582044927 sequence=1 bytes=7
+[2026-09-30T14:26:12.977+00:00] I (526794) RouteLoomRef: message origin=1 session=1582044927 sequence=6 bytes=7
+[2026-09-30T14:26:13.378+00:00] I (527353) RouteLoomRef: message origin=1 session=1582044927 sequence=16 bytes=7
+[2026-09-30T14:26:15.380+00:00] I (529356) RouteLoomRef: message origin=1 session=1582044927 sequence=17 bytes=7
+[2026-09-30T14:26:17.383+00:00] I (531359) RouteLoomRef: message origin=1 session=1582044927 sequence=18 bytes=7
+[2026-09-30T14:26:19.385+00:00] I (533362) RouteLoomRef: message origin=1 session=1582044927 sequence=19 bytes=7
+[2026-09-30T14:26:21.387+00:00] I (535368) RouteLoomRef: message origin=1 session=1582044927 sequence=20 bytes=7
+[2026-09-30T14:26:23.389+00:00] I (537371) RouteLoomRef: message origin=1 session=1582044927 sequence=21 bytes=7
+[2026-09-30T14:26:25.392+00:00] I (539378) RouteLoomRef: message origin=1 session=1582044927 sequence=22 bytes=7
+[2026-09-30T14:26:26.593+00:00] I (540496) RouteLoom: stack hwm rl_owner 8648 B
+[2026-09-30T14:26:26.593+00:00] I (540496) RouteLoom: owner polls=131965 empty=130080 rxq_max=4 max_us rx=7039 bootstrap=343051 node=3267 security=695580
+[2026-09-30T14:26:26.593+00:00] I (540500) RouteLoom: owner expiry_slots=47506320 hop_accept_expired=19
+[2026-09-30T14:26:26.593+00:00] I (540507) RouteLoom: HIL HEAP free=90928 largest=73728 min=89940 B
+[2026-09-30T14:26:26.593+00:00] I (540513) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=214 tx_failed=66 stale=0 send_errors=0 last_error=0x0 rx=1232 rx_other_channel=0
+[2026-09-30T14:26:26.593+00:00] I (540529) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=17 stale=0 probes=69 send_failures=741 kind_rejects=0
+[2026-09-30T14:26:26.593+00:00] I (540540) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=181 seq=1
+[2026-09-30T14:26:26.593+00:00] I (540548) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T14:26:27.394+00:00] I (541377) RouteLoomRef: message origin=1 session=1582044927 sequence=23 bytes=7
+[2026-09-30T14:26:31.800+00:00] W (545727) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:26:31.800+00:00] I (545745) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:26:31.800+00:00] W (545745) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:26:34.002+00:00] W (547902) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:26:34.002+00:00] W (547932) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:26:34.002+00:00] I (547975) RouteLoomRef: message origin=1 session=2387600976 sequence=1 bytes=7
+[2026-09-30T14:26:34.002+00:00] I (547988) RouteLoomRef: message origin=1 session=2387600976 sequence=2 bytes=7
+[2026-09-30T14:26:35.805+00:00] I (549644) RouteLoomRef: message origin=1 session=2387600976 sequence=8 bytes=7
+[2026-09-30T14:26:37.808+00:00] I (551648) RouteLoomRef: message origin=1 session=2387600976 sequence=9 bytes=7
+[2026-09-30T14:26:39.810+00:00] I (553652) RouteLoomRef: message origin=1 session=2387600976 sequence=10 bytes=7
+[2026-09-30T14:26:41.813+00:00] I (555654) RouteLoomRef: message origin=1 session=2387600976 sequence=11 bytes=7
+[2026-09-30T14:26:43.816+00:00] I (557658) RouteLoomRef: message origin=1 session=2387600976 sequence=12 bytes=7
+[2026-09-30T14:26:45.819+00:00] I (559669) RouteLoomRef: message origin=1 session=2387600976 sequence=13 bytes=7
+[2026-09-30T14:26:47.822+00:00] I (561669) RouteLoomRef: message origin=1 session=2387600976 sequence=14 bytes=7
+[2026-09-30T14:26:49.825+00:00] I (563671) RouteLoomRef: message origin=1 session=2387600976 sequence=15 bytes=7
+[2026-09-30T14:26:54.231+00:00] W (568216) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:26:54.231+00:00] I (568234) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:26:54.231+00:00] W (568234) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:26:56.434+00:00] W (570329) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:26:57.035+00:00] W (570879) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:26:57.035+00:00] W (570890) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:26:57.035+00:00] I (570969) RouteLoomRef: message origin=1 session=1768045466 sequence=1 bytes=7
+[2026-09-30T14:26:57.035+00:00] I (570991) RouteLoomRef: message origin=1 session=1768045466 sequence=2 bytes=7
+[2026-09-30T14:26:58.036+00:00] I (571936) RouteLoomRef: message origin=1 session=1768045466 sequence=8 bytes=7
+[2026-09-30T14:27:00.038+00:00] I (573937) RouteLoomRef: message origin=1 session=1768045466 sequence=11 bytes=7
+[2026-09-30T14:27:02.041+00:00] I (575944) RouteLoomRef: message origin=1 session=1768045466 sequence=12 bytes=7
+[2026-09-30T14:27:04.044+00:00] I (577943) RouteLoomRef: message origin=1 session=1768045466 sequence=13 bytes=7
+[2026-09-30T14:27:06.047+00:00] I (579947) RouteLoomRef: message origin=1 session=1768045466 sequence=14 bytes=7
+[2026-09-30T14:27:08.050+00:00] I (581954) RouteLoomRef: message origin=1 session=1768045466 sequence=15 bytes=7
+[2026-09-30T14:27:10.053+00:00] I (583959) RouteLoomRef: message origin=1 session=1768045466 sequence=16 bytes=7
+[2026-09-30T14:27:12.055+00:00] I (585959) RouteLoomRef: message origin=1 session=1768045466 sequence=17 bytes=7
+[2026-09-30T14:27:17.261+00:00] W (591110) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:27:17.261+00:00] I (591128) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:27:17.261+00:00] W (591128) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:27:19.267+00:00] W (593230) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:27:19.868+00:00] W (593765) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:27:19.868+00:00] W (593792) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:27:19.868+00:00] I (593848) RouteLoomRef: message origin=1 session=3749721883 sequence=1 bytes=7
+[2026-09-30T14:27:19.868+00:00] I (593861) RouteLoomRef: message origin=1 session=3749721883 sequence=2 bytes=7
+[2026-09-30T14:27:20.269+00:00] I (594225) RouteLoomRef: message origin=1 session=3749721883 sequence=6 bytes=7
+[2026-09-30T14:27:22.272+00:00] I (596230) RouteLoomRef: message origin=1 session=3749721883 sequence=10 bytes=7
+[2026-09-30T14:27:24.275+00:00] I (598241) RouteLoomRef: message origin=1 session=3749721883 sequence=11 bytes=7
+[2026-09-30T14:27:26.280+00:00] I (600241) RouteLoomRef: message origin=1 session=3749721883 sequence=12 bytes=7
+[2026-09-30T14:27:26.680+00:00] I (600498) RouteLoom: stack hwm rl_owner 8648 B
+[2026-09-30T14:27:26.680+00:00] I (600498) RouteLoom: owner polls=146807 empty=144693 rxq_max=4 max_us rx=7039 bootstrap=343051 node=3267 security=695580
+[2026-09-30T14:27:26.680+00:00] I (600502) RouteLoom: owner expiry_slots=52849440 hop_accept_expired=19
+[2026-09-30T14:27:26.680+00:00] I (600509) RouteLoom: HIL HEAP free=90928 largest=73728 min=89940 B
+[2026-09-30T14:27:26.680+00:00] I (600515) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=230 tx_failed=68 stale=0 send_errors=0 last_error=0x0 rx=1395 rx_other_channel=0
+[2026-09-30T14:27:26.680+00:00] I (600531) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=20 stale=0 probes=77 send_failures=767 kind_rejects=0
+[2026-09-30T14:27:26.680+00:00] I (600542) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=184 seq=1
+[2026-09-30T14:27:26.680+00:00] I (600550) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T14:27:28.283+00:00] I (602251) RouteLoomRef: message origin=1 session=3749721883 sequence=13 bytes=7
+[2026-09-30T14:27:30.287+00:00] I (604257) RouteLoomRef: message origin=1 session=3749721883 sequence=14 bytes=7
+[2026-09-30T14:27:32.290+00:00] I (606263) RouteLoomRef: message origin=1 session=3749721883 sequence=15 bytes=7
+[2026-09-30T14:27:34.294+00:00] I (608270) RouteLoomRef: message origin=1 session=3749721883 sequence=16 bytes=7
+[2026-09-30T14:27:39.703+00:00] W (613517) RouteLoomRef: diagnostic reason=RX_CONTEXT_CHANGED peer=1 message=present
+[2026-09-30T14:27:39.703+00:00] I (613590) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:27:39.703+00:00] W (613590) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:27:41.706+00:00] W (615651) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:27:42.306+00:00] W (616142) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:27:42.306+00:00] W (616186) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-30T14:27:42.306+00:00] I (616246) RouteLoomRef: message origin=1 session=2256411148 sequence=1 bytes=7
+[2026-09-30T14:27:42.306+00:00] I (616263) RouteLoomRef: message origin=1 session=2256411148 sequence=2 bytes=7
+[2026-09-30T14:27:42.707+00:00] I (616560) RouteLoomRef: message origin=1 session=2256411148 sequence=6 bytes=7
+[2026-09-30T14:27:44.710+00:00] I (618567) RouteLoomRef: message origin=1 session=2256411148 sequence=10 bytes=7
+[2026-09-30T14:27:46.713+00:00] I (620574) RouteLoomRef: message origin=1 session=2256411148 sequence=11 bytes=7
+[2026-09-30T14:27:48.717+00:00] I (622583) RouteLoomRef: message origin=1 session=2256411148 sequence=12 bytes=7
+[2026-09-30T14:27:50.721+00:00] I (624595) RouteLoomRef: message origin=1 session=2256411148 sequence=13 bytes=7
+[2026-09-30T14:27:51.323+00:00] W (625180) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:27:52.725+00:00] I (626595) RouteLoomRef: message origin=1 session=2256411148 sequence=14 bytes=7
+[2026-09-30T14:27:54.729+00:00] I (628601) RouteLoomRef: message origin=1 session=2256411148 sequence=15 bytes=7
+[2026-09-30T14:27:55.129+00:00] W (629032) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:27:56.732+00:00] I (630608) RouteLoomRef: message origin=1 session=2256411148 sequence=16 bytes=7
+[2026-09-30T14:28:05.351+00:00] I (639209) RouteLoomRef: discovery event=REACHABLE peer=1
+[2026-09-30T14:28:05.351+00:00] W (639209) RouteLoomRef: diagnostic reason=REACHABLE peer=1 message=none
+[2026-09-30T14:28:05.351+00:00] W (639246) RouteLoomRef: diagnostic reason=PEER_RESTARTED_ROUTES_FLUSHED peer=1 message=none
+[2026-09-30T14:28:06.752+00:00] W (640660) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:28:06.752+00:00] W (640671) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:28:06.752+00:00] W (640702) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:28:06.752+00:00] W (640715) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:28:06.752+00:00] W (640725) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:28:06.752+00:00] W (640738) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:28:06.953+00:00] W (640763) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:28:06.953+00:00] W (640776) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:28:07.153+00:00] W (641011) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:28:07.153+00:00] W (641066) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:28:07.153+00:00] W (641090) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:28:07.553+00:00] W (641370) RouteLoomRef: diagnostic reason=DEDUP_EVICTED_RESOLVED peer=1 message=present
+[2026-09-30T14:28:07.553+00:00] I (641502) RouteLoomRef: message origin=1 session=330621490 sequence=2 bytes=7
+[2026-09-30T14:28:07.553+00:00] W (641523) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=1 message=present
+[2026-09-30T14:28:07.553+00:00] I (641540) RouteLoomRef: message origin=1 session=330621490 sequence=19 bytes=7
+[2026-09-30T14:28:07.754+00:00] I (641578) RouteLoomRef: message origin=1 session=330621490 sequence=7 bytes=7
+[2026-09-30T14:28:08.956+00:00] I (642935) RouteLoomRef: message origin=1 session=330621490 sequence=25 bytes=7
+[2026-09-30T14:28:10.961+00:00] I (644938) RouteLoomRef: message origin=1 session=330621490 sequence=26 bytes=7
+[2026-09-30T14:28:12.964+00:00] I (646949) RouteLoomRef: message origin=1 session=330621490 sequence=27 bytes=7
+[2026-09-30T14:28:14.967+00:00] I (648952) RouteLoomRef: message origin=1 session=330621490 sequence=28 bytes=7
+[2026-09-30T14:28:16.970+00:00] I (650963) RouteLoomRef: message origin=1 session=330621490 sequence=29 bytes=7
+[2026-09-30T14:28:18.972+00:00] I (652963) RouteLoomRef: message origin=1 session=330621490 sequence=30 bytes=7
+[2026-09-30T14:28:26.583+00:00] I (660499) RouteLoom: stack hwm rl_owner 8648 B
+[2026-09-30T14:28:26.583+00:00] I (660499) RouteLoom: owner polls=161344 empty=158926 rxq_max=4 max_us rx=7039 bootstrap=343051 node=3267 security=695580
+[2026-09-30T14:28:26.583+00:00] I (660503) RouteLoom: owner expiry_slots=58082760 hop_accept_expired=30
+[2026-09-30T14:28:26.583+00:00] I (660510) RouteLoom: HIL HEAP free=90796 largest=73728 min=89940 B
+[2026-09-30T14:28:26.583+00:00] I (660516) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=255 tx_failed=69 stale=0 send_errors=0 last_error=0x0 rx=1591 rx_other_channel=0
+[2026-09-30T14:28:26.583+00:00] I (660532) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=22 stale=0 probes=85 send_failures=767 kind_rejects=0
+[2026-09-30T14:28:26.583+00:00] I (660543) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=186 seq=1
+[2026-09-30T14:28:26.583+00:00] I (660551) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0

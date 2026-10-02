@@ -1,0 +1,161 @@
+[2026-09-30T13:06:26.716+00:00] !! opened
+[2026-09-30T13:06:29.721+00:00] W (3069893) rl_migrate: migration event PHASE_PREPARING peer=0
+[2026-09-30T13:06:29.721+00:00] W (3069893) RouteLoomRef: diagnostic reason=PHASE_PREPARING peer=0 message=none
+[2026-09-30T13:06:34.527+00:00] W (3074721) rl_migrate: migration event CHANNEL_NOTICE peer=1
+[2026-09-30T13:06:34.527+00:00] W (3074721) RouteLoomRef: diagnostic reason=CHANNEL_NOTICE peer=1 message=none
+[2026-09-30T13:06:34.728+00:00] W (3074900) rl_migrate: migration event PHASE_COMMITTED peer=0
+[2026-09-30T13:06:34.728+00:00] W (3074901) RouteLoomRef: diagnostic reason=PHASE_COMMITTED peer=0 message=none
+[2026-09-30T13:06:59.159+00:00] W (3099476) rl_migrate: migration event PHASE_SWITCHING peer=0
+[2026-09-30T13:06:59.159+00:00] W (3099476) RouteLoomRef: diagnostic reason=PHASE_SWITCHING peer=0 message=none
+[2026-09-30T13:06:59.159+00:00] I (3099486) rl_migrate: radio generation now 3 after verified cutover
+[2026-09-30T13:06:59.360+00:00] W (3099487) rl_migrate: migration event PHASE_VERIFYING peer=0
+[2026-09-30T13:06:59.360+00:00] W (3099489) RouteLoomRef: diagnostic reason=PHASE_VERIFYING peer=0 message=none
+[2026-09-30T13:07:02.363+00:00] W (3102586) rl_migrate: migration event VERIFY_PASSED peer=1
+[2026-09-30T13:07:02.363+00:00] W (3102586) RouteLoomRef: diagnostic reason=VERIFY_PASSED peer=1 message=none
+[2026-09-30T13:07:02.363+00:00] I (3102589) RouteLoomRef: message origin=1 session=3504051346 sequence=25 bytes=6
+[2026-09-30T13:07:02.363+00:00] W (3102595) rl_migrate: migration event PHASE_STABLE peer=0
+[2026-09-30T13:07:02.363+00:00] W (3102600) RouteLoomRef: diagnostic reason=PHASE_STABLE peer=0 message=none
+[2026-09-30T13:07:03.164+00:00] I (3103387) RouteLoomRef: message origin=1 session=3504051346 sequence=26 bytes=6
+[2026-09-30T13:07:03.966+00:00] I (3104194) RouteLoomRef: message origin=1 session=3504051346 sequence=27 bytes=6
+[2026-09-30T13:07:04.767+00:00] I (3104996) RouteLoomRef: message origin=1 session=3504051346 sequence=28 bytes=6
+[2026-09-30T13:07:05.568+00:00] I (3105803) RouteLoomRef: message origin=1 session=3504051346 sequence=29 bytes=6
+[2026-09-30T13:07:06.369+00:00] I (3106606) RouteLoomRef: message origin=1 session=3504051346 sequence=30 bytes=6
+[2026-09-30T13:07:07.170+00:00] I (3107414) RouteLoomRef: message origin=1 session=3504051346 sequence=31 bytes=6
+[2026-09-30T13:07:07.971+00:00] I (3108217) RouteLoomRef: message origin=1 session=3504051346 sequence=32 bytes=6
+[2026-09-30T13:07:08.772+00:00] I (3109022) RouteLoomRef: message origin=1 session=3504051346 sequence=33 bytes=6
+[2026-09-30T13:07:09.573+00:00] I (3109830) RouteLoomRef: message origin=1 session=3504051346 sequence=34 bytes=6
+[2026-09-30T13:07:10.374+00:00] I (3110632) RouteLoomRef: message origin=1 session=3504051346 sequence=35 bytes=6
+[2026-09-30T13:07:11.175+00:00] I (3111440) RouteLoomRef: message origin=1 session=3504051346 sequence=36 bytes=6
+[2026-09-30T13:07:11.976+00:00] I (3112246) RouteLoomRef: message origin=1 session=3504051346 sequence=37 bytes=6
+[2026-09-30T13:07:12.777+00:00] I (3113053) RouteLoomRef: message origin=1 session=3504051346 sequence=38 bytes=6
+[2026-09-30T13:07:13.579+00:00] I (3113857) RouteLoomRef: message origin=1 session=3504051346 sequence=39 bytes=6
+[2026-09-30T13:07:14.384+00:00] I (3114666) RouteLoomRef: message origin=1 session=3504051346 sequence=40 bytes=6
+[2026-09-30T13:07:15.187+00:00] I (3115464) RouteLoomRef: message origin=1 session=3504051346 sequence=41 bytes=6
+[2026-09-30T13:07:15.988+00:00] I (3116271) RouteLoomRef: message origin=1 session=3504051346 sequence=42 bytes=6
+[2026-09-30T13:07:16.789+00:00] I (3117074) RouteLoomRef: message origin=1 session=3504051346 sequence=43 bytes=6
+[2026-09-30T13:07:17.590+00:00] I (3117883) RouteLoomRef: message origin=1 session=3504051346 sequence=44 bytes=6
+[2026-09-30T13:07:20.394+00:00] I (3120548) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:07:20.394+00:00] I (3120548) RouteLoom: owner polls=777761 empty=775736 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:07:20.394+00:00] I (3120553) RouteLoom: owner expiry_slots=279992880 hop_accept_expired=1
+[2026-09-30T13:07:20.394+00:00] I (3120559) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:07:20.394+00:00] I (3120565) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=505 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1625 rx_other_channel=0
+[2026-09-30T13:07:20.394+00:00] I (3120582) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=213 send_failures=79 kind_rejects=0
+[2026-09-30T13:07:20.394+00:00] I (3120593) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:07:20.394+00:00] I (3120600) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:08:20.277+00:00] I (3180549) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:08:20.277+00:00] I (3180549) RouteLoom: owner polls=792737 empty=790684 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:08:20.277+00:00] I (3180554) RouteLoom: owner expiry_slots=285384240 hop_accept_expired=1
+[2026-09-30T13:08:20.277+00:00] I (3180560) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:08:20.277+00:00] I (3180566) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=511 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1652 rx_other_channel=0
+[2026-09-30T13:08:20.277+00:00] I (3180583) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=216 send_failures=79 kind_rejects=0
+[2026-09-30T13:08:20.277+00:00] I (3180594) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:08:20.277+00:00] I (3180601) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:09:20.378+00:00] I (3240552) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:09:20.378+00:00] I (3240552) RouteLoom: owner polls=807713 empty=805630 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:09:20.378+00:00] I (3240557) RouteLoom: owner expiry_slots=290775600 hop_accept_expired=1
+[2026-09-30T13:09:20.378+00:00] I (3240563) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:09:20.378+00:00] I (3240569) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=518 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1677 rx_other_channel=0
+[2026-09-30T13:09:20.378+00:00] I (3240586) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=220 send_failures=80 kind_rejects=0
+[2026-09-30T13:09:20.378+00:00] I (3240597) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:09:20.378+00:00] I (3240604) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:10:20.262+00:00] I (3300553) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:10:20.262+00:00] I (3300553) RouteLoom: owner polls=822685 empty=820566 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:10:20.262+00:00] I (3300558) RouteLoom: owner expiry_slots=296165520 hop_accept_expired=1
+[2026-09-30T13:10:20.262+00:00] I (3300564) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:10:20.262+00:00] I (3300570) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=525 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1708 rx_other_channel=0
+[2026-09-30T13:10:20.262+00:00] I (3300587) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=224 send_failures=81 kind_rejects=0
+[2026-09-30T13:10:20.462+00:00] I (3300598) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:10:20.462+00:00] I (3300606) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:11:20.347+00:00] I (3360555) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:11:20.347+00:00] I (3360555) RouteLoom: owner polls=837662 empty=835515 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:11:20.347+00:00] I (3360560) RouteLoom: owner expiry_slots=301557240 hop_accept_expired=1
+[2026-09-30T13:11:20.347+00:00] I (3360566) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:11:20.347+00:00] I (3360572) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=531 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1732 rx_other_channel=0
+[2026-09-30T13:11:20.347+00:00] I (3360589) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=227 send_failures=81 kind_rejects=0
+[2026-09-30T13:11:20.347+00:00] I (3360600) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:11:20.347+00:00] I (3360608) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:12:20.254+00:00] I (3420558) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:12:20.254+00:00] I (3420558) RouteLoom: owner polls=852638 empty=850463 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:12:20.254+00:00] I (3420563) RouteLoom: owner expiry_slots=306948600 hop_accept_expired=1
+[2026-09-30T13:12:20.254+00:00] I (3420569) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:12:20.454+00:00] I (3420575) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=537 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1765 rx_other_channel=0
+[2026-09-30T13:12:20.454+00:00] I (3420592) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=230 send_failures=81 kind_rejects=0
+[2026-09-30T13:12:20.454+00:00] I (3420603) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:12:20.454+00:00] I (3420611) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:13:20.346+00:00] I (3480560) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:13:20.346+00:00] I (3480560) RouteLoom: owner polls=867614 empty=865409 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:13:20.346+00:00] I (3480565) RouteLoom: owner expiry_slots=312339960 hop_accept_expired=1
+[2026-09-30T13:13:20.346+00:00] I (3480571) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:13:20.346+00:00] I (3480577) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=544 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1795 rx_other_channel=0
+[2026-09-30T13:13:20.346+00:00] I (3480594) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=234 send_failures=82 kind_rejects=0
+[2026-09-30T13:13:20.346+00:00] I (3480605) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:13:20.346+00:00] I (3480613) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:14:20.225+00:00] I (3540561) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:14:20.425+00:00] I (3540561) RouteLoom: owner polls=882589 empty=880354 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:14:20.425+00:00] I (3540566) RouteLoom: owner expiry_slots=317730960 hop_accept_expired=1
+[2026-09-30T13:14:20.425+00:00] I (3540572) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:14:20.425+00:00] I (3540578) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=551 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1822 rx_other_channel=0
+[2026-09-30T13:14:20.425+00:00] I (3540595) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=238 send_failures=83 kind_rejects=0
+[2026-09-30T13:14:20.425+00:00] I (3540606) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:14:20.425+00:00] I (3540614) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:15:20.313+00:00] I (3600563) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:15:20.313+00:00] I (3600563) RouteLoom: owner polls=897566 empty=895303 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:15:20.313+00:00] I (3600568) RouteLoom: owner expiry_slots=323122680 hop_accept_expired=1
+[2026-09-30T13:15:20.313+00:00] I (3600574) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:15:20.313+00:00] I (3600580) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=557 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1852 rx_other_channel=0
+[2026-09-30T13:15:20.313+00:00] I (3600597) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=241 send_failures=83 kind_rejects=0
+[2026-09-30T13:15:20.313+00:00] I (3600608) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:15:20.313+00:00] I (3600615) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:16:20.392+00:00] I (3660566) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:16:20.392+00:00] I (3660566) RouteLoom: owner polls=912543 empty=910250 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:16:20.392+00:00] I (3660571) RouteLoom: owner expiry_slots=328514400 hop_accept_expired=1
+[2026-09-30T13:16:20.392+00:00] I (3660577) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:16:20.392+00:00] I (3660583) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=564 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1880 rx_other_channel=0
+[2026-09-30T13:16:20.392+00:00] I (3660600) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=245 send_failures=84 kind_rejects=0
+[2026-09-30T13:16:20.392+00:00] I (3660611) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:16:20.392+00:00] I (3660619) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:17:20.290+00:00] I (3720568) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:17:20.290+00:00] I (3720568) RouteLoom: owner polls=927520 empty=925197 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:17:20.290+00:00] I (3720573) RouteLoom: owner expiry_slots=333906120 hop_accept_expired=1
+[2026-09-30T13:17:20.290+00:00] I (3720579) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:17:20.290+00:00] I (3720585) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=571 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1906 rx_other_channel=0
+[2026-09-30T13:17:20.290+00:00] I (3720602) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=249 send_failures=85 kind_rejects=0
+[2026-09-30T13:17:20.290+00:00] I (3720613) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:17:20.290+00:00] I (3720620) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:18:20.376+00:00] I (3780571) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:18:20.376+00:00] I (3780571) RouteLoom: owner polls=942496 empty=940143 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:18:20.376+00:00] I (3780576) RouteLoom: owner expiry_slots=339297480 hop_accept_expired=1
+[2026-09-30T13:18:20.376+00:00] I (3780582) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:18:20.376+00:00] I (3780588) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=578 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1931 rx_other_channel=0
+[2026-09-30T13:18:20.376+00:00] I (3780605) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=253 send_failures=86 kind_rejects=0
+[2026-09-30T13:18:20.376+00:00] I (3780616) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:18:20.376+00:00] I (3780624) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:19:20.253+00:00] I (3840572) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:19:20.253+00:00] I (3840572) RouteLoom: owner polls=957468 empty=955079 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:19:20.253+00:00] I (3840577) RouteLoom: owner expiry_slots=344687400 hop_accept_expired=1
+[2026-09-30T13:19:20.253+00:00] I (3840583) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:19:20.453+00:00] I (3840589) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=585 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1963 rx_other_channel=0
+[2026-09-30T13:19:20.453+00:00] I (3840606) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=257 send_failures=87 kind_rejects=0
+[2026-09-30T13:19:20.453+00:00] I (3840617) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:19:20.453+00:00] I (3840625) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:20:20.336+00:00] I (3900572) RouteLoom: stack hwm rl_owner 9944 B
+[2026-09-30T13:20:20.336+00:00] I (3900572) RouteLoom: owner polls=972444 empty=970027 rxq_max=2 max_us rx=134600 bootstrap=16418 node=15447 security=695570
+[2026-09-30T13:20:20.336+00:00] I (3900577) RouteLoom: owner expiry_slots=350078760 hop_accept_expired=1
+[2026-09-30T13:20:20.336+00:00] I (3900583) RouteLoom: HIL HEAP free=90632 largest=73728 min=89756 B
+[2026-09-30T13:20:20.336+00:00] I (3900589) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=3 busy=0 quarantined=0 fenced=0 tx_ok=591 tx_failed=64 stale=0 send_errors=0 last_error=0x0 rx=1991 rx_other_channel=0
+[2026-09-30T13:20:20.336+00:00] I (3900606) RouteLoom: HIL DISCOVERY candidates=0 neighbors=1 capacity=0 auth=1 stale=0 probes=260 send_failures=87 kind_rejects=0
+[2026-09-30T13:20:20.336+00:00] I (3900617) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=92 seq=1
+[2026-09-30T13:20:20.336+00:00] I (3900625) RouteLoom: HIL ROUTE peer=3 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T13:20:26.544+00:00] ESP-ROM:esp32c6-20220919
+[2026-09-30T13:20:26.544+00:00] Build:Sep 19 2022
+[2026-09-30T13:20:26.544+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x37 (DOWNLOAD(USB/UART0/SDIO_REI_REO))
+[2026-09-30T13:20:26.544+00:00] Saved PC:0x4202c2a4
+[2026-09-30T13:20:26.544+00:00] waiting for download
+[2026-09-30T13:20:42.166+00:00] �      ��      ��      ��      ��      ��      ��      ��      ��      ��      ��      �      ��      ��      �      ��      ��      ��      ��      ��      ��      ��      ��      �ESP-ROM:esp32c6-20220919
+[2026-09-30T13:20:42.167+00:00] Build:Sep 19 2022
+[2026-09-30T13:20:42.167+00:00] rst:0x15 (USB_UART_HPSYS),boot:0x37 (DOWNLOAD(USB/UART0/SDIO_REI_REO))
+[2026-09-30T13:20:42.167+00:00] Saved PC:0x4002f474
+[2026-09-30T13:20:42.167+00:00] waiting for download
+[2026-09-30T13:20:45.291+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T13:20:45.293+00:00] !! opened
+[2026-09-30T13:20:48.297+00:00] �                        ��

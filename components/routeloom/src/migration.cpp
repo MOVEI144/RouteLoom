@@ -849,16 +849,11 @@ Status MigrationParticipant::prepare(const ByteView plan_blob,
       ++stats_.plans_rejected;
       return reject(StatusCode::AuthorizationFailed, "PLAN_SCOPE_MISMATCH");
     }
-    // The hash already binds this blob to the committed plan — identity
-    // and epoch/base checks are settled. Structure and now-relative
-    // feasibility still apply: the node must refuse a blob it could never
-    // schedule, staying in Recovering for the recovery machinery.
+    // The hash already binds this blob to the verified commit — identity
+    // and epoch/base checks are settled. Like a signed snapshot, the
+    // catch-up of a commit whose switch already passed checks structure
+    // only: feasibility belonged to the pre-commit PREPARE round.
     status = check_plan_structure(plan);
-    if (!status) {
-      ++stats_.plans_rejected;
-      return status;
-    }
-    status = validate_plan_feasibility(plan, measurements, now_ms);
     if (!status) {
       ++stats_.plans_rejected;
       return status;
@@ -1003,6 +998,29 @@ Status MigrationParticipant::commit(const VerifiedAuthorityPlan& verified,
   }
   if (plan_known_ && pending_hash_ == verified.plan_hash()) {
     // Blob already stored: follow the committed plan directly.
+    enter_committed(now_ms);
+    return Status::success();
+  }
+  // A blob prepared before a restart is still in storage under the
+  // committed hash (the RAM plan is the older one resume loaded).
+  std::array<std::uint8_t, migration_const::kPlanBlobMax> stored_blob{};
+  std::size_t stored_size = 0;
+  MigrationPlan stored_plan{};
+  if (storage_
+          .read_blob(verified.plan_hash(),
+                     MutableByteView{stored_blob.data(), stored_blob.size()}, stored_size)
+          .ok() &&
+      stored_size <= stored_blob.size() &&
+      plan_digest(ByteView{stored_blob.data(), stored_size}) == verified.plan_hash() &&
+      plan_decode(ByteView{stored_blob.data(), stored_size}, stored_plan).ok() &&
+      stored_plan.new_epoch == verified.new_epoch() && stored_plan.network == config_.network &&
+      stored_plan.authority == config_.authority && check_plan_structure(stored_plan).ok()) {
+    pending_plan_ = stored_plan;
+    pending_hash_ = verified.plan_hash();
+    plan_known_ = true;
+    awaiting_blob_ = false;
+    helper_index_ = static_cast<std::size_t>(-1);
+    helper_visit_active_ = false;
     enter_committed(now_ms);
     return Status::success();
   }
@@ -1371,6 +1389,19 @@ void MigrationParticipant::poll_helper(const MonotonicMs now_ms) noexcept {
 
 // --- poll / resume -----------------------------------------------------------------------------
 
+bool MigrationParticipant::settle_in_place(const MonotonicMs now_ms) noexcept {
+  // A member that missed the switch and found the site on the committed
+  // plan's channel already runs the plan: record it applied without a
+  // timed switch, so an expired plan does not strand it in recovery.
+  if (!plan_known_ || awaiting_blob_ || pending_hash_ != commit_plan_hash_ ||
+      committed_epoch_.value <= active_epoch_.value || runner_.busy() ||
+      runner_.committed_channel() != pending_plan_.new_channel) {
+    return false;
+  }
+  finish_cutover_applied(now_ms);
+  return true;
+}
+
 void MigrationParticipant::poll(const MonotonicMs now_ms) noexcept {
   switch (phase_) {
     case ParticipantPhase::Preparing:
@@ -1391,7 +1422,7 @@ void MigrationParticipant::poll(const MonotonicMs now_ms) noexcept {
           // scout traffic can bring newer signed state (04 §6/§9).
           if (map_to_authority(clock_mapping_, now_ms) >=
               pending_plan_.expiry_ms) {
-            enter_recovering(false);
+            if (!settle_in_place(now_ms)) enter_recovering(false);
           } else {
             begin_cutover(now_ms);
           }
@@ -1445,6 +1476,7 @@ void MigrationParticipant::poll(const MonotonicMs now_ms) noexcept {
       }
       break;
     case ParticipantPhase::Recovering:
+      if (settle_in_place(now_ms)) break;
       if (recovery_retry_pending_ && plan_known_ && clock_valid_ &&
           !runner_.busy() && now_ms >= switch_time_local()) {
         // Verified commit already held: re-follow once — but only inside
@@ -1464,6 +1496,9 @@ void MigrationParticipant::poll(const MonotonicMs now_ms) noexcept {
         // SLO is over.
         note_recovery_violation(now_ms);
       }
+      break;
+    case ParticipantPhase::RecoveryRequired:
+      (void)settle_in_place(now_ms);
       break;
     default:
       break;
@@ -1533,9 +1568,11 @@ Status MigrationParticipant::resume(const MonotonicMs now_ms) noexcept {
       commit.plan_hash, MutableByteView{blob.data(), blob.size()}, blob_size);
   MigrationPlan plan{};
   bool blob_ok = false;
-  if (blob_read.ok()) {
+  if (blob_read.ok() && blob_size <= blob.size()) {
     blob_ok = plan_decode(ByteView{blob.data(), blob_size}, plan).ok() &&
-              plan_digest(ByteView{blob.data(), blob_size}) == commit.plan_hash;
+              plan_digest(ByteView{blob.data(), blob_size}) == commit.plan_hash &&
+              plan.network == config_.network && plan.authority == config_.authority &&
+              plan.new_epoch == commit.new_epoch && check_plan_structure(plan).ok();
   }
   if (!blob_ok) {
     // The ledger/commit record references a blob we cannot prove: refetch

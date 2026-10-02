@@ -1,0 +1,5 @@
+[2026-09-30T11:27:28.809+00:00] !! opened
+[2026-09-30T11:27:29.009+00:00] I (874) RouteLoomRef: sdkv1 identity: node=3 kid=72b2282f385b2d8I (2687) RouteLoomRef: discovery event=REACHABLE peer=2
+[2026-09-30T11:27:29.009+00:00] W (2687) RouteLoomRef: diagnostic reason=REACHABLE peer=2 message=none
+[2026-09-30T11:27:31.213+00:00] W (4844) RouteLoomRef: diagnostic reason=SESSION_PENDING peer=1 message=present
+[2026-09-30T11:27:32.214+00:00] W (5904) RouteLoomRef: diagnostic reason=UNMATCHED_HOP_ACCEPT peer=2 message=present

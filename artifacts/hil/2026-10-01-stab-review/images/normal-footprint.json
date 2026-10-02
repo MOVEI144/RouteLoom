@@ -1,0 +1,275 @@
+[
+  {
+    "board": "bridge",
+    "before_commit": "e597da2ee2160a50bb4cbccb517ab51db0c90391",
+    "before_app_bytes": 1268416,
+    "after_app_bytes": 1268672,
+    "sdkconfig_identical": true,
+    "before_ram_report": {
+      "cell": "local",
+      "target": "esp32c3",
+      "app": "bridge_node",
+      "memory": [
+        {
+          "name": "DRAM",
+          "total": 321296,
+          "used": 287104,
+          "free": 34192,
+          "parts": {
+            ".bss": 224320,
+            ".text": 49348,
+            ".data": 13436
+          }
+        },
+        {
+          "name": "RTC SLOW",
+          "total": 8192,
+          "used": 6480,
+          "free": 1712,
+          "parts": {
+            ".data": 6392,
+            ".force_slow": 36,
+            ".rtc_reserved": 24,
+            ".text": 20,
+            ".rtc_noinit": 8
+          }
+        }
+      ],
+      "guard": {
+        "memory_type": "DRAM",
+        "static_bss": 224320,
+        "static_data": 13436,
+        "free": 34192,
+        "min_free": 27648,
+        "passed": true
+      },
+      "boot_heap": {
+        "offset": 12558,
+        "radio_peak": 27452,
+        "reserve": 12288,
+        "static_free": 34192,
+        "estimate": 19298
+      }
+    },
+    "after_ram_report": {
+      "cell": "local",
+      "target": "esp32c3",
+      "app": "bridge_node",
+      "memory": [
+        {
+          "name": "DRAM",
+          "total": 321296,
+          "used": 287104,
+          "free": 34192,
+          "parts": {
+            ".bss": 224320,
+            ".text": 49348,
+            ".data": 13436
+          }
+        },
+        {
+          "name": "RTC SLOW",
+          "total": 8192,
+          "used": 6480,
+          "free": 1712,
+          "parts": {
+            ".data": 6392,
+            ".force_slow": 36,
+            ".rtc_reserved": 24,
+            ".text": 20,
+            ".rtc_noinit": 8
+          }
+        }
+      ],
+      "guard": {
+        "memory_type": "DRAM",
+        "static_bss": 224320,
+        "static_data": 13436,
+        "free": 34192,
+        "min_free": 27648,
+        "passed": true
+      },
+      "boot_heap": {
+        "offset": 12558,
+        "radio_peak": 27452,
+        "reserve": 12288,
+        "static_free": 34192,
+        "estimate": 19298
+      }
+    }
+  },
+  {
+    "board": "relay",
+    "before_commit": "e597da2ee2160a50bb4cbccb517ab51db0c90391",
+    "before_app_bytes": 1352672,
+    "after_app_bytes": 1352896,
+    "sdkconfig_identical": true,
+    "before_ram_report": {
+      "cell": "local",
+      "target": "esp32c6",
+      "app": "reference_node",
+      "memory": [
+        {
+          "name": "DIRAM",
+          "total": 452112,
+          "used": 358135,
+          "free": 93977,
+          "parts": {
+            ".bss": 240904,
+            ".text": 99128,
+            ".data": 18103
+          }
+        },
+        {
+          "name": "LP SRAM",
+          "total": 16384,
+          "used": 136,
+          "free": 16248,
+          "parts": {
+            ".text": 64,
+            ".force_slow": 36,
+            ".rtc_reserved": 24,
+            ".rtc_noinit": 8,
+            ".force_fast": 4
+          }
+        }
+      ],
+      "guard": {
+        "memory_type": "DIRAM",
+        "static_bss": 240904,
+        "static_data": 18103,
+        "free": 93977,
+        "min_free": 8192,
+        "passed": true
+      },
+      "boot_heap": null
+    },
+    "after_ram_report": {
+      "cell": "local",
+      "target": "esp32c6",
+      "app": "reference_node",
+      "memory": [
+        {
+          "name": "DIRAM",
+          "total": 452112,
+          "used": 358135,
+          "free": 93977,
+          "parts": {
+            ".bss": 240904,
+            ".text": 99128,
+            ".data": 18103
+          }
+        },
+        {
+          "name": "LP SRAM",
+          "total": 16384,
+          "used": 136,
+          "free": 16248,
+          "parts": {
+            ".text": 64,
+            ".force_slow": 36,
+            ".rtc_reserved": 24,
+            ".rtc_noinit": 8,
+            ".force_fast": 4
+          }
+        }
+      ],
+      "guard": {
+        "memory_type": "DIRAM",
+        "static_bss": 240904,
+        "static_data": 18103,
+        "free": 93977,
+        "min_free": 8192,
+        "passed": true
+      },
+      "boot_heap": null
+    }
+  },
+  {
+    "board": "endpoint",
+    "before_commit": "e597da2ee2160a50bb4cbccb517ab51db0c90391",
+    "before_app_bytes": 1297312,
+    "after_app_bytes": 1297536,
+    "sdkconfig_identical": true,
+    "before_ram_report": {
+      "cell": "local",
+      "target": "esp32c6",
+      "app": "reference_node",
+      "memory": [
+        {
+          "name": "DIRAM",
+          "total": 452112,
+          "used": 290243,
+          "free": 161869,
+          "parts": {
+            ".bss": 175584,
+            ".text": 99092,
+            ".data": 15567
+          }
+        },
+        {
+          "name": "LP SRAM",
+          "total": 16384,
+          "used": 136,
+          "free": 16248,
+          "parts": {
+            ".text": 64,
+            ".force_slow": 36,
+            ".rtc_reserved": 24,
+            ".rtc_noinit": 8,
+            ".force_fast": 4
+          }
+        }
+      ],
+      "guard": {
+        "memory_type": "DIRAM",
+        "static_bss": 175584,
+        "static_data": 15567,
+        "free": 161869,
+        "min_free": 8192,
+        "passed": true
+      },
+      "boot_heap": null
+    },
+    "after_ram_report": {
+      "cell": "local",
+      "target": "esp32c6",
+      "app": "reference_node",
+      "memory": [
+        {
+          "name": "DIRAM",
+          "total": 452112,
+          "used": 290243,
+          "free": 161869,
+          "parts": {
+            ".bss": 175584,
+            ".text": 99092,
+            ".data": 15567
+          }
+        },
+        {
+          "name": "LP SRAM",
+          "total": 16384,
+          "used": 136,
+          "free": 16248,
+          "parts": {
+            ".text": 64,
+            ".force_slow": 36,
+            ".rtc_reserved": 24,
+            ".rtc_noinit": 8,
+            ".force_fast": 4
+          }
+        }
+      ],
+      "guard": {
+        "memory_type": "DIRAM",
+        "static_bss": 175584,
+        "static_data": 15567,
+        "free": 161869,
+        "min_free": 8192,
+        "passed": true
+      },
+      "boot_heap": null
+    }
+  }
+]

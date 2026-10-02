@@ -683,6 +683,7 @@ class MigrationParticipant {
   void latch_cooldown(MonotonicMs now_ms) noexcept;
   void begin_cutover(MonotonicMs now_ms) noexcept;
   void finish_cutover_applied(MonotonicMs now_ms) noexcept;
+  bool settle_in_place(MonotonicMs now_ms) noexcept;
   void poll_helper(MonotonicMs now_ms) noexcept;
 
   MigrationParticipantConfig config_{};

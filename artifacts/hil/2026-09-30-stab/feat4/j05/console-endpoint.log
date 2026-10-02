@@ -1,0 +1,515 @@
+[2026-09-30T12:24:49.188+00:00] !! opened
+[2026-09-30T12:24:55.798+00:00] I (391020) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:24:55.798+00:00] W (391021) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:24:57.000+00:00] W (392186) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:25:01.405+00:00] I (396638) RouteLoomRef: join mode=1 state=1 error=0
+[2026-09-30T12:25:02.206+00:00] I (397325) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:02.206+00:00] I (397329) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:02.206+00:00] I (397337) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:02.406+00:00] I (397653) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:02.607+00:00] I (397655) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:02.607+00:00] I (397662) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:02.807+00:00] I (397980) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:02.807+00:00] I (397982) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:02.807+00:00] I (397990) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:03.207+00:00] I (398307) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:25:03.207+00:00] I (398309) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:25:05.610+00:00] I (400734) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:05.610+00:00] I (400737) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:05.610+00:00] I (400746) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:06.011+00:00] I (401062) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:06.011+00:00] I (401064) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:06.011+00:00] I (401071) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:06.211+00:00] I (401389) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:06.211+00:00] I (401391) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:06.211+00:00] I (401398) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:06.612+00:00] I (401716) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:25:06.612+00:00] I (401718) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:25:11.620+00:00] I (406705) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:11.620+00:00] I (406708) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:11.620+00:00] I (406717) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:11.820+00:00] I (407033) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:11.820+00:00] I (407035) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:11.820+00:00] I (407043) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:12.221+00:00] I (407360) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:12.221+00:00] I (407362) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:12.221+00:00] I (407370) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:12.621+00:00] I (407688) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:25:12.621+00:00] I (407690) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:25:22.434+00:00] I (417655) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:22.434+00:00] I (417657) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:22.434+00:00] I (417666) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:22.834+00:00] I (417982) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:22.834+00:00] I (417984) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:22.834+00:00] I (417991) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:23.235+00:00] I (418309) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:23.235+00:00] I (418311) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:23.235+00:00] I (418318) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:23.435+00:00] I (418637) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:25:23.435+00:00] I (418639) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:25:25.237+00:00] I (420480) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:25:25.237+00:00] I (420480) RouteLoom: owner polls=131407 empty=131279 rxq_max=1 max_us rx=52 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:25:25.437+00:00] I (420484) RouteLoom: owner expiry_slots=17870944 hop_accept_expired=0
+[2026-09-30T12:25:25.437+00:00] I (420490) RouteLoom: HIL HEAP free=159860 largest=143360 min=159548 B
+[2026-09-30T12:25:25.437+00:00] I (420497) RouteLoom: HIL RADIO wifi_channel=11 committed=11 generation=39 busy=0 quarantined=0 fenced=0 tx_ok=125 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:25:25.437+00:00] I (420513) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:25:25.437+00:00] I (420524) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:25:25.437+00:00] I (420531) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:25:38.453+00:00] I (433639) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:38.453+00:00] I (433642) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:38.453+00:00] I (433651) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:38.854+00:00] I (433967) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:38.854+00:00] I (433969) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:38.854+00:00] I (433976) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:39.054+00:00] I (434295) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:39.054+00:00] I (434297) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:39.254+00:00] I (434304) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:39.454+00:00] I (434623) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:25:39.454+00:00] I (434625) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:25:54.477+00:00] I (449626) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:54.477+00:00] I (449628) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:54.477+00:00] I (449637) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:54.878+00:00] I (449953) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:54.878+00:00] I (449955) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:54.878+00:00] I (449962) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:55.078+00:00] I (450281) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:25:55.078+00:00] I (450283) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:25:55.078+00:00] I (450290) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:25:55.479+00:00] I (450609) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:25:55.479+00:00] I (450611) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:26:10.503+00:00] I (465612) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:26:10.503+00:00] I (465614) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:26:10.503+00:00] I (465623) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:26:10.704+00:00] I (465939) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:26:10.704+00:00] I (465941) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:26:10.704+00:00] I (465949) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:26:11.104+00:00] I (466267) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:26:11.104+00:00] I (466269) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:26:11.104+00:00] I (466276) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:26:11.505+00:00] I (466595) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:26:11.505+00:00] I (466597) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:26:25.327+00:00] I (480480) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:26:25.327+00:00] I (480480) RouteLoom: owner polls=161356 empty=161219 rxq_max=1 max_us rx=52 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:26:25.327+00:00] I (480484) RouteLoom: owner expiry_slots=21944008 hop_accept_expired=0
+[2026-09-30T12:26:25.327+00:00] I (480490) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:26:25.327+00:00] I (480497) RouteLoom: HIL RADIO wifi_channel=11 committed=11 generation=48 busy=0 quarantined=0 fenced=0 tx_ok=134 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:26:25.327+00:00] I (480513) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:26:25.327+00:00] I (480524) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:26:25.327+00:00] I (480531) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:26:26.528+00:00] I (481597) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:26:26.528+00:00] I (481599) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:26:26.528+00:00] I (481608) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:26:26.728+00:00] I (481924) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:26:26.728+00:00] I (481926) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:26:26.728+00:00] I (481933) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:26:27.129+00:00] I (482252) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:26:27.129+00:00] I (482255) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:26:27.129+00:00] I (482262) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:26:27.529+00:00] I (482581) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:26:27.529+00:00] I (482583) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:26:42.349+00:00] I (497584) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:26:42.350+00:00] I (497586) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:26:42.350+00:00] I (497595) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:26:42.750+00:00] I (497911) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:26:42.750+00:00] I (497913) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:26:42.750+00:00] I (497921) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:26:43.151+00:00] I (498239) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:26:43.151+00:00] I (498241) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:26:43.151+00:00] I (498248) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:26:43.351+00:00] I (498567) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:26:43.351+00:00] I (498569) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:26:58.373+00:00] I (513570) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:26:58.373+00:00] I (513572) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:26:58.373+00:00] I (513581) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:26:58.774+00:00] I (513897) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:26:58.774+00:00] I (513899) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:26:58.774+00:00] I (513906) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:26:59.174+00:00] I (514225) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:26:59.174+00:00] I (514227) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:26:59.174+00:00] I (514234) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:26:59.374+00:00] I (514553) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:26:59.374+00:00] I (514555) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:27:14.394+00:00] I (529556) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:27:14.394+00:00] I (529558) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:27:14.394+00:00] I (529567) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:27:14.795+00:00] I (529883) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:27:14.795+00:00] I (529885) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:27:14.795+00:00] I (529892) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:27:14.995+00:00] I (530211) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:27:14.995+00:00] I (530213) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:27:14.995+00:00] I (530220) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:27:15.395+00:00] I (530539) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:27:15.395+00:00] I (530541) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:27:25.409+00:00] I (540480) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:27:25.409+00:00] I (540480) RouteLoom: owner polls=191298 empty=191149 rxq_max=1 max_us rx=52 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:27:25.409+00:00] I (540484) RouteLoom: owner expiry_slots=26016120 hop_accept_expired=0
+[2026-09-30T12:27:25.409+00:00] I (540490) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:27:25.409+00:00] I (540497) RouteLoom: HIL RADIO wifi_channel=11 committed=11 generation=60 busy=0 quarantined=0 fenced=0 tx_ok=146 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:27:25.409+00:00] I (540513) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:27:25.409+00:00] I (540524) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:27:25.409+00:00] I (540531) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:27:30.415+00:00] I (545541) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:27:30.415+00:00] I (545543) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:27:30.415+00:00] I (545552) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:27:30.816+00:00] I (545868) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:27:30.816+00:00] I (545870) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:27:30.816+00:00] I (545877) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:27:31.016+00:00] I (546196) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:27:31.016+00:00] I (546198) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:27:31.016+00:00] I (546205) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:27:31.417+00:00] I (546524) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:27:31.417+00:00] I (546526) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:27:46.438+00:00] I (561527) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:27:46.438+00:00] I (561529) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:27:46.438+00:00] I (561538) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:27:46.638+00:00] I (561854) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:27:46.638+00:00] I (561856) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:27:46.638+00:00] I (561864) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:27:47.039+00:00] I (562181) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:27:47.039+00:00] I (562183) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:27:47.039+00:00] I (562190) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:27:47.439+00:00] I (562509) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:27:47.439+00:00] I (562511) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:28:02.462+00:00] I (577512) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:28:02.462+00:00] I (577514) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:28:02.462+00:00] I (577523) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:28:02.662+00:00] I (577839) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:28:02.662+00:00] I (577841) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:28:02.662+00:00] I (577848) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:28:03.063+00:00] I (578167) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:28:03.063+00:00] I (578169) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:28:03.063+00:00] I (578177) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:28:03.263+00:00] I (578495) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:28:03.263+00:00] I (578497) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:28:18.284+00:00] I (593498) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:28:18.284+00:00] I (593500) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:28:18.284+00:00] I (593509) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:28:18.684+00:00] I (593825) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:28:18.684+00:00] I (593827) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:28:18.684+00:00] I (593835) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:28:19.085+00:00] I (594153) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:28:19.085+00:00] I (594155) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:28:19.085+00:00] I (594162) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:28:19.285+00:00] I (594481) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:28:19.285+00:00] I (594483) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:28:25.293+00:00] I (600480) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:28:25.293+00:00] I (600480) RouteLoom: owner polls=221240 empty=221079 rxq_max=1 max_us rx=52 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:28:25.293+00:00] I (600484) RouteLoom: owner expiry_slots=30088232 hop_accept_expired=0
+[2026-09-30T12:28:25.293+00:00] I (600490) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:28:25.293+00:00] I (600497) RouteLoom: HIL RADIO wifi_channel=11 committed=11 generation=72 busy=0 quarantined=0 fenced=0 tx_ok=158 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:28:25.293+00:00] I (600513) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:28:25.293+00:00] I (600524) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:28:25.293+00:00] I (600531) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:28:34.305+00:00] I (609483) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:28:34.305+00:00] I (609485) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:28:34.305+00:00] I (609494) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:28:34.706+00:00] I (609810) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:28:34.706+00:00] I (609812) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:28:34.706+00:00] I (609819) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:28:34.906+00:00] I (610138) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:28:34.906+00:00] I (610140) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:28:34.906+00:00] I (610147) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:28:35.307+00:00] I (610466) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:28:35.307+00:00] I (610468) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:28:50.329+00:00] I (625469) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:28:50.329+00:00] I (625471) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:28:50.329+00:00] I (625480) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:28:50.730+00:00] I (625796) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:28:50.730+00:00] I (625798) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:28:50.730+00:00] I (625805) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:28:50.930+00:00] I (626124) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:28:50.930+00:00] I (626126) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:28:50.930+00:00] I (626133) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:28:51.330+00:00] I (626452) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:28:51.330+00:00] I (626454) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:29:06.353+00:00] I (641455) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:29:06.353+00:00] I (641457) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:29:06.353+00:00] I (641466) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:29:06.553+00:00] I (641782) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:29:06.553+00:00] I (641784) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:29:06.553+00:00] I (641791) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:29:06.954+00:00] I (642110) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:29:06.954+00:00] I (642112) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:29:06.954+00:00] I (642119) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:29:07.354+00:00] I (642438) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:29:07.354+00:00] I (642440) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:29:22.373+00:00] I (657441) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:29:22.373+00:00] I (657443) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:29:22.373+00:00] I (657452) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:29:22.574+00:00] I (657768) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:29:22.574+00:00] I (657770) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:29:22.574+00:00] I (657777) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:29:22.974+00:00] I (658096) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:29:22.974+00:00] I (658098) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:29:22.974+00:00] I (658105) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:29:23.375+00:00] I (658424) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:29:23.375+00:00] I (658426) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:29:25.378+00:00] I (660481) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:29:25.378+00:00] I (660481) RouteLoom: owner polls=251183 empty=251010 rxq_max=1 max_us rx=52 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:29:25.378+00:00] I (660485) RouteLoom: owner expiry_slots=34160480 hop_accept_expired=0
+[2026-09-30T12:29:25.378+00:00] I (660491) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:29:25.378+00:00] I (660498) RouteLoom: HIL RADIO wifi_channel=11 committed=11 generation=84 busy=0 quarantined=0 fenced=0 tx_ok=170 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:29:25.378+00:00] I (660514) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:29:25.378+00:00] I (660525) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:29:25.378+00:00] I (660532) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:29:38.196+00:00] I (673426) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:29:38.196+00:00] I (673428) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:29:38.196+00:00] I (673437) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:29:38.597+00:00] I (673753) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:29:38.597+00:00] I (673755) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:29:38.597+00:00] I (673762) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:29:38.998+00:00] I (674080) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:29:38.998+00:00] I (674082) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:29:38.998+00:00] I (674090) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:29:39.198+00:00] I (674408) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:29:39.198+00:00] I (674410) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:29:54.217+00:00] I (689411) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:29:54.217+00:00] I (689413) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:29:54.217+00:00] I (689422) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:29:54.618+00:00] I (689738) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:29:54.618+00:00] I (689740) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:29:54.618+00:00] I (689748) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:29:55.018+00:00] I (690066) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T12:29:55.018+00:00] I (690068) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T12:29:55.018+00:00] I (690075) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T12:29:55.218+00:00] I (690394) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T12:29:55.218+00:00] I (690396) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T12:30:03.431+00:00] I (698652) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:30:03.431+00:00] W (698653) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:30:16.450+00:00] W (711647) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:30:19.855+00:00] I (715041) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:30:19.855+00:00] W (715042) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:30:25.263+00:00] I (720482) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:30:25.263+00:00] I (720483) RouteLoom: owner polls=275171 empty=274984 rxq_max=1 max_us rx=52 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:30:25.263+00:00] I (720486) RouteLoom: owner expiry_slots=37422848 hop_accept_expired=0
+[2026-09-30T12:30:25.263+00:00] I (720492) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:30:25.463+00:00] I (720499) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=92 busy=0 quarantined=0 fenced=0 tx_ok=184 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:30:25.463+00:00] I (720515) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:30:25.463+00:00] I (720526) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:30:25.463+00:00] I (720533) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:30:31.471+00:00] W (726650) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:30:41.685+00:00] I (736862) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-30T12:30:41.685+00:00] W (736862) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-30T12:30:41.685+00:00] I (736864) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:30:41.685+00:00] W (736869) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:30:46.490+00:00] W (741653) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:31:00.108+00:00] I (755309) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:31:00.108+00:00] W (755310) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:31:01.511+00:00] W (756656) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:31:16.529+00:00] W (771657) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:31:20.334+00:00] I (775522) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:31:20.334+00:00] W (775523) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:31:25.342+00:00] I (780483) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:31:25.342+00:00] I (780484) RouteLoom: owner polls=292111 empty=291909 rxq_max=1 max_us rx=52 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:31:25.342+00:00] I (780487) RouteLoom: owner expiry_slots=39726688 hop_accept_expired=0
+[2026-09-30T12:31:25.342+00:00] I (780494) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:31:25.342+00:00] I (780500) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=96 busy=0 quarantined=0 fenced=0 tx_ok=199 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:31:25.342+00:00] I (780516) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:31:25.342+00:00] I (780527) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:31:25.342+00:00] I (780534) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:31:31.550+00:00] W (786658) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:31:37.357+00:00] I (792519) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:31:37.357+00:00] W (792520) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:31:46.567+00:00] W (801661) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:31:50.442+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:31:50.443+00:00] !! opened
+[2026-09-30T12:32:12.190+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:32:12.191+00:00] !! opened
+[2026-09-30T12:32:25.248+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:32:25.249+00:00] !! opened
+[2026-09-30T12:32:25.265+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:32:25.266+00:00] !! opened
+[2026-09-30T12:32:25.466+00:00] ale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:32:38.086+00:00] W (853181) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:33:03.519+00:00] I (878674) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:33:03.519+00:00] W (878675) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:33:23.540+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:33:23.541+00:00] !! opened
+[2026-09-30T12:33:23.742+00:00] W (898793) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:33:25.266+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:33:25.267+00:00] !! opened
+[2026-09-30T12:33:25.271+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:33:25.272+00:00] !! opened
+[2026-09-30T12:33:25.472+00:00] I (900519) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:33:25.472+00:00] I (900530) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:33:25.472+00:00] I (900537) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:33:31.479+00:00] W (906667) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:33:46.499+00:00] W (921669) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:33:48.903+00:00] I (924085) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:33:48.903+00:00] W (924086) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:34:01.520+00:00] W (936671) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:34:16.541+00:00] W (951672) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:34:18.743+00:00] I (953893) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:34:18.743+00:00] W (953894) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:34:25.353+00:00] I (960505) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=108 busy=0 quarantined=0 fenced=0 tx_ok=238 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:34:25.353+00:00] I (960521) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:34:25.353+00:00] I (960532) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:34:25.353+00:00] I (960539) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:34:48.433+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:34:48.434+00:00] !! opened
+[2026-09-30T12:35:01.449+00:00] W (996676) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:35:03.653+00:00] I (998874) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:35:03.653+00:00] W (998875) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:35:16.472+00:00] W (1011676) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:35:19.475+00:00] I (1014612) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:35:19.475+00:00] W (1014613) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:35:25.285+00:00] I (1020489) RouteLoom: owner polls=366873 empty=366617 rxq_max=1 max_us rx=52 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:35:25.285+00:00] I (1020499) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:35:25.485+00:00] I (1020505) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=112 busy=0 quarantined=0 fenced=0 tx_ok=253 tx_failed=0 sI (1020521) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:35:25.485+00:00] I (1020540) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:35:31.493+00:00] W (1026678) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:35:46.512+00:00] W (1041678) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:35:49.516+00:00] W (1044756) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:36:01.530+00:00] W (1056679) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:36:04.936+00:00] I (1060081) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:36:04.936+00:00] W (1060082) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:36:16.553+00:00] W (1071678) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:36:22.562+00:00] I (1077621) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-30T12:36:22.562+00:00] W (1077628) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:36:25.275+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:36:25.275+00:00] !! opened
+[2026-09-30T12:36:25.475+00:00] I (1080522) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:36:25.475+00:00] I (1080534) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:36:25.475+00:00] I (1080541) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:36:31.485+00:00] W (1086678) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:36:49.913+00:00] I (1105100) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:37:01.529+00:00] W (1116679) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:37:12.542+00:00] W (1127729) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:37:27.164+00:00] I (1142337) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:37:27.164+00:00] W (1142338) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:37:46.239+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:37:46.240+00:00] !! opened
+[2026-09-30T12:37:46.440+00:00] W (1161682) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:38:54.738+00:00] I (1229879) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:38:54.738+00:00] W (1229880) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:39:25.377+00:00] I (1260495) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:39:25.377+00:00] I (1260496) RouteLoom: owner polls=442023 empty=441710 rxq_max=1 max_us rx=179 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:39:25.377+00:00] I (1260500) RouteLoom: owner expiry_slots=60114720 hop_accept_expired=0
+[2026-09-30T12:39:25.377+00:00] I (1260506) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:39:25.377+00:00] I (1260512) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=128 busy=0 quarantined=0 fenced=0 tx_ok=310 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:39:25.377+00:00] I (1260540) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:39:25.377+00:00] I (1260547) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:39:31.185+00:00] I (1266269) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:39:31.185+00:00] W (1266270) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:39:31.586+00:00] W (1266688) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:40:00.228+00:00] W (1295301) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:40:01.631+00:00] W (1296692) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:40:11.646+00:00] I (1306795) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:40:11.646+00:00] W (1306796) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:40:16.453+00:00] W (1311694) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:40:25.266+00:00] I (1320496) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:40:25.266+00:00] I (1320497) RouteLoom: owner polls=461133 empty=460806 rxq_max=1 max_us rx=179 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:40:25.266+00:00] I (1320501) RouteLoom: owner expiry_slots=62713680 hop_accept_expired=0
+[2026-09-30T12:40:25.266+00:00] I (1320507) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:40:25.467+00:00] I (1320513) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=132 busy=0 quarantined=0 fenced=0 tx_ok=324 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:40:25.467+00:00] I (1320529) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:40:25.467+00:00] I (1320541) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:40:25.467+00:00] I (1320548) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:40:31.449+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:40:31.450+00:00] !! opened
+[2026-09-30T12:40:41.865+00:00] I (1336951) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:40:41.865+00:00] W (1336952) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:41:05.498+00:00] I (1360735) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:41:05.498+00:00] W (1360736) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:41:16.512+00:00] W (1371697) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:41:18.514+00:00] I (1373707) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:41:18.514+00:00] W (1373708) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:41:34.338+00:00] I (1389537) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:41:34.338+00:00] W (1389538) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:41:46.556+00:00] W (1401700) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:41:47.757+00:00] I (1402863) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-30T12:41:47.757+00:00] W (1402863) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-30T12:41:48.558+00:00] I (1403710) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:41:48.558+00:00] W (1403711) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:42:00.974+00:00] I (1416218) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:42:00.974+00:00] W (1416219) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:42:16.455+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:42:16.456+00:00] !! opened
+[2026-09-30T12:42:22.467+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:42:22.468+00:00] !! opened
+[2026-09-30T12:42:25.272+00:00] I (1440497) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:42:25.272+00:00] I (1440498) RouteLoom: owner polls=498941 empty=498580 rxq_max=1 max_us rx=179 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:42:25.272+00:00] I (1440502) RouteLoom: owner expiry_slots=67855568 hop_accept_expired=0
+[2026-09-30T12:42:25.272+00:00] I (1440508) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:42:25.473+00:00] I (1440514) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=140 busy=0 quarantined=0 fenced=0 tx_ok=358 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:42:25.473+00:00] I (1440530) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:42:25.473+00:00] I (1440542) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:42:25.473+00:00] I (1440549) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:42:31.481+00:00] W (1446704) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:42:52.309+00:00] I (1467356) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:43:01.520+00:00] W (1476706) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:43:16.461+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:43:16.462+00:00] !! opened
+[2026-09-30T12:43:25.275+00:00] I (1500498) RouteLoom: owner polls=517632 empty=517261 rxq_max=1 max_us rx=179 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:43:25.275+00:00] I (1500502) RouteLoom: owner expiry_slots=70397544 hop_accept_expired=0
+[2026-09-30T12:43:25.275+00:00] I (1500508) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:43:25.476+00:00] I (1500514) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=144 busy=0 quarantined=0 fenced=0 tx_ok=368 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:43:25.476+00:00] I (1500530) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:43:25.476+00:00] I (1500542) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:43:46.508+00:00] W (1521712) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:43:58.927+00:00] I (1534085) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:43:58.927+00:00] W (1534086) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:44:01.531+00:00] W (1536711) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:44:25.365+00:00] I (1560498) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:44:25.365+00:00] I (1560509) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:44:43.191+00:00] I (1578263) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-30T12:44:43.191+00:00] W (1578263) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-30T12:44:46.596+00:00] W (1581717) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:45:01.619+00:00] I (1596695) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:45:01.619+00:00] W (1596696) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:45:01.619+00:00] W (1596718) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:45:11.433+00:00] I (1606675) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:45:11.433+00:00] W (1606676) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:45:25.453+00:00] I (1620500) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:45:25.453+00:00] I (1620501) RouteLoom: owner polls=555008 empty=554605 rxq_max=1 max_us rx=179 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:45:25.453+00:00] I (1620505) RouteLoom: owner expiry_slots=75480680 hop_accept_expired=0
+[2026-09-30T12:45:25.453+00:00] I (1620511) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:45:25.453+00:00] I (1620517) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=152 busy=0 quarantined=0 fenced=0 tx_ok=400 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:45:25.453+00:00] I (1620533) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:45:25.453+00:00] I (1620545) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:45:25.453+00:00] I (1620552) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:45:31.062+00:00] I (1626276) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:45:31.062+00:00] W (1626277) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:45:31.663+00:00] W (1626721) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:45:42.480+00:00] I (1637690) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:45:46.485+00:00] W (1641724) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:46:01.509+00:00] W (1656723) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:46:08.921+00:00] I (1663984) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:46:16.532+00:00] W (1671723) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:46:25.257+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:46:25.258+00:00] !! opened
+[2026-09-30T12:46:25.286+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:46:25.286+00:00] !! opened
+[2026-09-30T12:46:25.487+00:00] I (1680533) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:46:25.487+00:00] I (1680545) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:46:36.302+00:00] W (1691400) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:46:46.517+00:00] W (1701726) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:47:01.536+00:00] W (1716728) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:47:03.491+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:47:03.492+00:00] !! opened
+[2026-09-30T12:47:15.711+00:00] I (1730948) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-30T12:47:15.711+00:00] W (1730948) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-30T12:47:15.711+00:00] I (1730950) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:47:15.714+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:47:15.715+00:00] !! opened
+[2026-09-30T12:47:16.515+00:00] W (1731727) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:47:25.327+00:00] I (1740500) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:47:25.327+00:00] I (1740501) RouteLoom: owner polls=592376 empty=591943 rxq_max=1 max_us rx=179 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:47:25.327+00:00] I (1740505) RouteLoom: owner expiry_slots=80562728 hop_accept_expired=0
+[2026-09-30T12:47:25.327+00:00] I (1740511) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:47:25.327+00:00] I (1740533) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=0 kind_rejects=0
+[2026-09-30T12:47:25.327+00:00] I (1740552) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:47:26.328+00:00] I (1741416) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:47:31.482+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:47:31.483+00:00] !! opened
+[2026-09-30T12:47:52.915+00:00] I (1768122) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:48:16.609+00:00] W (1791732) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:48:18.671+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:48:18.672+00:00] !! opened
+[2026-09-30T12:48:25.292+00:00] I (1800502) RouteLoom: owner polls=611064 empty=610618 rxq_max=1 max_us rx=179 bootstrap=51253 node=1740 security=689019
+[2026-09-30T12:48:25.292+00:00] I (1800512) RouteLoom: HIL HEAP free=159848 largest=143360 min=159548 B
+[2026-09-30T12:48:25.292+00:00] tale=0 send_errors=0 last_error=0x0 rx=4 rx_other_channel=0
+[2026-09-30T12:48:25.492+00:00] I (1800553) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:48:31.508+00:00] W (1806732) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:48:46.485+00:00] !! USB error device reports readiness to read but returned no data (devic
+[2026-09-30T12:48:46.487+00:00] !! opened

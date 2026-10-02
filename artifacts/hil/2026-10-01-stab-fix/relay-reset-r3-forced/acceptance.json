@@ -1,0 +1,16 @@
+{
+  "cycles": [
+    {"cycle":0,"delivered":4,"first_delivery_s":36.437,"bound_s":{"3":2.5,"1":24.285}},
+    {"cycle":1,"delivered":6,"first_delivery_s":28.311,"bound_s":{"1":2.032,"3":25.583}},
+    {"cycle":2,"delivered":4,"first_delivery_s":36.433,"bound_s":{"3":4.411,"1":26.448}},
+    {"cycle":3,"delivered":4,"first_delivery_s":36.482,"bound_s":{"3":2.022,"1":24.877}},
+    {"cycle":4,"delivered":10,"first_delivery_s":4.224,"bound_s":{"3":2.375,"1":2.876}},
+    {"cycle":5,"delivered":5,"first_delivery_s":30.444,"bound_s":{"1":2.372,"3":28.715}},
+    {"cycle":6,"delivered":9,"first_delivery_s":6.164,"bound_s":{"1":2.024,"3":2.626}},
+    {"cycle":7,"delivered":4,"first_delivery_s":36.439,"bound_s":{"3":1.854,"1":24.091}},
+    {"cycle":8,"delivered":6,"first_delivery_s":24.373,"bound_s":{"1":2.065,"3":23.302}},
+    {"cycle":9,"delivered":9,"first_delivery_s":6.788,"bound_s":{"3":2.043,"1":2.545}}
+  ],
+  "delivered": 61,
+  "note": "BOUND times use timestamped console observations; delivery offsets use the monotonic clock."
+}

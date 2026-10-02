@@ -1,0 +1,32 @@
+{
+  "bridge": {
+    "bundle": "sb-br-plan",
+    "app_sha256": "36cc1e733d715741ae0d2984f71211cbdfea7e6356dfeb3ced6807c2c3c3e9ab",
+    "app_bytes": 1260864,
+    "nvs_preserved": {
+      "rlcfg": true,
+      "rlkeys": true,
+      "rlsec": true
+    }
+  },
+  "relay": {
+    "bundle": "sb-rl-feat",
+    "app_sha256": "6257597d02842ef2cfb51fdbac6c6fcd71a28a3bd17f516100a3ef889deb99c0",
+    "app_bytes": 1344912,
+    "nvs_preserved": {
+      "rlcfg": true,
+      "rlkeys": true,
+      "rlsec": true
+    }
+  },
+  "endpoint": {
+    "bundle": "sb-ep-plan",
+    "app_sha256": "216bff9e429367a4eaa221774f52590893a86dd74939ffa9cad52c03e760d70a",
+    "app_bytes": 1289184,
+    "nvs_preserved": {
+      "rlcfg": true,
+      "rlkeys": true,
+      "rlsec": true
+    }
+  }
+}

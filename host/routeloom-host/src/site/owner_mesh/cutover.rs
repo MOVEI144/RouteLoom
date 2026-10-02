@@ -362,17 +362,12 @@ pub(super) fn c1_once(tag: &str, switch: Switch, gate: usize, leaf: usize, relay
     // COMMIT dispatch at full resolution: send ticks (a target
     // leaving Prepared post-commit), stored ticks (verified
     // COMMIT_STORED), and the applied count at each parent send.
-    // The last 70 s run at 100 ms: the RouteState query round trip
-    // (down, relay, answer, forward, up) needs several TX
-    // opportunities inside its 4 s routed lifetime, and 1 s steps
-    // starve the relay queue behind routine chatter — the tree would
-    // stay unknown and leaf-first would never gate.
+    // Keep the radio's normal resolution throughout the window. A coarse
+    // clock jump also ages queued control frames and delayed callbacks;
+    // silence in the previous step does not prove the next step is idle.
     let window_end = staged_at + crate::site::cutover::CUTOVER_PREPARE_WINDOW_MS;
-    while world.now + 70_000 < window_end {
-        world.step(1000);
-    }
     while world.now + 10_000 < window_end {
-        world.step(100);
+        world.step(25);
     }
     let mut send_tick = [None::<u64>; 3];
     let mut stored_tick = [None::<u64>; 3];
@@ -1366,6 +1361,7 @@ fn mesh_c7_old_epoch_boundary() {
         world.snaps[2].rx_count, b_rx_before,
         "held DATA never reached B"
     );
+    world.c7_hold_b_receipt = true;
     let staged_at = world.now;
     let operation_id = stage_cutover(&mut world, "c7");
     let (operation_id, next_gk, new_network, old_network, t0) =
@@ -1382,7 +1378,6 @@ fn mesh_c7_old_epoch_boundary() {
         world.switch.c7_old_cert.is_some(),
         "old MemberCert handshake left A"
     );
-    world.c7_hold_b_receipt = true;
     // Strand A fully dark while the COMMIT dispatch is still working
     // its way down the tree (the leaf commits last, so its downlink
     // has not landed yet). A stays Prepared on the old epoch.

@@ -1,0 +1,44 @@
+{
+  "source_sha": "5fca34e26f69282536cda77be36efd979dfbee14",
+  "app_only": {
+    "identity": {
+      "chip": "esp32c6",
+      "mac": "10:bd:a3:ff:fe:b1:47:54",
+      "log": "flash-endpoint-preflight.log",
+      "flash_bytes": 4194304
+    },
+    "app_sha256": "645eb870d43324aa7d039f8c07490456e2b3d02740b2ac8e39deb5a54c2d14d9",
+    "app_bytes": 1297168,
+    "bundle": "hil-stab-5f-endpoint-direct-reference_node-esp32c6"
+  },
+  "before": {
+    "rlcfg": {
+      "sha256": "68985881dbfc6ac5f819d272dd0ba449fec1cb796ba6dd98c7f45ef65ea6316e",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "b1ef4e0a0ae580f38cddfd04929985ddc40937e8575677131b0aa024f6470d11",
+      "blank": false
+    }
+  },
+  "after": {
+    "rlcfg": {
+      "sha256": "68985881dbfc6ac5f819d272dd0ba449fec1cb796ba6dd98c7f45ef65ea6316e",
+      "blank": false
+    },
+    "rlkeys": {
+      "sha256": "3bacffc0ee37ae05c6d669944b45084fab39859172518d84b7f7c0771a2a3618",
+      "blank": false
+    },
+    "rlsec": {
+      "sha256": "b1ef4e0a0ae580f38cddfd04929985ddc40937e8575677131b0aa024f6470d11",
+      "blank": false
+    }
+  },
+  "nvs_preserved": true,
+  "overlay": "HIL_DROP_RX_MAC=10:bd:a3:b1:48:a8 (relay); endpoint must bind directly to gateway"
+}
