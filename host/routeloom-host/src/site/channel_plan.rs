@@ -38,7 +38,14 @@ const VALIDITY_MS: u64 = 120_000;
 const MAX_OUTAGE_MS: u32 = 500;
 /// The device's kChannelMaskAll24 (channels 1..=13).
 const CAPABILITY_MASK: u32 = 0x3FFF;
-const META_ACTIVE_CHANNEL: &str = "channel_plan_active";
+pub(super) const META_ACTIVE_CHANNEL: &str = "channel_plan_active";
+
+pub(super) fn encode_channel(network: u64, channel: u8, epoch: u32) -> Vec<u8> {
+    let mut bytes = network.to_be_bytes().to_vec();
+    bytes.push(channel);
+    bytes.extend_from_slice(&epoch.to_be_bytes());
+    bytes
+}
 
 pub(super) fn restore_channel(
     id: &mut Identity,
@@ -187,9 +194,7 @@ impl SiteAuthority {
                     return Err("channel plan conflicts with the committed epoch".into());
                 }
             }
-            let mut bytes = self.id.network.to_be_bytes().to_vec();
-            bytes.push(report.active_channel);
-            bytes.extend_from_slice(&report.active_epoch.to_be_bytes());
+            let bytes = encode_channel(self.id.network, report.active_channel, report.active_epoch);
             self.store
                 .commit(&Batch {
                     meta: vec![(META_ACTIVE_CHANNEL, bytes.clone())],
