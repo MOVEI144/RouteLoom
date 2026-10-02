@@ -269,9 +269,17 @@ fn mesh_route_loss_probe_result_survives_callback_delay() {
         world.switch.callback_delay_kind = Some(WIRE_DATA);
         world.peers[1].app_send(testkit::GATEWAY, b"during-probe");
         let mut overlap = false;
+        let mut result_deadline = world.now;
         for _ in 0..1000 {
             world.step(25);
-            if world.callbacks[1].iter().any(|(at, _)| *at > world.now) {
+            if let Some(&(callback_at, _)) =
+                world.callbacks[1].iter().find(|(at, _)| *at > world.now)
+            {
+                // A parked Result retries at 50 ms; allow two radio ticks
+                // after that retry, before a new Probe can mask its loss.
+                result_deadline = callback_at + 100;
+                world.switch.watch_kind = Some(WIRE_RESULT);
+                world.switch.watched.clear();
                 let index = pending_probe(&world).expect("captured Probe still held");
                 // Inject on the same tick as the pending callback, before
                 // the harness services that callback (including 20 ms).
@@ -286,6 +294,20 @@ fn mesh_route_loss_probe_result_survives_callback_delay() {
         assert!(
             overlap,
             "{delay} ms: Probe RX scheduled with DATA callback pending"
+        );
+        let result_sent = |world: &MeshWorld| {
+            world
+                .switch
+                .watched
+                .iter()
+                .any(|(from, to, _)| *from == 1 && *to == 0)
+        };
+        while world.now < result_deadline && !result_sent(&world) {
+            world.step(25);
+        }
+        assert!(
+            result_sent(&world),
+            "{delay} ms: A's parked Result crossed after the DATA slot freed"
         );
         for _ in 0..1000 {
             world.step(25);
