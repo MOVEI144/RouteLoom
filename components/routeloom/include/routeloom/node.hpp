@@ -485,6 +485,8 @@ class ConfigEndpointSink {
   // configured AND ready verifier profiles only — 0 means the sink accepts
   // no permits or its verifier is unprovisioned.
   virtual std::uint32_t permit_profile_bits() const noexcept { return 0; }
+  virtual bool accepts_extension(FrameType) const noexcept { return false; }
+  virtual bool quiescent() const noexcept { return true; }
 };
 
 // P6 revocation-gossip sink (docs/design/sdk-v1/04-removal-revocation.md
@@ -1188,7 +1190,8 @@ class MeshNode {
   // ordered group holds. This is stricter than radio quiescence: a
   // delivery waiting for a route can have no frame in flight.
   bool sleep_work_pending() const noexcept {
-    if (!quiesced() || component_jobs_outstanding_ != 0 ||
+    if ((config_sink_ != nullptr && !config_sink_->quiescent()) ||
+        !quiesced() || component_jobs_outstanding_ != 0 ||
         group_holds_.size() != 0 || group_promote_hold_.used) return true;
     bool pending = false;
     deliveries_.for_each([&](const Delivery& delivery) {
@@ -1741,7 +1744,7 @@ class MeshNode {
   enum class JobForm : std::uint8_t { Plain, Forwarded, Sealed };
   enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit,
                                        GatewayService, Config, Diagnostic,
-                                       Applied, Group, Bootstrap };
+                                       Applied, Group, Bootstrap, AppObject };
 
   // Records below are laid out largest-alignment first: MeshNode is a static
   // object in firmware and every byte of padding is .bss on the DRAM-bound
@@ -2953,7 +2956,6 @@ class MeshNode {
   FixedPool<GroupStream, kGroupStreamCapacity> group_streams_{};
   FixedPool<GroupHold, kGroupHoldCapacity> group_holds_{};
   GroupPromoteHold group_promote_hold_{};
-  std::uint32_t next_group_seq_{1};
   std::int64_t group_budget_tokens_us_{kGroupBudgetCapacityUs};
   MonotonicMs group_budget_last_ms_{0};
   GroupStats group_stats_{};
@@ -2974,11 +2976,17 @@ class MeshNode {
   CongestionStats budget_stats_{};
   std::int64_t control_budget_tokens_us_{kControlBudgetCapacityUs};
   MonotonicMs control_budget_last_ms_{0};
+  // AppObject radio pacing also applies to opaque OFF relays and hop retries.
+  MonotonicMs object_send_after_ms_{0};
   // Calibrated emission demand: EWMA (alpha 1/8) of measured control-domain
   // driver service, seeded at the pinned max-frame cost so the first
   // emissions gate conservatively until local service is measured.
   std::uint32_t control_service_ewma_us_{kControlBudgetFrameCostUs};
+  // Driver-queue age of the frame currently inside receive_impl — debited
+  // from the forwarding budget by queue_forward (01 §lifetime).
+  std::uint32_t rx_age_ms_{0};
   std::uint64_t control_service_samples_{0};
+  std::uint32_t next_group_seq_{1};
   bool control_budget_unsat_reported_{false};
   // Dedup capacity counters (sdk-completion/02 §2.4) — admissions, refusals,
   // forced evictions and expiry releases, all saturating u64.
@@ -2996,9 +3004,6 @@ class MeshNode {
   // Transit refusals under a disabled/draining relay gate (01 §policy) —
   // counted so relay-off is evidence, not a silent black hole.
   std::uint64_t transit_refused_{0};
-  // Driver-queue age of the frame currently inside receive_impl — debited
-  // from the forwarding budget by queue_forward (01 §lifetime).
-  std::uint32_t rx_age_ms_{0};
   SessionStats session_stats_{};
   // Latest wall time seen on the event path; observation timestamps use it
   // where the call site (e.g. delivery-state transitions) has no clock.

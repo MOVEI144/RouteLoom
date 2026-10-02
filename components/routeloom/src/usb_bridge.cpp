@@ -90,7 +90,7 @@ UsbBridge::UsbBridge(const Config& config, ByteStream& stream) noexcept
       window_(BootLease::derive(config.boot_id, config.node)) {
   // These bits describe attached services, including those compiled out of
   // this image. Only a successful attach may advertise them in HelloAck.
-  config_.capability &= ~(kCapGatewayEndpointV1 | kCapConfigEndpointV1 |
+  config_.capability &= ~(kCapAppObjectV1 | kCapGatewayEndpointV1 | kCapConfigEndpointV1 |
                           kCapM1DiagnosticsV1 | kCapNodeStatusV1 | kCapGroupDeliveryV1 |
                           kCapJoinRelayV1 | kCapJoinRelayV2 | kCapAuthorityChannelV1 |
                           kCapObservationV1 | kCapRxAssuranceV1 | kCapChannelPlanV1);
@@ -330,6 +330,9 @@ void UsbBridge::on_bytes(const ByteView input, const MonotonicMs now_ms) noexcep
 void UsbBridge::poll(const MonotonicMs now_ms) noexcept {
   now_ms_ = now_ms;
   decoder_.poll(now_ms);
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  pump_object(now_ms);
+#endif
   // The pre-auth budget is a device-level rate limit across session attempts
   // (a new HELLO must not reset it): refill one reply per kPreAuthRefillMs.
   if (preauth_budget_ < kPreAuthBudget) {
@@ -862,6 +865,15 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
     return;
   }
   switch (sub) {
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+    case HostOpsSub::ObjectBegin:
+    case HostOpsSub::ObjectChunk:
+    case HostOpsSub::ObjectEnd:
+    case HostOpsSub::ObjectCancel:
+    case HostOpsSub::ObjectGet:
+      handle_object(request, inner, now_ms);
+      break;
+#endif
     case HostOpsSub::Submit:
       handle_ops_submit(request, inner, now_ms);
       break;
@@ -2999,6 +3011,9 @@ void UsbBridge::note_credit_stall(const MonotonicMs now_ms) noexcept {
 }
 
 void UsbBridge::reset_session_state() noexcept {
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  reset_object();
+#endif
   const bool had_session =
       state_ == SessionState::Active || state_ == SessionState::Draining;
   state_ = SessionState::Disconnected;

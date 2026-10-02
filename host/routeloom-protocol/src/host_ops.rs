@@ -27,6 +27,14 @@ pub const CAP_CONFIG_ENDPOINT_V1: u32 = 1 << 4;
 /// once enabled, appends the 8 B ingress assurance tail to flagged
 /// DataFromMesh frames. Advertised separately from host_ops_v1.
 pub const CAP_RX_ASSURANCE_V1: u32 = 1 << 12;
+pub const CAP_APP_OBJECT_V1: u32 = 1 << 14;
+pub const SUB_OBJECT_BEGIN: u8 = 0x80;
+pub const SUB_OBJECT_CHUNK: u8 = 0x81;
+pub const SUB_OBJECT_END: u8 = 0x82;
+pub const SUB_OBJECT_CANCEL: u8 = 0x83;
+pub const SUB_OBJECT_STATUS: u8 = 0x84;
+pub const SUB_OBJECT_GET: u8 = 0x85;
+pub const SUB_OBJECT_INGRESS: u8 = 0x86;
 pub const HOST_OPS_SCHEMA: u8 = 1;
 
 pub const SUB_SUBMIT: u8 = 0x01;

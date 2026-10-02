@@ -30,6 +30,7 @@
 
 #include "routeloom/autonomy_wire.hpp"
 #include "routeloom/config_wire.hpp"
+#include "routeloom/object_assembler.hpp"
 #include "routeloom/rlres1.hpp"
 #include "routeloom/sdkv1_authority.hpp"
 #include "routeloom/status.hpp"
@@ -185,16 +186,14 @@ class AuthorityEndpoint final : public AuthorityMeshDemux, public AuthorityPort 
 
  private:
   struct Assembly {
-    bool active{false};
     NodeId origin{kInvalidNodeId};
     autonomy::ObjectHash hash{};
-    std::uint16_t total_len{0};
-    std::uint16_t received{0};
-    MonotonicMs started_ms{0};
+    ObjectAssembler assembler{};
     std::array<std::uint8_t, kAuthorityObjectMax> buffer{};
     // Mesh chunks are fixed 90-byte cells (at most 23), so one bit per
     // received cell also detects exact retries without a per-byte map.
-    std::uint32_t received_chunks{0};
+    std::array<std::uint8_t, 4> received_chunks{};
+    bool active() const noexcept { return assembler.active() && !assembler.complete(); }
   };
   struct TxTransfer {
     bool active{false};
@@ -224,17 +223,17 @@ class AuthorityEndpoint final : public AuthorityMeshDemux, public AuthorityPort 
   Assembly rx_{};
   // Small-carrier RX slot: one Control carrier waits here for take_rx.
   std::array<std::uint8_t, kAuthorityCarrierBodyMax> carrier_buf_{};
-  AuthorityCarrierKind carrier_kind_{AuthorityCarrierKind::Envelope};
   std::size_t carrier_size_{0};
-  bool carrier_ready_{false};
-  bool object_ready_{false};  // completed assembly waits for take_rx
   TxTransfer tx_{};
   AuthorityTxResult tx_result_{};
-  bool tx_result_ready_{false};
   std::uint64_t next_token_{1};
   std::uint32_t next_exchange_{1};
-  bool in_call_{false};
   Counters counters_{};
+  AuthorityCarrierKind carrier_kind_{AuthorityCarrierKind::Envelope};
+  bool carrier_ready_{false};
+  bool object_ready_{false};  // completed assembly waits for take_rx
+  bool tx_result_ready_{false};
+  bool in_call_{false};
 };
 
 class AuthorityHostSink {

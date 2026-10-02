@@ -41,7 +41,7 @@ SCENARIO_KEYS = ("id", "family", "variant", "tier", "layer", "topology", "faults
 REQUIRED_V2_PRS = {f"V2-{number:02d}" for number in range(1, 23)}
 JOBS = str(min(os.cpu_count() or 2, 8))
 FUZZ_TARGETS = ("wire_frame", "usb_codec", "autonomy", "endpoint", "host_ops", "migration",
-                "cose", "rlres1", "sdkv1", "sdkv1_ead", "sdkv1_join")
+                "cose", "rlres1", "sdkv1", "sdkv1_ead", "sdkv1_join", "app_object")
 # Generated-vector directories: diff catches changed bytes, porcelain catches
 # a generator that starts emitting an unreviewed (untracked) vector.
 GENERATED_GOLDENS = (
@@ -161,8 +161,9 @@ def interop() -> list[Step]:
               "--", "--nocapture"], cwd="host", env=env, forbid=SKIP_MARK,
              require=live_cases(rows, "site/joiner_interop.rs")),
         Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::owner_mesh::",
-              "--", "--nocapture"], cwd="host", env=mesh_env, forbid=SKIP_MARK,
-             require=live_cases(rows, "site/owner_mesh/")),
+              "--", "--nocapture", "--skip", "site::owner_mesh::object::"], cwd="host", env=mesh_env, forbid=SKIP_MARK,
+             require=[case for case in live_cases(rows, "site/owner_mesh/")
+                      if "::object::" not in case]),
     ]
 
 
@@ -273,12 +274,45 @@ def profile_mesh() -> list[Step]:
     return steps
 
 
+def object_mesh() -> list[Step]:
+    build = "build-object-mesh"
+    peer = "tests/cpp/routeloom_owner_mesh_peer"
+    env = {"ROUTELOOM_MESH_PEER": str(ROOT / build / peer),
+           "ROUTELOOM_OWNER_PEER": str(ROOT / build / "tests/cpp/routeloom_joiner_interop_peer"),
+           "ROUTELOOM_MESH_PEER_B": str(ROOT / "build" / peer),
+           "UBSAN_OPTIONS": "halt_on_error=1"}
+    return [
+        Step(["cmake", "-S", ".", "-B", "build", "-DROUTELOOM_ENABLE_SANITIZERS=ON",
+              "-DCMAKE_BUILD_TYPE=Debug", "-DROUTELOOM_APP_OBJECT_TRANSFER=OFF"]),
+        Step(["cmake", "--build", "build", "--parallel", JOBS, "--target", "routeloom_owner_mesh_peer"]),
+        Step(["cmake", "-S", ".", "-B", build, "-DROUTELOOM_ENABLE_SANITIZERS=ON",
+              "-DCMAKE_BUILD_TYPE=Debug", "-DROUTELOOM_APP_OBJECT_TRANSFER=ON", "-DROUTELOOM_DEDUP_PROFILE=leaf"]),
+        Step(["cmake", "--build", build, "--parallel", JOBS, "--target",
+              "routeloom_owner_mesh_peer", "routeloom_joiner_interop_peer"]),
+    ] + object_steps(live_cases(load_scenarios(), "site/owner_mesh/object.rs"), env,
+                     ["cargo", "test", "-p", "routeloom-host", "--bins", "--"], "host")
+
+
+def object_steps(cases: list[str], env: dict, argv: list[str], cwd: str) -> list[Step]:
+    steps = []
+    for terminal_off in (False, True):
+        selected = [case for case in cases if ("mesh_p04" in case) == terminal_off]
+        if not selected:
+            continue
+        peers = dict(env)
+        if terminal_off:
+            peers["ROUTELOOM_MESH_PEER_GW"] = env["ROUTELOOM_MESH_PEER_B"]
+        steps.append(Step([*argv, "--include-ignored", "--nocapture", "--test-threads=2", *selected],
+                          cwd=cwd, env=peers, forbid=SKIP_MARK, require=selected))
+    return steps
+
+
 def fuzz() -> list[Step]:
     # Bounded CI-time fuzzing (60 s per target over the seed corpus), not
     # continuous fuzzing.
     steps = [
         Step(["cmake", "-S", ".", "-B", "build-fuzz", "-DROUTELOOM_BUILD_TESTS=ON",
-              "-DROUTELOOM_BUILD_FUZZERS=ON", "-DROUTELOOM_ENABLE_SANITIZERS=ON",
+              "-DROUTELOOM_BUILD_FUZZERS=ON", "-DROUTELOOM_APP_OBJECT_TRANSFER=ON", "-DROUTELOOM_ENABLE_SANITIZERS=ON",
               "-DCMAKE_BUILD_TYPE=Debug"], env={"CC": "clang", "CXX": "clang++"}),
         Step(["cmake", "--build", "build-fuzz", "--parallel", JOBS, "--target",
               *(f"fuzz_{t}" for t in FUZZ_TARGETS)]),
@@ -450,7 +484,8 @@ def e2e(tier: str, shard: str, build: str, test_bin: str | None) -> list[Step]:
     errors = scenario_errors(rows)
     if errors:
         raise SystemExit("\n".join(errors))
-    cases = e2e_cases(rows, tier, shard)
+    all_cases = e2e_cases(rows, tier, shard)
+    cases = [case for case in all_cases if "::object::" not in case]
     env = {"ROUTELOOM_OWNER_PEER": str(ROOT / build / "tests/cpp/routeloom_joiner_interop_peer"),
            "ROUTELOOM_MESH_PEER": str(ROOT / build / "tests/cpp/routeloom_owner_mesh_peer"),
            "UBSAN_OPTIONS": "halt_on_error=1", "ROUTELOOM_E2E_TIER": tier}
@@ -458,10 +493,15 @@ def e2e(tier: str, shard: str, build: str, test_bin: str | None) -> list[Step]:
         env["ROUTELOOM_E2E_NIGHTLY"] = "1"
     argv = ([str(ROOT / test_bin)] if test_bin else
             ["cargo", "test", "-p", "routeloom-host", "--bins", "--"])
-    return [Step(["assert-peer-version", env["ROUTELOOM_OWNER_PEER"], PEER_VERSION]),
+    steps = [Step(["assert-peer-version", env["ROUTELOOM_OWNER_PEER"], PEER_VERSION]),
             Step(["assert-peer-version", env["ROUTELOOM_MESH_PEER"], MESH_PEER_VERSION]),
             Step([*argv, "--nocapture", f"--test-threads={1 if tier == 'nightly' else 2}", *cases],
                  cwd="." if test_bin else "host", env=env, forbid=SKIP_MARK, require=cases)]
+    object_env = {**env,
+                  "ROUTELOOM_MESH_PEER": str(ROOT / (build + "-object") / "tests/cpp/routeloom_owner_mesh_peer"),
+                  "ROUTELOOM_MESH_PEER_B": env["ROUTELOOM_MESH_PEER"]}
+    return steps + object_steps([case for case in all_cases if "::object::" in case],
+                                object_env, argv, "." if test_bin else "host")
 
 
 # --- firmware cells -------------------------------------------------------
@@ -778,7 +818,7 @@ def stream(step: Step, cwd: Path, env: dict) -> tuple[int, str, set[str]]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="stage", required=True)
-    for name in ("quick", "ci", "docs", "golden", "rust", "interop", "compat", "profile-mesh", "fuzz"):
+    for name in ("quick", "ci", "docs", "golden", "rust", "interop", "compat", "profile-mesh", "object-mesh", "fuzz"):
         sub.add_parser(name).add_argument("--dry-run", action="store_true")
     p_e2e = sub.add_parser("e2e")
     p_e2e.add_argument("--dry-run", action="store_true")
@@ -874,10 +914,10 @@ def main(argv: list[str] | None = None) -> int:
               "golden": golden, "rust": rust, "interop": interop, "compat": compat,
               "e2e": lambda: e2e(args.tier, args.shard, args.build_dir, args.test_bin),
               "profiles": lambda: profiles(getattr(args, "build", None)),
-              "profile-mesh": profile_mesh, "fuzz": fuzz,
+              "profile-mesh": profile_mesh, "object-mesh": object_mesh, "fuzz": fuzz,
               "firmware": lambda: [s for c in data["cells"] for s in firmware_steps(c)]}
     order = {"quick": ("docs", "core"),
-             "ci": ("docs", "core", "golden", "rust", "interop", "profiles", "profile-mesh",
+             "ci": ("docs", "core", "golden", "rust", "interop", "profiles", "profile-mesh", "object-mesh",
                     "fuzz", "firmware")}
     for name in order.get(args.stage, (args.stage,)):
         print(f"=== {name}", flush=True)

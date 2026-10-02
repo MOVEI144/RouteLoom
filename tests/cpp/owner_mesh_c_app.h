@@ -44,10 +44,19 @@ typedef struct mesh_c_app {
   uint32_t membership_post_pass;
   /* Application messages received through on_message. */
   uint32_t messages;
+  uint32_t objects;
+  uint32_t object_results;
+  uint8_t object_state;
+  uint16_t object_size;
+  uint8_t object_data[4096];
   rl_message_id_t applied_id;
   uint8_t applied_result_pending;
 } mesh_c_app_t;
 
+rl_status_code_t mesh_c_app_object_send(mesh_c_app_t* app, rl_node_id_t destination,
+    const uint8_t* payload, size_t size, uint32_t deadline, uint32_t* id);
+rl_status_code_t mesh_c_app_object_buffer(mesh_c_app_t* app, uint8_t* bytes, size_t size);
+rl_status_code_t mesh_c_app_object_cancel(mesh_c_app_t* app, uint32_t id);
 void mesh_c_app_observer(mesh_c_app_t* app, rl_dev_observer_t* out);
 /* delivery: rl_delivery_class_t; coalesce_key only for BEST_EFFORT. */
 rl_status_code_t mesh_c_app_send(mesh_c_app_t* app, rl_node_id_t destination,

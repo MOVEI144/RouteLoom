@@ -52,6 +52,8 @@ impl MeshDaemon {
             principal: Some(routeloom_peercred::Principal::UnixUid(501)),
             acl: &state.acl,
             receive_log: &state.receive_log,
+            object_log: &state.object_log,
+            object_ops: &state.object_ops,
             operation_store: &state.operation_store,
             rate_limiter: &state.rate_limiter,
             session: &state.session,

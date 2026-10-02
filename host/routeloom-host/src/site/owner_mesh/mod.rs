@@ -77,6 +77,7 @@ mod kg;
 mod load;
 mod membership;
 mod mesh;
+mod object;
 mod peer;
 mod product;
 mod recovery;
