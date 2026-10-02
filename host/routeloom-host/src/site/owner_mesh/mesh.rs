@@ -705,7 +705,13 @@ fn mesh_direct_converges_and_delivers() {
     );
     assert_eq!(world.usb_host.hello_node, Some(testkit::GATEWAY));
     assert_eq!(world.usb_host.hello_network, Some(testkit::network()));
-    assert_eq!(world.usb_host.hello_capability, Some(USB_CAP));
+    assert_eq!(
+        world
+            .usb_host
+            .hello_capability
+            .map(|cap| cap & !routeloom_protocol::host_ops::CAP_APP_OBJECT_V1),
+        Some(USB_CAP)
+    );
     assert_eq!(world.usb_host.session_losses, 0, "USB session held");
     assert!(
         world.usb_host.ups_seen > 0 && world.usb_host.downs_sent > 0,

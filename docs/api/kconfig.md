@@ -312,6 +312,28 @@ bool "dev-ram (pairwise RAM sessions, no identity claim)"
 bool "member-edhoc (EDHOC membership via the security owner)"
 ```
 
+### CONFIG_ROUTELOOM_APP_OBJECT_TRANSFER
+
+```text
+bool "Authenticated unicast application objects (4 KiB)"
+        default n
+        help
+            Explicit object sends use Bulk priority and two outstanding chunks.
+            Ordinary sends keep their existing payload limit. Applications
+            provide the receive buffer and retain the immutable transmit loan.
+```
+
+### CONFIG_ROUTELOOM_APP_OBJECT_RX_SLOTS
+
+```text
+int "Application object receive slots"
+        depends on ROUTELOOM_APP_OBJECT_TRANSFER
+        range 1 1 if IDF_TARGET_ESP32C3
+        range 1 2
+        default 1 if IDF_TARGET_ESP32C3
+        default 2
+```
+
 ## routeloom_device
 
 生成元：[components/routeloom_device/Kconfig](../../components/routeloom_device/Kconfig)

@@ -148,3 +148,13 @@ Entropy Providerにはinitialize、ready、fill、reseed、failureを要求し�
 capabilityは設計予定／実装／認定／有効を別に返す。[feature manifest](../reference/feature-profiles.json)。公開ABIの数値・struct layoutは未凍結。今回のJSONとPython小モデルはC ABIの代替ではない。
 
 SDK の firmware sleep 経路は耐久 pending の復旧結果を `DeviceObserver::on_sleep_pending_result(record, status)` に通知する。元の logical message ID を保持し、Ok は再注入の受付を示す（配送の成功ではない）。期限切れ・TIME_UNCERTAIN・再注入の失敗も通知し、callback 内の Device 変更は Busy で拒否する。caller-owned PowerCoordinator を bind する構成では、その coordinator に渡した PowerEvents が通知先になる。
+
+## AppObject（optional）
+
+componentの `CONFIG_ROUTELOOM_APP_OBJECT_TRANSFER` は既定OFF。C++ Deviceの `send_object`／`cancel_object`／`register_object_buffer` と `ObjectObserver`、Cの `rl_dev_send_object`／`rl_dev_cancel_object`／`rl_dev_register_object_buffer` とobserver末尾のobject callbackを用いる。通常sendの128 B上限を変えず、暗黙分割しない。OFFの入口はUnsupported、capabilityはfalse／max_object_bytes=0。
+
+認証済みunicastのみ、1〜4096 B。空はInvalidArgument、4097 B以上はTooLarge。deadlineの既定30000 ms、最大120000 ms。app_tagとcontent_encodingはそのまま相手に渡し、圧縮はSDKが行わない。送信は一件のimmutable loanで、結果callbackまで元のbytesを有効に保つ。Busy／AuthRequiredなどの受付失敗ではloanを保持しない。受信bufferは4096 B以上をcallerが登録し、C3は一枠、他は既定二枠。一source一件、満杯はBusy、未登録はNoBufferで拒否する。
+
+全chunkとSHA-256先頭16 Bが一致した後に一回のon_object。受信viewの寿命はcallback内だけ。ObjectState::Deliveredはcallback後の全体ACKを得た場合だけで、APP_APPLIEDではない。未送信cancelはCancelledBeforeTx、一部送信後cancelはIndeterminate。context／identity変更はFailed、全体期限または10秒無進捗はExpired。callbackからの操作はBusy。objectが動作中はsleep準備を止める。
+
+wireと再送規則は[wire-protocol.md](wire-protocol.md)、host入口は[host.md](host.md)。Device API 1のobserver／capabilities末尾を追加し、旧struct_sizeのprefix consumerを維持する。

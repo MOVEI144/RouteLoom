@@ -57,9 +57,11 @@ class CellList(unittest.TestCase):
             settings = cell["overlay"] + cell.get("expect", [])
             if cell["app"] in ("bridge_node", "reference_node") and not cell["overlay"]:
                 self.assertIn(member, settings, cell["id"])
-            if "devram" in cell["id"] or cell["app"] in (
+            if "devram" in cell["id"] or "app_object" in cell["id"] or cell["app"] in (
                     "endpoint_cpp", "endpoint_c", "standalone_gateway", "idf_consumer"):
                 self.assertIn(dev, settings, cell["id"])
+                if cell["app"] in ("bridge_node", "reference_node"):
+                    self.assertIn(dev, cell["overlay"], cell["id"])
 
     def test_check_parallelism_is_bounded(self):
         build = check.core()[1]
@@ -78,8 +80,9 @@ class CellList(unittest.TestCase):
         data = check.load_cells()
         cells = data["cells"]
         # Every app/target and feature branch, including C6 external antenna selection.
-        self.assertEqual(len(cells), 62)
+        self.assertEqual(len(cells), 65)
         self.assertTrue({
+            "bridge_node-esp32c5-normal-off-app_object-small",
             "bridge_node-esp32c3-normal-off-maintenance_member",
             "reference_node-esp32c6-normal-off-maintenance_member",
             "bridge_node-esp32c6-normal-off-maintenance_member",
@@ -150,7 +153,7 @@ class CellList(unittest.TestCase):
     def test_workflow_runs_every_ci_stage(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         for stage in ("core --sanitizers", "docs", "golden", "rust",
-                      "profiles --build", "profile-mesh", "fuzz"):
+                      "profiles --build", "profile-mesh", "object-mesh", "fuzz"):
             self.assertIn(f"python3 tools/check.py {stage}", workflow)
 
     def test_ci_requires_e2e_report_artifact(self):
@@ -160,7 +163,7 @@ class CellList(unittest.TestCase):
     def test_ci_dry_run_lists_every_stage_and_cell(self):
         code, out, _ = run_main(["ci", "--dry-run"])
         self.assertEqual(code, 0)
-        for stage in ("docs", "core", "golden", "rust", "interop", "profiles", "profile-mesh",
+        for stage in ("docs", "core", "golden", "rust", "interop", "profiles", "profile-mesh", "object-mesh",
                       "fuzz", "firmware"):
             self.assertIn(f"=== {stage}\n", out)
         for cell in check.load_cells()["cells"]:
@@ -464,6 +467,20 @@ class Scenarios(unittest.TestCase):
         code, _, err = run_main(["scenarios"])
         self.assertEqual((code, err), (0, ""))
 
+    def test_object_rows_are_live_and_use_feature_peers(self):
+        for row_id in ("M10", "P04-O"):
+            self.assertEqual(self.rows(row_id)[0]["status"], "live")
+        steps = check.e2e("pr", "mesh", "build-e2e", None)
+        case = "site::owner_mesh::object::mesh_m10_three_hop_with_control"
+        obj = next(step for step in steps if case in (step.require or ()))
+        self.assertIn("--include-ignored", obj.argv)
+        self.assertIn("build-e2e-object", obj.env["ROUTELOOM_MESH_PEER"])
+        self.assertEqual(obj.env["ROUTELOOM_MESH_PEER_B"],
+                         str(ROOT / "build-e2e/tests/cpp/routeloom_owner_mesh_peer"))
+        off = next(step for step in steps if
+                   "site::owner_mesh::object::mesh_p04_object_off_terminal" in (step.require or ()))
+        self.assertEqual(off.env["ROUTELOOM_MESH_PEER_GW"], obj.env["ROUTELOOM_MESH_PEER_B"])
+
     def test_duplicate_id_and_missing_test_fail(self):
         row = dict(self.rows("M01")[0])
         self.data["rows"].append(row)
@@ -500,6 +517,7 @@ class Scenarios(unittest.TestCase):
                       check.scenario_errors(self.data))
 
     def test_planned_and_hil_rows(self):
+        self.rows("M10")[0]["status"] = "planned"
         self.rows("M10")[0]["test"] = self.rows("M01")[0]["test"]
         self.rows("M05")[0]["hil"]["run"] = ["tools/hil/no_such_script.py"]
         self.rows("M03")[0]["hil"] = {"rounds": ["H0"], "run": "manual"}

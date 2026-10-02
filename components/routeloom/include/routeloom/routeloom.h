@@ -68,7 +68,8 @@ typedef enum rl_status_code {
   RL_STATUS_PLAN_NOT_COMMITTED,
   RL_STATUS_RECOVERY_REQUIRED,
   RL_STATUS_AUTH_PROFILE_UNAVAILABLE,
-  RL_STATUS_NETWORK_REQUIRED
+  RL_STATUS_NETWORK_REQUIRED,
+  RL_STATUS_TOO_LARGE
 } rl_status_code_t;
 
 typedef enum rl_delivery_class {
