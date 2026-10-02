@@ -14,6 +14,10 @@
 namespace idf_stub {
 
 void reset() noexcept;
+// RF-switch state captured at esp_wifi_init, not after startup.
+void fail_gpio_call(unsigned call) noexcept;
+bool board_rf_before_wifi(int antenna_level) noexcept;
+bool wifi_init_called() noexcept;
 void set_now_us(std::int64_t now_us) noexcept;
 void advance_ms(std::uint32_t ms) noexcept;
 std::int64_t now_us() noexcept;

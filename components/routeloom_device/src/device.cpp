@@ -11,6 +11,7 @@
 #include "nvs_flash.h"
 #include "routeloom/config_wire.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
+#include "routeloom/espnow_board_config.hpp"
 #include "routeloom/gateway.hpp"
 #include "routeloom/espnow_sdkv1_entropy.hpp"
 #include "routeloom/espnow_security_owner.hpp"
@@ -358,6 +359,10 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   static Observer observer;
   observer.bind(*this);
   static espnow::EspNowRuntime runtime(config.radio, provider, observer);
+#if CONFIG_IDF_TARGET_ESP32C6
+  status = espnow::initialize_board_rf();
+  if (!status) return status;
+#endif
   status = runtime.initialize();
   if (!status) return status;
   runtime_ = &runtime;
