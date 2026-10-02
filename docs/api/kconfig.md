@@ -87,6 +87,32 @@ string "HIL drop frames received from one peer MAC (empty disables)"
             prevent a direct BIND and force a relay path. Empty by default.
 ```
 
+### CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI
+
+```text
+int "HIL minimum RX RSSI in dBm (0 disables)"
+        range -127 0
+        default 0
+        help
+            Bench-only weak-link simulation. Discard frames below this
+            RSSI before discovery and Wire processing. Frames without RX
+            metadata bypass this threshold. Zero removes the filter.
+```
+
+### CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE
+
+```text
+int "HIL random RX drops per thousand (0 disables)"
+        range 0 1000
+        default 0
+        help
+            Bench-only loss injection using esp_random, after the RSSI
+            threshold. Intentional drops and the pre-filter RSSI histogram
+            are logged separately from RX queue overflows once a minute.
+            Zero removes this filter; with both filters zero, their code
+            and diagnostic state are absent from the image.
+```
+
 ### CONFIG_ROUTELOOM_WIFI_NETIF_INIT
 
 ```text

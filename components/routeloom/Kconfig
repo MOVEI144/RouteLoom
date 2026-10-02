@@ -58,6 +58,26 @@ menu "RouteLoom"
             before discovery and Wire processing. Use paired images to
             prevent a direct BIND and force a relay path. Empty by default.
 
+    config ROUTELOOM_HIL_RX_MIN_RSSI
+        int "HIL minimum RX RSSI in dBm (0 disables)"
+        range -127 0
+        default 0
+        help
+            Bench-only weak-link simulation. Discard frames below this
+            RSSI before discovery and Wire processing. Frames without RX
+            metadata bypass this threshold. Zero removes the filter.
+
+    config ROUTELOOM_HIL_RX_DROP_PERMILLE
+        int "HIL random RX drops per thousand (0 disables)"
+        range 0 1000
+        default 0
+        help
+            Bench-only loss injection using esp_random, after the RSSI
+            threshold. Intentional drops and the pre-filter RSSI histogram
+            are logged separately from RX queue overflows once a minute.
+            Zero removes this filter; with both filters zero, their code
+            and diagnostic state are absent from the image.
+
     config ROUTELOOM_WIFI_NETIF_INIT
         bool "Start esp_netif (lwIP TCP/IP task) before the Wi-Fi driver"
         default n

@@ -9,9 +9,27 @@ import unittest
 from unittest.mock import patch
 
 import reset_cycles
+import analyze_reset_cycles
 
 
 class ResetCycleAccountingTest(unittest.TestCase):
+    def test_health_query_failure_is_unknown_not_route_down(self):
+        node = "0000000000000003"
+        rows = [
+            {"nodes": {"result": {"nodes": [
+                {"node": node, "connected": True, "next_hop": "2", "route_metric": 1}]}}},
+            {"nodes": {"error": "query timed out"}},
+            {"nodes": {"result": {"nodes": []}}},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "health.jsonl")
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            result = analyze_reset_cycles.health(path, node)
+        self.assertEqual(result["samples"], 3)
+        self.assertEqual(result["route_up"], 1)
+        self.assertEqual(result["route_down"], 1)
+        self.assertEqual(result["route_unknown"], 1)
+
     def test_recovery_measures_delivery_completion_after_reset(self):
         clock = [0.0]
 

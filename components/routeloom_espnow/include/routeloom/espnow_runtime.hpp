@@ -437,6 +437,11 @@ class EspNowRuntime final : public RadioPort,
   // rld1_decode failure in the worker is a REJECT, never a Wire fallback.
   static bool classify_bootstrap(const std::uint8_t* data, int length) noexcept;
 
+#if CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI != 0 || CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE != 0
+  bool hil_drop_rx(const esp_now_recv_info_t& info) noexcept;
+  void hil_log_rx(MonotonicMs now) noexcept;
+#endif
+
   static EspNowRuntime* instance_;
   static portMUX_TYPE callback_lock_;
 
@@ -682,6 +687,15 @@ class EspNowRuntime final : public RadioPort,
   routeloom::MacAddress rx_source_{};
   std::uint32_t bootstrap_rx_dropped_{0};
   std::uint32_t rx_dropped_{0};
+#if CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI != 0 || CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE != 0
+  // Callback writes and Owner snapshots use callback_lock_. Counts are
+  // cumulative per runtime; RSSI is sampled before either loss filter.
+  std::array<std::uint32_t, 16> hil_rx_rssi_bins_{};
+  std::uint32_t hil_rx_missing_rssi_{0};
+  std::uint32_t hil_rx_rssi_dropped_{0};
+  std::uint32_t hil_rx_random_dropped_{0};
+  MonotonicMs hil_rx_log_ms_{0};
+#endif
   std::uint32_t unknown_peer_rx_{0};
   std::uint32_t autonomy_tx_ok_{0};
   std::uint32_t autonomy_tx_failed_{0};

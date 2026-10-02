@@ -150,6 +150,22 @@ class CellList(unittest.TestCase):
             expected = cell["id"] if cell["id"] in old_c6 else f"firmware-{cell['id']}"
             self.assertEqual(cell["artifact"], expected)
 
+    def test_ci_builds_enabled_weak_link_images_for_c3_and_c6(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn('- name: Build HIL weak-link image', workflow)
+        step = workflow.split('- name: Build HIL weak-link image', 1)[1].split(
+            '- uses:', 1)[0]
+        for cell in ('bridge_node-esp32c3-normal-off-off',
+                     'experimental-c6-bridge_node-member'):
+            self.assertIn(cell, step)
+        for setting in ('CONFIG_ROUTELOOM_TX_POWER_QDBM=8',
+                        'CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI=-80',
+                        'CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE=100'):
+            self.assertIn(setting, step)
+        self.assertIn('idf.py -B build-hil -D SDKCONFIG=sdkconfig.hil reconfigure', step)
+        self.assertIn('cmake --build build-hil -j4', step)
+        self.assertIn('firmware_ram_report.py', step)
+
     def test_workflow_runs_every_ci_stage(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         for stage in ("core --sanitizers", "docs", "golden", "rust",

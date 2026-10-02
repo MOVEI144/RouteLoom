@@ -295,6 +295,33 @@ target_compile_definitions(routeloom_espnow_runtime_tests PRIVATE
     CONFIG_ROUTELOOM_TRACE=1 CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY=1)
 add_test(NAME routeloom_espnow_runtime_tests COMMAND routeloom_espnow_runtime_tests)
 
+foreach(hil_case IN ITEMS off rssi random both all)
+  set(hil_rssi 0)
+  set(hil_permille 0)
+  if(hil_case STREQUAL "rssi")
+    set(hil_rssi -80)
+  elseif(hil_case STREQUAL "random")
+    set(hil_permille 100)
+  elseif(hil_case STREQUAL "both")
+    set(hil_rssi -85)
+    set(hil_permille 200)
+  elseif(hil_case STREQUAL "all")
+    set(hil_permille 1000)
+  endif()
+  set(hil_target routeloom_espnow_hil_rx_${hil_case}_tests)
+  add_executable(${hil_target} test_espnow_hil_rx.cpp espnow_idf_stubs/idf_stubs.cpp
+      ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp)
+  target_link_libraries(${hil_target} PRIVATE routeloom_core)
+  target_include_directories(${hil_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs
+      ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+  target_compile_options(${hil_target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  target_compile_definitions(${hil_target} PRIVATE
+      CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI=${hil_rssi}
+      CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE=${hil_permille})
+  add_test(NAME ${hil_target} COMMAND ${hil_target})
+endforeach()
+
 if(ROUTELOOM_RESOURCE_PROFILE STREQUAL "endpoint")
   add_executable(routeloom_espnow_role_mismatch_tests test_espnow_role_mismatch.cpp
       espnow_idf_stubs/idf_stubs.cpp
