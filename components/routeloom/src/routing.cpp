@@ -442,15 +442,16 @@ void RouteTable::invalidate_next_hop(const NodeId next_hop,
         removed = true;
       }
     }
+    // Link loss may already have removed every candidate before the
+    // authenticated restart arrives. Its old hold must end in either case.
+    if (!hold && entry.hold_next_hop == next_hop) {
+      entry.hold_next_hop = kInvalidNodeId;
+      entry.hold_until_ms = 0;
+    }
     if (removed) {
       if (hold) {
         entry.hold_next_hop = next_hop;
         entry.hold_until_ms = now_ms + kRouteHoldDownMs;
-      } else if (entry.hold_next_hop == next_hop) {
-        // A restarted relay's previous-incarnation state is stale but fresh
-        // advertisements must not be held down by the earlier failure.
-        entry.hold_next_hop = kInvalidNodeId;
-        entry.hold_until_ms = 0;
       }
       if (!select(entry).valid) entry.sequence_request_needed = true;
       arm_tombstone(entry, now_ms);

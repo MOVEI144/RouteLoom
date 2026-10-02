@@ -13,7 +13,7 @@ const TERMINAL_STATES: std::ops::RangeInclusive<u8> = 7..=11;
 const DEADLINE_MS: u64 = 5_000;
 const GRACE_MS: u64 = 1_000;
 
-fn legacy_send(world: &mut MeshWorld, key: u64, destination: u64, tag: &[u8]) -> u64 {
+pub(super) fn legacy_send(world: &mut MeshWorld, key: u64, destination: u64, tag: &[u8]) -> u64 {
     let mut body = key.to_be_bytes().to_vec();
     body.extend_from_slice(&destination.to_be_bytes());
     body.extend_from_slice(tag);
@@ -28,7 +28,7 @@ fn terminals(world: &MeshWorld, request: u64) -> Vec<(Option<u8>, u16)> {
         .collect()
 }
 
-fn terminal_events(
+pub(super) fn terminal_events(
     world: &MeshWorld,
     request: u64,
 ) -> impl Iterator<Item = (Option<u8>, u16, u64)> + '_ {

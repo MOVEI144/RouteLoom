@@ -81,6 +81,7 @@ mod object;
 mod peer;
 mod product;
 mod recovery;
+mod relay_reset;
 mod report;
 mod send;
 mod switch;
