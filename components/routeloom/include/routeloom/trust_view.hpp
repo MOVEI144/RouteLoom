@@ -48,6 +48,7 @@
 
 #include "routeloom/config.hpp"
 #include "routeloom/config_cose.hpp"
+#include "routeloom/rlcw1.hpp"
 #include "routeloom/security_floor.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/trust_store.hpp"
@@ -87,7 +88,13 @@ class TrustView final : public ConfigAuthorityVerifier {
   // envelope is identical; only the key provenance differs.
   std::uint32_t permit_profile_bit() const noexcept override { return 1u << 1; }
   // Same P-256 verify cost the intake limiter exists for (03-signing §3.3).
+  void bind_signature_verifier(const sdkv1::Es256Verifier* verifier) noexcept override {
+    signature_verifier_ = verifier;
+  }
   bool verify_is_expensive() const noexcept override { return true; }
+  bool verification_pending() const noexcept override {
+    return signature_verifier_ != nullptr && signature_verifier_->verification_pending();
+  }
   Status verify_permit(const ConfigPermitContext& context, ByteView permit,
                        endpoint::EncodedConfigCommand& payload,
                        bool& verified) noexcept override;
@@ -152,6 +159,7 @@ class TrustView final : public ConfigAuthorityVerifier {
   bool usable() const noexcept;
 
  private:
+  const sdkv1::Es256Verifier* signature_verifier_{nullptr};
   const TrustStore& store_;
   const SecurityFloorStore* floor_{nullptr};
   std::uint64_t required_authority_{0};

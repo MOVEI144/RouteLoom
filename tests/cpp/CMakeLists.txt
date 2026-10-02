@@ -314,6 +314,33 @@ foreach(mode IN ITEMS empty filtered)
   add_test(NAME ${hil_test} COMMAND ${hil_test})
 endforeach()
 
+foreach(hil_case IN ITEMS off rssi random both all)
+  set(hil_rssi 0)
+  set(hil_permille 0)
+  if(hil_case STREQUAL "rssi")
+    set(hil_rssi -80)
+  elseif(hil_case STREQUAL "random")
+    set(hil_permille 100)
+  elseif(hil_case STREQUAL "both")
+    set(hil_rssi -85)
+    set(hil_permille 200)
+  elseif(hil_case STREQUAL "all")
+    set(hil_permille 1000)
+  endif()
+  set(hil_target routeloom_espnow_hil_rx_${hil_case}_tests)
+  add_executable(${hil_target} test_espnow_hil_rx.cpp espnow_idf_stubs/idf_stubs.cpp
+      ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp)
+  target_link_libraries(${hil_target} PRIVATE routeloom_core)
+  target_include_directories(${hil_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs
+      ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+  target_compile_options(${hil_target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  target_compile_definitions(${hil_target} PRIVATE
+      CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI=${hil_rssi}
+      CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE=${hil_permille})
+  add_test(NAME ${hil_target} COMMAND ${hil_target})
+endforeach()
+
 if(ROUTELOOM_RESOURCE_PROFILE STREQUAL "endpoint")
   add_executable(routeloom_espnow_role_mismatch_tests test_espnow_role_mismatch.cpp
       espnow_idf_stubs/idf_stubs.cpp
@@ -891,6 +918,11 @@ add_test(NAME routeloom_sdkv1_blob_storage_tests COMMAND routeloom_sdkv1_blob_st
 # bounds, and the size/stack report. edhoc_probe.c is C: it reads libedhoc's
 # internal key slots (C11-only header) to compare the intermediate PRKs.
 find_package(Threads REQUIRED)
+add_executable(routeloom_crypto_worker_tests test_crypto_worker.cpp)
+target_link_libraries(routeloom_crypto_worker_tests PRIVATE routeloom_core Threads::Threads)
+target_compile_options(routeloom_crypto_worker_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_crypto_worker_tests COMMAND routeloom_crypto_worker_tests)
+
 add_executable(routeloom_edhoc_tests test_edhoc.cpp edhoc_probe.c)
 target_link_libraries(routeloom_edhoc_tests PRIVATE routeloom_core routeloom_edhoc_headers
     Threads::Threads)

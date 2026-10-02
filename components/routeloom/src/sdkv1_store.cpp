@@ -380,17 +380,48 @@ Status SealedSlotPair::erase_all() noexcept {
 
 // --- IdentityStore ---------------------------------------------------------------
 
+const SealedRecordFormat IdentityStore::kFormat{kIdentityMagic,
+                                                kIdentitySealCommitted,
+                                                kIdentitySlotBytes,
+                                                kIdentityRecordMin,
+                                                kIdentityRecordMax,
+                                                false,
+                                                &identity_record_structure,
+                                                &IdentityStore::decode};
+
 IdentityStore::IdentityStore(RecordSlotStorage& storage) noexcept
-    : pair_(storage, kIdentityFormat, scratch_.writable(), &identity_) {}
+    : pair_(storage, kFormat, scratch_.writable(), this) {}
+
+Status IdentityStore::decode(const ByteView record, void* context) noexcept {
+  auto& store = *static_cast<IdentityStore*>(context);
+  Digest256 digest{};
+  sha256(record, digest);
+  // Exact validated bytes imply the same keypair. Still re-read both slots
+  // and classify CRC/schema/seal on boot; repeating P-256 would block Owner.
+  if (store.validated_record_live_ && digest == store.validated_record_) return Status::success();
+  store.validated_record_live_ = false;
+  const Status status = identity_record_decode(record, store.identity_);
+  if (status) {
+    store.validated_record_ = digest;
+    store.validated_record_live_ = true;
+  }
+  return status;
+}
 
 Status IdentityStore::initialize() noexcept {
+  if (context_revision_ == UINT64_MAX)
+    return Status::error(StatusCode::CounterExhausted, "identity context exhausted");
+  ++context_revision_;
   const Status status = pair_.initialize();
-  identity_ = IdentityRecord{};
   if (pair_.has_active()) {
     ByteView record{};
     Status loaded = pair_.load_active(record);
-    if (loaded) loaded = identity_record_decode(record, identity_);
+    if (loaded) loaded = decode(record, this);
     if (!loaded) return loaded;
+  } else {
+    identity_ = IdentityRecord{};
+    validated_record_live_ = false;
+    secure_clear(validated_record_);
   }
   return status;
 }
@@ -404,6 +435,9 @@ Status IdentityStore::encode(const IdentityRecord& record, std::size_t& used_len
 }
 
 Status IdentityStore::commit(const IdentityRecord& record) noexcept {
+  if (context_revision_ == UINT64_MAX)
+    return Status::error(StatusCode::CounterExhausted, "identity context exhausted");
+  ++context_revision_;
   if (!pair_.initialized()) {
     return Status::error(StatusCode::InvalidState, "identity store not initialized");
   }
@@ -412,10 +446,15 @@ Status IdentityStore::commit(const IdentityRecord& record) noexcept {
   if (status) status = pair_.commit_prepared(used_len);
   if (!status) return status;
   identity_ = record;
+  sha256(ByteView{scratch_.bytes.data(), used_len}, validated_record_);
+  validated_record_live_ = true;
   return Status::success();
 }
 
 Status IdentityStore::recover(const IdentityRecord& record) noexcept {
+  if (context_revision_ == UINT64_MAX)
+    return Status::error(StatusCode::CounterExhausted, "identity context exhausted");
+  ++context_revision_;
   if (!pair_.quarantined() && !pair_.uncertain()) {
     return Status::error(StatusCode::InvalidState, "identity store not impaired");
   }
@@ -424,10 +463,15 @@ Status IdentityStore::recover(const IdentityRecord& record) noexcept {
   if (status) status = pair_.commit_twin_prepared(used_len);
   if (!status) return status;
   identity_ = record;
+  sha256(ByteView{scratch_.bytes.data(), used_len}, validated_record_);
+  validated_record_live_ = true;
   return Status::success();
 }
 
 Status IdentityStore::clear() noexcept {
+  if (context_revision_ == UINT64_MAX)
+    return Status::error(StatusCode::CounterExhausted, "identity context exhausted");
+  ++context_revision_;
   const Status status = pair_.erase_all();
   secure_clear(scratch_.bytes.data(), scratch_.bytes.size());
   scratch_.size = 0;
@@ -438,6 +482,8 @@ Status IdentityStore::clear() noexcept {
     return status;
   }
   identity_ = IdentityRecord{};
+  validated_record_live_ = false;
+  secure_clear(validated_record_);
   return Status::success();
 }
 

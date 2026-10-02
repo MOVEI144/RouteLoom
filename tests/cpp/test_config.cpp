@@ -26,6 +26,7 @@
 #include "routeloom/crc32.hpp"
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/endpoint_wire.hpp"
+#include "routeloom/signature_progress.hpp"
 #include "routeloom/site_signed.hpp"
 #include "routeloom/trust_manifest.hpp"
 #include "routeloom/trust_store.hpp"
@@ -4490,7 +4491,11 @@ void test_signed_golden_verify() {
 // destroyed), then must recover to Active on {f1:u8=2} and stay there
 // across a reboot.
 void golden_reprovision_delivery(const SignedGolden& golden, const bool with_cose,
-                                 const routeloom_test::TestKeyPair& cose_key) {
+                                 const routeloom_test::TestKeyPair& cose_key,
+                                 const bool delayed = false) {
+  CryptoWorker worker;
+  sdkv1::SignatureProgress signature;
+  CHECK_OK(signature.bind(delayed ? &worker : nullptr));
   TargetRig rig(kBoot, true, !with_cose, with_cose);
   if (with_cose) {
     rig.cose_verifier.provision(
@@ -4516,8 +4521,21 @@ void golden_reprovision_delivery(const SignedGolden& golden, const bool with_cos
   CHECK(rig.journal->quarantined());
 
   ConfigVerdict verdict{};
-  CHECK_OK(rig.journal->submit_recovery(
-      ByteView{golden.object.data(), golden.object.size()}, now_ms, verdict));
+  const ByteView object{golden.object.data(), golden.object.size()};
+  if (delayed) {
+    rig.journal->bind_signature_verifier(&signature);
+    for (unsigned retry = 0; retry < 2; ++retry) {
+      CHECK(rig.journal->submit_recovery(object, now_ms, verdict).code == StatusCode::WouldBlock);
+      CHECK(rig.floor_j() == 3 && rig.floor_r() == 7);
+    }
+    auto foreign = golden.object;
+    foreign.back() ^= 1;
+    CHECK(rig.journal->submit_recovery(ByteView{foreign.data(), foreign.size()}, now_ms, verdict)
+              .code == StatusCode::Busy);
+    CHECK(worker.execute());
+  }
+  CHECK_OK(rig.journal->submit_recovery(object, now_ms, verdict));
+  CHECK_OK(signature.reset());
   CHECK(verdict.reason == ConfigReason::InProgress);
   CHECK(rig.journal->quarantined());  // isolated until the readback proves it
   drain(rig, now_ms);
@@ -4563,6 +4581,8 @@ void test_signed_golden_delivery() {
                               false, cose_key);
   golden_reprovision_delivery(load_signed_golden("cose_recovery_reprovision"),
                               true, cose_key);
+  golden_reprovision_delivery(load_signed_golden("cose_recovery_reprovision"), true, cose_key,
+                              true);
 }
 
 // --- T06: disaster generation migration ---------------------------------------

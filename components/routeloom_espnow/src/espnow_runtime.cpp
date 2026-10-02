@@ -12,6 +12,9 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_now.h"
+#if CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE != 0
+#include "esp_random.h"
+#endif
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "routeloom/profile.hpp"
@@ -846,12 +849,62 @@ void EspNowRuntime::stop() noexcept {
   }
 }
 
+#if CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI != 0 || CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE != 0
+bool EspNowRuntime::hil_drop_rx(const esp_now_recv_info_t& info) noexcept {
+  bool rssi_drop = false;
+#if CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI != 0
+  rssi_drop = info.rx_ctrl != nullptr && info.rx_ctrl->rssi < CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI;
+#endif
+  bool random_drop = false;
+#if CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE != 0
+  if (!rssi_drop) {
+    random_drop = std::uint64_t{esp_random()} * 1000 <
+                  (std::uint64_t{CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE} << 32);
+  }
+#endif
+  portENTER_CRITICAL(&callback_lock_);
+  if (info.rx_ctrl != nullptr) {
+    const int rssi = std::clamp(static_cast<int>(info.rx_ctrl->rssi), -128, -1);
+    saturating_inc(hil_rx_rssi_bins_[static_cast<std::size_t>((rssi + 128) / 8)]);
+  } else {
+    saturating_inc(hil_rx_missing_rssi_);
+  }
+  if (rssi_drop) saturating_inc(hil_rx_rssi_dropped_);
+  if (random_drop) saturating_inc(hil_rx_random_dropped_);
+  portEXIT_CRITICAL(&callback_lock_);
+  return rssi_drop || random_drop;
+}
+
+void EspNowRuntime::hil_log_rx(const MonotonicMs now) noexcept {
+  if (now - hil_rx_log_ms_ < kStackHwmLogIntervalMs) return;
+  hil_rx_log_ms_ = now;
+  portENTER_CRITICAL(&callback_lock_);
+  const auto bins = hil_rx_rssi_bins_;
+  const auto missing = hil_rx_missing_rssi_;
+  const auto rssi_drops = hil_rx_rssi_dropped_;
+  const auto random_drops = hil_rx_random_dropped_;
+  portEXIT_CRITICAL(&callback_lock_);
+  ESP_LOGI(kTag, "HIL RX min_rssi=%d permille=%d rssi_dropped=%lu "
+                "random_dropped=%lu missing_rssi=%lu",
+           CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI, CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE,
+           static_cast<unsigned long>(rssi_drops), static_cast<unsigned long>(random_drops),
+           static_cast<unsigned long>(missing));
+  for (std::size_t i = 0; i < bins.size(); ++i) {
+    ESP_LOGI(kTag, "HIL RSSI low=%d high=%d count=%lu", -128 + static_cast<int>(i) * 8,
+             -121 + static_cast<int>(i) * 8, static_cast<unsigned long>(bins[i]));
+  }
+}
+#endif
+
 void EspNowRuntime::poll_once() noexcept {
   if (event_queue_ == nullptr) {
     return;
   }
   const MonotonicMs now = now_ms();
   saturating_inc(owner_stats_.polls);
+#if CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI != 0 || CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE != 0
+  hil_log_rx(now);
+#endif
   if (!started_) {
     // Join RLD1 and channel operations run before the member Node starts.
     // No ordinary Wire frame may enter an unstarted Node; discard that
@@ -2754,6 +2807,9 @@ void EspNowRuntime::enqueue_rx(
     }
     if (matches) return;
   }
+#endif
+#if CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI != 0 || CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE != 0
+  if (hil_drop_rx(*info)) return;
 #endif
   // Carrier classification precedes the peer table: RLD1 is recognized once
   // by its full magic+version and never reaches the Wire parser (06 §3.1).

@@ -112,6 +112,28 @@ jobs:
           git -C "$IDF_PATH" rev-parse HEAD | tee idf-commit.txt
           test "$(cat idf-commit.txt)" = 76f5dedd9950a3012fee8fb7d5586df21fc67802
           python3 tools/check.py firmware --cell "${{ matrix.id }}"
+      - name: Build HIL weak-link image
+        if: matrix.id == 'bridge_node-esp32c3-normal-off-off' || matrix.id == 'experimental-c6-bridge_node-member'
+        shell: bash
+        working-directory: ${{ matrix.dir }}
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh"
+          cp sdkconfig sdkconfig.hil
+          cat >> sdkconfig.hil <<'EOF'
+          CONFIG_ROUTELOOM_TX_POWER_QDBM=8
+          CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI=-80
+          CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE=100
+          EOF
+          idf.py -B build-hil -D SDKCONFIG=sdkconfig.hil reconfigure
+          cmake --build build-hil -j4
+          for setting in CONFIG_ROUTELOOM_TX_POWER_QDBM=8 CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI=-80 CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE=100; do
+            grep -Fqx "$setting" sdkconfig.hil
+          done
+          idf.py -B build-hil size --format json2 --output-file build-hil/size.json
+          python3 ../../tools/firmware_ram_report.py build-hil/size.json \
+            --target '${{ matrix.target }}' --app '${{ matrix.app }}' \
+            --cell '${{ matrix.id }}-hil' --json-out build-hil/ram-report.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -126,6 +148,11 @@ jobs:
             ${{ matrix.dir }}/build/ram-report.json
             ${{ matrix.dir }}/build/log/*
             ${{ matrix.dir }}/sdkconfig
+            ${{ matrix.dir }}/build-hil/*.bin
+            ${{ matrix.dir }}/build-hil/*.elf
+            ${{ matrix.dir }}/build-hil/size.json
+            ${{ matrix.dir }}/build-hil/ram-report.json
+            ${{ matrix.dir }}/sdkconfig.hil
           retention-days: 30
   rust:
     runs-on: ubuntu-24.04

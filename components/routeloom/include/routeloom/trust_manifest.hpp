@@ -127,7 +127,8 @@ Status trust_manifest_assemble(ByteView content, std::uint64_t root_id,
 // through ConfigRateLimiter::consume_expensive_verify (1-per-5 s
 // device-wide) BEFORE calling — signature verification is the expensive
 // leg and must stay bounded.
-Status trust_manifest_accept(TrustStore& store, ByteView object,
-                             SecurityFloorStore& floor) noexcept;
+Status trust_manifest_accept(
+    TrustStore& store, ByteView object, SecurityFloorStore& floor,
+    const sdkv1::Es256Verifier& verifier = sdkv1::default_es256_verifier()) noexcept;
 
 }  // namespace routeloom

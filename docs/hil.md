@@ -292,6 +292,104 @@ Not verifiable on host — confirm on real boards per run:
 - USB-Serial-JTAG consoles emit nothing unless DTR is asserted — capture.py
   asserts it by default (`--no-dtr` opts out).
 
+## Indoor weak-link campaign
+
+This procedure injects receive loss; it does not measure outdoor range or
+attenuate RF. Use the chip/MAC preflight and provisioning rules above. Do
+not write eFuses or enable secure boot/flash encryption. Run only in a
+separately authorised hardware round; this PR does not flash boards.
+
+Use a gateway, relay and endpoint with the normal security profile and
+provisioned identities. Force two hops with the paired
+`CONFIG_ROUTELOOM_HIL_DROP_RX_MAC` images above. Keep channel, LR rate,
+placement, antennas, admission policy and payload fixed. On all three
+boards set TX power to **8 qdBm (2 dBm)**. Measure an unfiltered control
+(`RX_MIN_RSSI=0`, `RX_DROP_PERMILLE=0`) and these six conditions:
+
+| RX minimum RSSI (dBm) | Random RX loss (‰) |
+| --- | --- |
+| -80 | 0 |
+| -80 | 100 |
+| -80 | 200 |
+| -85 | 0 |
+| -85 | 100 |
+| -85 | 200 |
+
+Build labelled images for each board/condition with `build_image.sh`;
+these overrides work for C3 and C6. For example, for the relay:
+
+```sh
+tools/hil/build_image.sh reference_node esp32c3 lr-relay-r80-d100 \
+    CONFIG_ROUTELOOM_TX_POWER_QDBM=8 \
+    CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI=-80 \
+    CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE=100 \
+    CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY=y
+python3 tools/hil/flash.py --rig tools/hil/rigs.yaml --bench bench-a \
+    --board ref-a --image-dir artifacts/hil/images/lr-relay-r80-d100
+```
+
+Signed bundles require the complete flash layout. On an already provisioned
+PT-4M-v2 board, this writes bootloader, partition table, otadata and app without
+erasing the NVS partitions. Keep the chip, role and security profile unchanged;
+do not erase between conditions.
+
+Capture each reference console and the gateway's separate UART0 console
+if wired; never open the bridge USB host-protocol port for log capture.
+Retain source SHA, image/sdkconfig hashes, chip/MAC/role, condition and
+actual TX power. With the provisioned daemon and approval observer running,
+record join attempts and time to Authority-confirmed membership, including
+failed attempts. Then collect steady traffic and relay-reset evidence:
+
+```sh
+python3 tools/hil/observe_health.py --ctl "$CTL" --socket "$SOCKET" \
+    --seconds 900 --poll-s 1 --out "$OUT/health.jsonl" &
+python3 tools/hil/submit_traffic.py --ctl "$CTL" --socket "$SOCKET" \
+    --network "$NETWORK" --epoch "$EPOCH" --destination "$ENDPOINT" \
+    --count 100 --out "$OUT/traffic.jsonl"
+# Stop the relay console capture before reset_cycles owns that port.
+python3 tools/hil/reset_cycles.py --rig tools/hil/rigs.yaml --bench bench-a \
+    --board ref-a --ctl "$CTL" --socket "$SOCKET" --destination "$ENDPOINT" \
+    --cycles 3 --sends 10 --out "$OUT/relay-reset"
+python3 tools/hil/analyze_reset_cycles.py --result "$OUT/relay-reset/result.json" \
+    --health "$OUT/health.jsonl" --route-node "$ENDPOINT" \
+    --out "$OUT/relay-reset/analysis.json"
+```
+
+Set `CTL`, `SOCKET`, `NETWORK`, `EPOCH`, decimal `ENDPOINT` and a unique
+`OUT`; map `ref-a` to the relay in the chosen rig. `reset_cycles.py`
+captures the relay console itself; stop its separate capture first.
+Keep health and endpoint capture running for the whole reset sequence,
+extending the 900 s window if admission waits require it. Record these
+per condition:
+
+- **RSSI and injected loss:** once a minute `HIL RX` reports cumulative
+  `rssi_dropped` and `random_dropped`; `HIL RSSI` gives sixteen 8 dBm bins
+  from [-128, -121] to [-8, -1]. Use the last complete snapshot per boot,
+  or differences within one boot; never add successive cumulative snapshots.
+  RSSI is clamped to [-128, -1] and includes rejected frames after
+  source-MAC exclusion. Missing RX metadata is counted separately and
+  bypasses only RSSI rejection. Random
+  loss applies to frames remaining after RSSI rejection. Check that the
+  RSSI threshold drops frames; otherwise label it inactive for this
+  placement. Intentional drops do not increment RX queue-overflow counters.
+- **Delivery and p99 latency:** retain all requested/admitted/terminal
+  counts and `success_rate`, `admitted`, `delivered`, `rtt_ms_p99` from the
+  traffic summary. p99 is admission-to-receipt host latency of successful
+  sends; report admission waits and failures/timeouts separately.
+- **Route flap:** count route up/down transitions and endpoint `next_hop`
+  changes between consecutive valid health snapshots. Query failures are
+  unknown; report missing samples and the poll interval. Shorter flaps can
+  be missed, so retain discovery/route console lines too.
+- **Relay-reset recovery:** retain every `cycle_results[].recovery_s`
+  (release to first endpoint delivery), including null/non-recovery and
+  boot failures. State whether reset was EN or actual power removal.
+
+Publish numbers and failures in a dated `docs/hil/` record; do not infer a
+distance or mark skipped conditions as passed. Restore default images
+(both filters zero) afterward. Default cells must pass the `symbols_absent`
+gate for `EspNowRuntime::hil_drop_rx` and `hil_log_rx`; compare default
+flash/static RAM before and after changes.
+
 ## Evidence
 
 Each `scenarios.py` run writes `artifacts/hil/<run>/` with per-scenario

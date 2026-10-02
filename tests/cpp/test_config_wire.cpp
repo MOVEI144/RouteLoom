@@ -1155,6 +1155,47 @@ void test_kind5_trust_delivery_e2e() {
   CHECK(trust2.store->store_epoch() == 1);
 }
 
+void test_trust_worker_completion_and_timeout() {
+  for (const bool expire : {false, true}) {
+    CryptoWorker worker;
+    MonotonicMs now_ms = 9000;
+    ConfigEndpointSink* gw_peer = nullptr;
+    LoopbackPort port(kTarget, gw_peer);
+    port.peer_dest_ = kGateway;
+    TargetRig rig{};
+    CHECK_OK(rig.journal->initialize(now_ms));
+    TrustRig trust{};
+    trust.provision(rig);
+    ConfigTarget target(port, rig.rate);
+    CHECK_OK(target.bind_crypto_worker(&worker));
+    CHECK_OK(target.add_journal(endpoint::kConfigNamespaceSdk, *rig.journal));
+    target.attach_trust_store(*trust.store, *rig.floor);
+    RecordingAckSink sink{};
+    gw_peer = &sink;
+    ByteBuffer<kTrustManifestObjectMax> object{};
+    trust.make_manifest(trust.next_image(2), object);
+    CHECK(deliver_direct(target, port, sink, kGateway, autonomy::ControlObjectKind::TrustManifest,
+                         object.view(), now_ms) == autonomy::ObjectAckStatus::Incomplete);
+    CHECK(target.object_active());
+    CHECK(trust.store->store_epoch() == 1);
+    target.poll(now_ms + 1);
+    CHECK(trust.store->store_epoch() == 1);
+    if (expire) {
+      now_ms += kConfigReassemblyTimeoutMs;
+      target.poll(now_ms);
+      CHECK(target.object_active());  // the loan still owns its context
+    }
+    CHECK(worker.execute());
+    target.poll(now_ms + 2);
+    port.flush(now_ms + 2);
+    CHECK(!target.object_active());
+    CHECK(worker.idle());
+    CHECK(trust.store->store_epoch() == (expire ? 1u : 2u));
+    if (!expire) CHECK(sink.last_status == autonomy::ObjectAckStatus::Ok);
+    CHECK_OK(target.cancel_crypto());
+  }
+}
+
 // The kind-5 verify shares the device's expensive-verify budget with the
 // permit/recovery submits: back-to-back completions refuse, and a FAILED
 // verify charges the budget exactly like a success.
@@ -1557,6 +1598,7 @@ int main() {
   test_gateway_authority_relay_with_config_attached();
   test_kind5_trust_delivery_e2e();
   test_trust_verify_shares_budget();
+  test_trust_worker_completion_and_timeout();
   test_trust_status_query_wire();
   test_recovery_info_query_wire();
   test_transfer_slot_shared();
