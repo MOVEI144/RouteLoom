@@ -96,6 +96,9 @@ pub(super) struct Switch {
     pub(super) probes_seen: u32,
     pub(super) results_seen: u32,
     pub(super) route_updates_seen: u32,
+    /// LR estimate per physical management transmission, including broadcast
+    /// once and failed attempts: (wire bytes + fixed MAC/PHY cost) * 32 us.
+    pub(super) management_us: Vec<u64>,
     /// Hold frames on the directed leg this long before delivery.
     pub(super) delay_ms: Vec<Vec<u64>>,
     /// Per-leg evidence: what crossed and what the switch ate.
@@ -146,6 +149,7 @@ impl Switch {
             probes_seen: 0,
             results_seen: 0,
             route_updates_seen: 0,
+            management_us: vec![0; n],
             delay_ms: vec![vec![0; n]; n],
             leg_delivered: vec![vec![0; n]; n],
             leg_dropped: vec![vec![0; n]; n],

@@ -79,8 +79,8 @@ Accepted → Queued → WaitingForMac → WaitingForHopAccept → WaitingForEndR
                           └▶ Failed    "APP_REJECTED"  (outcome = failure)
       ── STATUS (matched to a sent QUERY) ──▶ Indeterminate "APP_RESULT_*"
       ── expiry while app_phase = AwaitResult ──▶ Indeterminate "APP_RESULT_TIMEOUT"
-      ── expiry before END_RECEIPT ──▶ Expired / Failed "END_RECEIPT_TIMEOUT"
-                          (unchanged Reliable semantics)
+      ── expiry after any DATA transmission ──▶ Indeterminate "APP_RESULT_TIMEOUT"
+      ── expiry without DATA transmission ──▶ Expired "DEADLINE_EXPIRED"
 ```
 
 - While `app_phase = AwaitReceipt` the DATA round machinery is unchanged: up to `max_end_to_end_rounds` rounds, each dedup-pinned at the destination.

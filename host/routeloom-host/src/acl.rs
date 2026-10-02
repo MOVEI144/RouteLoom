@@ -233,13 +233,9 @@ pub fn parse_site_network_hex(text: &str) -> Result<u64, String> {
     Ok(value)
 }
 
-/// The existing host API methods address the low-32 wire network only.
+/// Host operations address the full epoch-qualified SDK site network.
 pub fn parse_network_hex(text: &str) -> Result<u64, String> {
-    let value = parse_site_network_hex(text)?;
-    if value > 0xffff_ffff {
-        return Err(format!("\"{text}\" is outside the wire-v1 network range"));
-    }
-    Ok(value)
+    parse_site_network_hex(text)
 }
 
 #[cfg(test)]
@@ -329,7 +325,10 @@ mod tests {
             parse_site_network_hex("00000002524C0003").unwrap(),
             0x2_524c_0003
         );
-        assert!(parse_network_hex("00000002524C0003").is_err());
+        assert_eq!(
+            parse_network_hex("00000002524C0003").unwrap(),
+            0x2_524c_0003
+        );
         assert!(parse_site_network_hex("0000000100000000").is_err());
         assert!(parse_network_hex("0000000000000000").is_err());
         assert!(parse_network_hex("1").is_err());
