@@ -488,7 +488,7 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   }
 #endif
 #if ROUTELOOM_APP_OBJECT_TRANSFER
-  static AppObject object(runtime.node(), provider, observer);
+  static AppObject object(runtime.node(), provider, node_observer);
   object_ = &object;
   status = object.attach();
   if (!status) return status;
