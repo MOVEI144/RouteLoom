@@ -33,6 +33,8 @@
 //                              (unicast succeeds iff delivered)
 //   S <dst u64le><payload>      app-level MeshNode send (reliable, 30 s
 //                              lifetime); at most 16 tracked at once
+//   v <destination u64le>      selected next hop; reply v <next_hop u64le>
+//                              (0 when no route is valid)
 //   V <index u8>               register one synthetic regular neighbor through
 //                              the real runtime; reply v <ok u8><peers u8>
 //   I <index u8> / J <index u8> occupy/release one test driver transient;
@@ -1757,6 +1759,16 @@ int main(int argc, char** argv) {
                       setup.world_nodes, gw_tx, DeviceTestAccess::gateway(device), device,
                       events, applied);
         write_frame(Bytes{'D'});
+        break;
+      }
+      case 'v': {
+        if (payload.size() != 9) return 3;
+        NodeId destination = 0;
+        for (int i = 0; i < 8; ++i) destination |= static_cast<NodeId>(payload[1 + i]) << (8 * i);
+        const auto route = runtime.node().routes().best(destination);
+        Bytes reply{'v'};
+        put_u64(reply, route.valid ? route.next_hop : routeloom::kInvalidNodeId);
+        write_frame(reply);
         break;
       }
       case 'r': {

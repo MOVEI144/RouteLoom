@@ -111,7 +111,7 @@ evictionは未使用・非保護Peerから、freshness、active路への依存�
 
 初回metricは設定済みの保守的な正値。RSSIから長距離性能を決めない。認証済みprobe/DATAの成功・処理時間を#4の観測器へ渡す。
 
-awake neighborのlease初期30秒、idle refresh目標10秒、candidate TTL5秒。実DATAがあればprobeを省ける。lease切れはbinding削除ではなく利用停止で、再確認後に復帰する。
+awake neighborのlease初期30秒、idle refresh目標20秒、candidate TTL5秒。現在のbinding・RX contextで未完了の送信に一致した認証済みHOP_ACCEPTは双方向の確認としてleaseを更新し、idle probeを省ける。未知・旧世代・不一致のACKでは更新しない。未応答のprobeは従来の2秒timeoutで再試行し、30秒leaseの失効条件は変えない。lease切れはbinding削除ではなく利用停止で、再確認後に復帰する。
 
 眠る端末は常時route監視をしない。既知peerへ本体DATA→必要時だけ同channel発見→保存channel候補の順。追加探索は起床予算2000ms、停止予約100msと未完TXの最悪待ちを先に差し引く。200ms×候補数を全部完遂する約束ではない。予算切れでも所属・Message ID・期限を維持する。
 
@@ -122,3 +122,5 @@ awake neighborのlease初期30秒、idle refresh目標10秒、candidate TTL5秒�
 MAC設定を持たない二台と三台chainで追加・交換を再現する。既所属端末のlocal再bindingはAuthority往復不要。未所属端末は承認前DATA不可。同NodeId競合、偽MAC100件、容量20境界、返信lease欠如、driver再構築後broadcast rate、Sleep中断を試験する。
 
 旧静的登録APIは明示trust/provisioning経路として残すが、dynamic発見の内部から無認証で呼び出さない。対応する受入IDは[scenarios](scenarios.json)のD3系列。
+
+Member の scoped announce は開始後 1.5 秒で初回、最初の 20 秒は 2 秒間隔、以後 5 秒間隔で既存の 90 秒窓内に送る。能動的な発見・修復の retry と probe timeout は変更しない。

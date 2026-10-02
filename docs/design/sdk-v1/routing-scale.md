@@ -60,7 +60,8 @@ poison reverse（next hopへ広告するときは無限大）は既存規則で�
 
 flat profileのtriggeredは全隣接への全dumpだった（issue #41の「32近隣×9.25msを一斉放出」）。本profileでは木リンクだけに絞る。
 
-- gatewayへの経路が変わった（next hop・sequence・metric・有効性）→ 子とinterestのある隣接へ自己＋gateway record。
+- gatewayへの経路が変わった（next hop・有効性）→ 子とinterestのある隣接へ自己＋gateway record。
+- 同じ有効な next hop の metric・sequence 更新は周期更新へまとめる。経路の喪失・親の変更と明示の修復要求への応答は即時のまま。
 - 部分木の経路が変わった → 変化した宛先だけを**dirty集合**（16件、溢れたら全page＋撤回sweep）に積み、親へ送る。
 - **部分木からの離脱**：親へ有限recordを出した宛先（`announced_up`）が部分木でなくなったら（子が別の親へ移った、経路を失った）、親へ無限大で撤回する。まだ使える経路の撤回も合法である（無限大は候補を消すだけ）。これをしないと、祖先に残った古い写しが1 lease後に下から順に失効し、途中nodeが経路を持たない「穴」が上へ移動する（試験で観測した）。
 - **新しい子**：子になった隣接とそれ経由の宛先を全てdirtyにして親へ上げ、子へは直ちに自己＋gateway recordを返す。戻ってきた子の経路は自分のselectionを変えないため、scanだけでは上がらない。

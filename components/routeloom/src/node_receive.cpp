@@ -42,46 +42,41 @@ void MeshNode::finish_hop_accept(TxJob& job, const bool rtt_sampled,
   complete_job(job, true, now_ms);
 }
 
-void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId peer,
+bool MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId peer,
                                  const RxBinding& rx,
                                  const MonotonicMs now_ms) noexcept {
   AckKey key{};
   const auto status = decode_ack_payload(ByteView{frame.payload.data(), frame.payload_size}, key);
   if (!status) {
     observer_.on_diagnostic(status.detail, peer, nullptr);
-    return;
+    return false;
   }
   // Binding-pinned match (design-q116 §6.2): beyond peer + ACK key, the
   // accept's authenticated RX binding id/generation must equal the binding
   // pinned at submit — an accept that arrives after a rebind resolves
   // nothing. The RX context is a membership check (valid implies a nonzero
   // epoch in the static context); session providers pin distinct contexts.
+  const auto matches = [&](const TxJob& job) noexcept {
+    return job.peer == peer && job.ack.accepted_type == key.accepted_type &&
+           job.ack.key == key.key && job.ack.round == key.round &&
+           job.submitted_binding_set && rx.valid &&
+           job.submitted_binding == rx.binding.id &&
+           job.submitted_generation == rx.binding.generation &&
+           job.submitted_rx_context == rx.binding.rx_context_id;
+  };
   auto* awaiting = awaiting_hop_.find([&](const AwaitingHop& value) {
-    if (!(value.job.peer == peer &&
-          value.job.ack.accepted_type == key.accepted_type &&
-          value.job.ack.key == key.key && value.job.ack.round == key.round)) {
-      return false;
-    }
-    if (!value.job.submitted_binding_set || !rx.valid) return false;
-    return value.job.submitted_binding == rx.binding.id &&
-           value.job.submitted_generation == rx.binding.generation &&
-           value.job.submitted_rx_context == rx.binding.rx_context_id;
+    return matches(value.job);
   });
   if (awaiting == nullptr) {
     auto& in_flight = physical_;
-    const auto& job = in_flight.job;
-    if (in_flight.active && job.requires_hop_accept && job.peer == peer &&
-        job.ack.accepted_type == key.accepted_type && job.ack.key == key.key &&
-        job.ack.round == key.round && job.submitted_binding_set && rx.valid &&
-        job.submitted_binding == rx.binding.id &&
-        job.submitted_generation == rx.binding.generation &&
-        job.submitted_rx_context == rx.binding.rx_context_id) {
+    if (in_flight.active && in_flight.job.requires_hop_accept && matches(in_flight.job)) {
       in_flight.early_hop_accept = true;
-      return;
+    } else {
+      observer_.on_diagnostic("UNMATCHED_HOP_ACCEPT", peer, &key.key.id);
+      return false;
     }
-    observer_.on_diagnostic("UNMATCHED_HOP_ACCEPT", peer, &key.key.id);
-    return;
   }
+  if (awaiting == nullptr) return true;
   TxJob job = awaiting->job;
   const bool was_deferred = awaiting->busy_deferred;
   const MonotonicMs sent_at_ms = awaiting->sent_at_ms;
@@ -98,6 +93,7 @@ void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId pee
   const std::uint32_t rtt_ms =
       rtt_sampled ? static_cast<std::uint32_t>(now_ms - sent_at_ms) : 0;
   finish_hop_accept(job, rtt_sampled, rtt_ms, now_ms);
+  return true;
 }
 
 void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer,
@@ -232,20 +228,6 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
   }
 
   if (frame.header.destination == config_.node) {
-    wire::PlainFrame plain{};
-    const auto status = wire::open_end(frame, config_.node, security_, plain);
-    if (!status) {
-      note_end_rx_refusal(status, frame, peer);
-      return;
-    }
-    if (!rx.valid) {
-      refuse_without_binding(peer, frame.header, "ADMISSION_NO_BINDING",
-                             now_ms);
-      return;
-    }
-    if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
-      observer_.on_verified_contact(frame.header.origin, now_ms);
-    }
     // Terminal admission probes (design-q116 §8.1 — all read-only): the ACK
     // + receipt pool slots, the control lane, a transaction, the APPLIED
     // result slot when a fresh one is needed, and the transaction deadline.
@@ -274,6 +256,22 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
                         rx, now_ms);
       observer_.on_diagnostic("ADMISSION_NO_ACK_SLOT", peer, &frame.header.message);
       return;
+    }
+    // Probe reply capacity before opening End: a full queue must not
+    // consume its replay counter and poison the sender's same-round retry.
+    wire::PlainFrame plain{};
+    const auto status = wire::open_end(frame, config_.node, security_, plain);
+    if (!status) {
+      note_end_rx_refusal(status, frame, peer);
+      return;
+    }
+    if (!rx.valid) {
+      refuse_without_binding(peer, frame.header, "ADMISSION_NO_BINDING",
+                             now_ms);
+      return;
+    }
+    if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
+      observer_.on_verified_contact(frame.header.origin, now_ms);
     }
     // Lease first: fully rollbackable, so a later refusal leaves no victim.
     AdmissionReservation res{};
@@ -700,30 +698,6 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
     case FrameType::GroupData:
       handle_group_data(frame, peer, now_ms);
       break;
-    case FrameType::HopAccept:
-    case FrameType::RouteUpdate:
-    case FrameType::SeqnoRequest:
-    case FrameType::RouteRequest:
-    case FrameType::GroupReport: {
-      wire::PlainFrame plain{};
-      status = wire::open_end(frame, config_.node, security_, plain);
-      if (!status) {
-        note_end_rx_refusal(status, frame, peer);
-        return;
-      }
-      if (frame.header.type == FrameType::HopAccept) {
-        handle_hop_accept(plain, peer, rx, now_ms);
-      } else if (frame.header.type == FrameType::RouteUpdate) {
-        handle_route_update(plain, peer, now_ms);
-      } else if (frame.header.type == FrameType::RouteRequest) {
-        handle_route_request(plain, peer, now_ms);
-      } else if (frame.header.type == FrameType::GroupReport) {
-        handle_group_report(plain, peer, now_ms);
-      } else {
-        handle_seqno_request(plain, peer, now_ms);
-      }
-      break;
-    }
     case FrameType::Diagnostic:
       // 02-telemetry §4.2: dispatch on the outer protection class first.
       // End-protected diagnostics ride the routed lane (dedup/forward/
@@ -742,6 +716,32 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
       // 1-hop, bound to the immediate peer, never end-protected.
       handle_busy(frame, peer, rx, now_ms);
       break;
+    case FrameType::HopAccept:
+    case FrameType::RouteUpdate:
+    case FrameType::SeqnoRequest:
+    case FrameType::RouteRequest:
+    case FrameType::GroupReport: {
+      wire::PlainFrame plain{};
+      status = wire::open_end(frame, config_.node, security_, plain);
+      if (!status) {
+        note_end_rx_refusal(status, frame, peer);
+        return;
+      }
+      if (frame.header.type == FrameType::HopAccept) {
+        if (!handle_hop_accept(plain, peer, rx, now_ms)) break;
+      } else if (frame.header.type == FrameType::RouteUpdate) {
+        handle_route_update(plain, peer, now_ms);
+      } else if (frame.header.type == FrameType::RouteRequest) {
+        handle_route_request(plain, peer, now_ms);
+      } else if (frame.header.type == FrameType::GroupReport) {
+        handle_group_report(plain, peer, now_ms);
+      } else {
+        handle_seqno_request(plain, peer, now_ms);
+      }
+      if (frame.header.type != FrameType::HopAccept) break;
+      // Only a matched current-binding ACK confirms the round trip.
+      [[fallthrough]];
+    }
     case FrameType::NeighborProbe:
     case FrameType::NeighborResult:
     case FrameType::TimeSync:

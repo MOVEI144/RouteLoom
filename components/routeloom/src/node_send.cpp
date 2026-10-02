@@ -217,7 +217,7 @@ Status MeshNode::enqueue_delivery(const MessageId& id, const NodeId destination,
       record = deliveries_.allocate();
     }
     if (record == nullptr) {
-      return Status::error(StatusCode::NoCapacity, "delivery table full");
+      return Status::error(StatusCode::Busy, "delivery table full");
     }
   }
   record->id = id;

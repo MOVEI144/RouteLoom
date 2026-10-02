@@ -921,6 +921,3 @@ target_compile_options(routeloom_periodic_load_tests PRIVATE -Wall -Wextra -Wped
 add_test(NAME routeloom_periodic_load_tests COMMAND routeloom_periodic_load_tests)
 set_tests_properties(routeloom_routing_scale_100_node_tests routeloom_group_100_node_tests
     routeloom_periodic_load_tests PROPERTIES LABELS long)
-
-# K02 exceeds the management airtime envelope; tracked by #59.
-set_tests_properties(routeloom_periodic_load_tests PROPERTIES DISABLED TRUE)

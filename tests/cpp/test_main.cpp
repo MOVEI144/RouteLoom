@@ -852,7 +852,7 @@ void test_delivery_terminal_eviction() {
     MessageId id{};
     CHECK(node.send(2, ByteView{payload.data(), payload.size()}, SendOptions{},
                     100, id)
-              .code == StatusCode::NoCapacity);
+              .code == StatusCode::Busy);
   }
   // Cancelling an entry turns it into terminal history. The next send must
   // evict that record and succeed instead of staying wedged — forever.
