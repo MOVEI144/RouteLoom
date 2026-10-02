@@ -31,6 +31,9 @@ namespace {
 std::uint32_t g_random = 0;
 unsigned g_random_calls = 0;
 uint32_t notification_count = 0;
+bool notification_clock = false;
+std::int64_t notification_running_since = 0;
+idf_stub::NotifyWaitStats notification_stats{};
 void (*notification_hook)(void*) = nullptr;
 void* notification_context = nullptr;
 
@@ -107,6 +110,8 @@ void reset() noexcept {
   g_antenna_at_wifi = -1;
   g_now_us = 0;
   notification_count = 0;
+  notification_clock = false;
+  notification_stats = {};
   notification_hook = nullptr;
   notification_context = nullptr;
   g_channel = 6;
@@ -584,7 +589,10 @@ esp_err_t esp_wifi_set_max_tx_power(const int8_t power) {
 }
 
 void xTaskNotifyGive(TaskHandle_t task) {
-  if (task != nullptr) ++notification_count;
+  if (task != nullptr) {
+    ++notification_count;
+    ++notification_stats.wakes;
+  }
 }
 uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks) {
   if (notification_hook != nullptr) {
@@ -593,6 +601,15 @@ uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks) {
     hook(notification_context);
   }
   if (ticks != 0) g_last_peek_ticks = notification_count == 0 ? ticks : 0;
+  ++notification_stats.waits;
+  if (ticks != 0 && notification_count == 0 && notification_clock) {
+    ++notification_stats.blocks;
+    notification_stats.max_running_us = std::max(
+        notification_stats.max_running_us,
+        static_cast<std::uint64_t>(g_now_us - notification_running_since));
+    g_now_us += static_cast<std::int64_t>(ticks) * 1000000 / configTICK_RATE_HZ;
+    notification_running_since = g_now_us;
+  }
   const uint32_t count = notification_count;
   if (clear)
     notification_count = 0;
@@ -602,6 +619,18 @@ uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks) {
 }
 
 namespace idf_stub {
+void enable_notify_clock() noexcept {
+  notification_clock = true;
+  notification_running_since = g_now_us;
+  notification_stats = {};
+}
+NotifyWaitStats notify_wait_stats() noexcept {
+  auto stats = notification_stats;
+  if (notification_clock)
+    stats.max_running_us = std::max(stats.max_running_us,
+        static_cast<std::uint64_t>(g_now_us - notification_running_since));
+  return stats;
+}
 void set_notify_wait_hook(void (*hook)(void*), void* context) noexcept {
   notification_hook = hook;
   notification_context = context;

@@ -38,6 +38,19 @@ struct SecurityCoordinatorTestAccess {
     coordinator.bank_.note_demand(SecurityScope::Link, request.peer + 1);
     return submitted;
   }
+  static Status block_authority(SecurityCoordinator& coordinator, AuthorityPort& port,
+                                MonotonicMs now) noexcept {
+    coordinator.authority_port_.attach(port);
+    AuthorityInput suspend{};
+    suspend.kind = AuthorityInputKind::Suspend;
+    const Status stopped = coordinator.small().authority.advance(suspend, now);
+    if (!stopped) return stopped;
+    AuthorityInput start{};
+    start.kind = AuthorityInputKind::Start;
+    if (!coordinator.build_authority_start(start.start))
+      return Status::error(StatusCode::InvalidState, "test authority start");
+    return coordinator.small().authority.advance(start, now);
+  }
   static bool apply_pending(const SecurityCoordinator& coordinator) noexcept {
     return coordinator.member_apply_pending_;
   }
@@ -618,6 +631,9 @@ int run_device_sleep_scenarios();
 int run_owner_crypto_wait_scenario(EspNowSecurityOwner& owner, EspNowRuntime& runtime,
                                    CryptoWorker& worker, MonotonicMs now, bool cancel);
 
+int run_owner_blocked_wait_scenario(EspNowSecurityOwner& owner, EspNowRuntime& runtime,
+                                    MonotonicMs now);
+
 void test_owner_crypto_wait(bool cancel) {
   idf_stub::reset();
   Stores stores{};
@@ -653,6 +669,47 @@ void test_owner_crypto_wait(bool cancel) {
   failures += run_owner_crypto_wait_scenario(owner, runtime, worker, now, cancel);
   runtime.stop();
 }
+void test_owner_blocked_authority_wait() {
+  idf_stub::reset();
+  Stores stores{};
+  CHECK(stores.init());
+  CryptoWorker worker;
+  EspNowSecurityOwner owner{};
+  EspNowSecurityOwnerTestAccess::install_coordinator(owner, stores.deps(owner));
+  routeloom_test::CapturingObserver observer{};
+  EspNowRuntime runtime(radio_config(), owner.session_provider(), observer);
+  EspNowSecurityOwnerTestAccess::attach_runtime(owner, runtime);
+  CHECK(runtime.initialize());
+  CoordinatorEvent boot{};
+  boot.kind = CoordinatorEventKind::Boot;
+  boot.now = kStart;
+  boot.boot_witness = kBoot;
+  boot.boot_prepared = true;
+  CHECK(owner.coordinator().step(boot));
+  MonotonicMs now = kStart;
+  CoordinatorMemberConfig member{};
+  CHECK(take_apply(owner.coordinator(), now, member));
+  EspNowSecurityOwnerTestAccess::apply(owner, member);
+  CHECK(poll(owner.coordinator(), ++now));
+  CoordinatorAction discovery{};
+  CHECK(owner.coordinator().take_action(discovery));
+  CHECK(discovery.kind == CoordinatorActionKind::StartMemberDiscovery);
+  struct RefusingPort final : AuthorityPort {
+    unsigned attempts{0};
+    bool try_send(NodeId, AuthorityCarrierKind, ByteView, std::uint64_t&) noexcept override {
+      ++attempts;
+      return false;
+    }
+  } port;
+  CHECK(SecurityCoordinatorTestAccess::block_authority(owner.coordinator(), port, now));
+  EspNowSecurityOwnerTestAccess::arm_poll(owner, worker);
+  runtime.bind_wake_task(xTaskGetCurrentTaskHandle());
+  failures += run_owner_blocked_wait_scenario(owner, runtime, now);
+  CHECK(port.attempts > 1);
+  CHECK(owner.coordinator().authority_snapshot().tx_sent == 0);
+  runtime.stop();
+}
+
 void test_dev_profile_survives_radio_failure() {
   idf_stub::reset();
   Stores stores{};
@@ -704,6 +761,7 @@ int main() {
   test_device_post_during_runtime_publication();
   test_device_begin_clears_key_on_failure();
   test_dev_profile_survives_radio_failure();
+  test_owner_blocked_authority_wait();
   for (const bool cancel : {false, true}) test_owner_crypto_wait(cancel);
   return failures == 0 ? 0 : 1;
 }

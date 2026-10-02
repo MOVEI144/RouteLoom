@@ -5,6 +5,7 @@
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/autonomy_wire.hpp"
 #include "idf_stubs.hpp"
+#include "freertos/task.h"
 #include "test_security.hpp"
 #include "test_sim.hpp"
 
@@ -66,6 +67,7 @@ void test_receive() {
   config.max_tx_power_qdbm = 80;
   EspNowRuntime runtime(config, security, observer);
   CHECK(runtime.initialize().ok());
+  runtime.bind_wake_task(xTaskGetCurrentTaskHandle());
   const std::array<std::array<std::uint8_t, 6>, 3> sources{{
       {{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01}},
       {{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02}},
@@ -95,6 +97,7 @@ void test_receive() {
       if (accepted) { ++bootstrap_count; ++wire_count; }
       CHECK(EspNowRuntimeTestAccess::queued(runtime, true) == bootstrap_count);
       CHECK(EspNowRuntimeTestAccess::queued(runtime, false) == wire_count);
+      CHECK(idf_stub::notify_wait_stats().wakes == bootstrap_count + wire_count);
     }
   }
   runtime.stop();
