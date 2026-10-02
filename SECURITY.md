@@ -2,8 +2,8 @@
 
 ## Status
 
-RouteLoom is at **SDK 2.0.0-dev** (pre-release) in the `CORE_FIXED_250`
-profile. It has not undergone a security audit, RF/HIL qualification, or
+RouteLoom is at **SDK 2.0.0-dev** (pre-release). Release builds do not
+establish a security audit, complete RF/HIL qualification, or
 production-credential review (the `G-SEC` gate is still open — see
 `docs/STATUS.md`). Do not deploy it where compromise of a mesh node or
 host daemon would cause harm.
@@ -79,11 +79,20 @@ This key is a **test fixture, not a credential**. It is public by
 definition, provides no device identity, and is recoverable by flash
 readout. `security_profile()` deliberately defaults to `Development` so
 no provider can silently claim production status, and firmware logs mark
-the profile EXPERIMENTAL at boot. Replace it with the qualified
-EDHOC/RPK identity profile (gate `G-SEC`) before any real deployment.
+the profile EXPERIMENTAL at boot. Product release selection uses MemberEdhoc
+and provisioned identity; its
+qualification gate `G-SEC` remains separate from a successful build.
 Finding "the dev key is public" is a documented design property, not a
 vulnerability — but flaws that let the dev profile masquerade as a
 production profile **are** in scope.
+
+Release packaging rejects product images with development identity, master
+keys or linked development providers. DevRam archives are labelled for
+quick starts. The optional release signing hook rejects meshviz's public
+development signer by public-key identity. See [release procedures](docs/releases.md)
+for the artifact inventory, unsigned-provenance limits and RC promotion.
+Maintainers choose the signing method and configure the private reporting
+channel/contact before publishing the first stable release.
 
 ## Response
 
