@@ -17,3 +17,7 @@ change, written for SDK users (what changed and what they must do):
 Sections: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
 Breaking changes start with **Breaking:**. At release, the fragments are merged
 into a new version section of `CHANGELOG.md` and deleted in the same commit.
+
+For a review-only Unreleased section, run `python3 tools/assemble_changelog.py`
+from the repository root. It prints the fragments in section order without
+changing `CHANGELOG.md`, deleting fragments or creating a tag.

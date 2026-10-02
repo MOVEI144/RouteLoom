@@ -1,0 +1,49 @@
+{
+  "request": {
+    "v": 1,
+    "request_id": "read-1",
+    "method": "messages.read",
+    "params": {
+      "network": "00000000524c0001",
+      "from": "earliest",
+      "limit": 32
+    }
+  },
+  "response": {
+    "v": 1,
+    "request_id": "read-1",
+    "ok": true,
+    "result": {
+      "records": [
+        {
+          "v": 1,
+          "network": "00000000524c0001",
+          "gateway": "0000000000000001",
+          "origin": "0000000000000002",
+          "message": {
+            "session": "00000001",
+            "sequence": "0000000000000001"
+          },
+          "payload_hex": "010203",
+          "payload_len": 3,
+          "cursor": "AQAAAABSTAABAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",
+          "endpoint_kind": "gateway_mirror",
+          "evidence": "HOST_RAM_RETAINED",
+          "assurance": {
+            "profile": "UNKNOWN",
+            "origin": "unverified"
+          }
+        }
+      ],
+      "next_cursor": "AQAAAABSTAABAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",
+      "oldest_cursor": "AQAAAABSTAABAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "tail_cursor": "AQAAAABSTAABAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",
+      "more": false,
+      "retention": {
+        "seconds": 300,
+        "entries": 1,
+        "bytes": 512
+      }
+    }
+  }
+}

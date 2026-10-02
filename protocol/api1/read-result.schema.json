@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:routeloom:api1:read-result:1",
+  "title": "messages.read result (additive fields allowed)",
+  "type": "object", "required": ["records", "next_cursor", "oldest_cursor", "tail_cursor", "more", "retention"],
+  "properties": {
+    "records": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/record"}},
+    "next_cursor": {"type": "string"}, "oldest_cursor": {"type": "string"}, "tail_cursor": {"type": "string"},
+    "more": {"type": "boolean"}, "wait_expired": {"type": "boolean"},
+    "retention": {"type": "object", "required": ["seconds", "entries", "bytes"], "properties": {
+      "seconds": {"type": "integer", "minimum": 0}, "entries": {"type": "integer", "minimum": 0}, "bytes": {"type": "integer", "minimum": 0}
+    }}
+  },
+  "$defs": {"record": {
+    "type": "object", "required": ["v", "network", "gateway", "origin", "message", "payload_hex", "payload_len", "cursor", "endpoint_kind", "evidence", "assurance"],
+    "properties": {
+      "v": {"const": 1}, "network": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+      "gateway": {"type": ["string", "null"], "pattern": "^[0-9a-f]{16}$"},
+      "origin": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+      "message": {"type": "object", "required": ["session", "sequence"], "properties": {
+        "session": {"type": "string", "pattern": "^[0-9a-f]{8}$"}, "sequence": {"type": "string", "pattern": "^[0-9a-f]{16}$"}
+      }},
+      "payload_hex": {"type": "string", "pattern": "^(?:[0-9a-f]{2})*$", "maxLength": 256},
+      "payload_len": {"type": "integer", "minimum": 0, "maximum": 128},
+      "cursor": {"type": "string"}, "endpoint_kind": {"const": "gateway_mirror"}, "evidence": {"const": "HOST_RAM_RETAINED"},
+      "assurance": {"type": "object", "required": ["profile", "origin"], "properties": {
+        "profile": {"type": "string"}, "origin": {"enum": ["verified", "unverified"]}, "site_epoch": {"type": "integer", "minimum": 0}
+      }}
+    }
+  }}
+}

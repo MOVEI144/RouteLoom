@@ -15,6 +15,21 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Install reference tools
+        run: |
+          python3 -m pip install -r tools/requirements-docs.txt
+          sudo apt-get update -q
+          sudo apt-get install -y doxygen
+      - name: Check and build user references
+        run: |
+          python3 tools/gen_user_reference.py --check
+          python3 tools/check_api1_contract.py
+          doxygen tools/Doxyfile
+      - name: Upload API reference
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: routeloom-api-reference
+          path: build-docs/doxygen
       - name: Check documentation and parameters
         run: python3 tools/check_docs.py --report doc-check-results.json
       - name: Check generated reference tables

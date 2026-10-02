@@ -1,5 +1,5 @@
 # RouteLoom documentation site (issue #15).
-# Deployed to https://movei144.github.io/RouteLoom/ by .github/workflows/pages.yml.
+# Deployment is opt-in via ROUTELOOM_PAGES_ENABLED (see docs/user/pages.md).
 # docs_dir is docs/: no document file is moved or renamed for the site.
 site_name: RouteLoom 文書
 site_description: 組み込み向け適応Mesh SDK（ESP32-C3/S3/C5/C6、ESP-NOW）の設計・実装文書。SDK 2.0.0-dev（pre-release）でありRF・本番認定は未完了。
@@ -55,10 +55,24 @@ nav:
   - 文書案内: README.md
   - RouteLoomについて: about.md
   - はじめに読む:
-    - 実装案内（v0.1実装）: implementation/README.md
+    - 実装案内（過去の基点）: implementation/README.md
     - 全体仕様・SDKの責任境界: spec/overview.md
     - アーキテクチャと実行モデル: spec/architecture.md
     - 実装状況とリリース条件: STATUS.md
+  - 利用者ガイド:
+    - 入門: user/quickstart.md
+    - 利用: user/guide.md
+    - Security: user/security.md
+    - 運用: user/operations.md
+    - Pages 公開: user/pages.md
+  - API reference:
+    - 案内: api/README.md
+    - Device C++: api/device.hpp.md
+    - Device C: api/device.h.md
+    - Core C ABI: api/routeloom.h.md
+    - Component Kconfig: api/kconfig.md
+    - API1 method: api/api1-methods.md
+    - API1 契約 kit: api/api1.md
   - 仕様:
     - 組み込みSDK APIの契約: spec/sdk-api.md
     - 配送保証・キュー・永続化: spec/delivery-storage.md

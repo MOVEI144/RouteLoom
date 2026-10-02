@@ -1,13 +1,22 @@
 # 実装状況とリリース条件
 
-更新：2026-09-28（基点 `77b57926`。PR #202 まで）。
+更新：2026-10-02。現在の状況と過去の基点記録を分けて記載。
 
-## v2.0 に向けた位置付け
+## 現在の利用者向け状況（2026-10-02）
 
-- 版：SDK **2.0.0-dev**（pre-release）。v1.x は出さず、最初の番号付き release を v2.0.0 とする。SDK の版と各面の版（C ABI 3、Wire 2.0、HostLink 1、保存形式ごと）は [`protocol/manifest.json`](../protocol/manifest.json) が正本で、表は[互換性・版管理](spec/compatibility.md)に生成する。
-- 正式対象：ESP32-**C3・C6・S3・C5**。C3・C6・S3 は実機の回に合格したものを認定とし、C5 は実機が無いため build と host 試験で出して「実機確認待ち」と明記する。現 CI は C3/S3/C5 を必須、C6 を実験 job で build している（C6 の必須化は v2 計画の V2-02）。
-- 計画：v2.0 は 20 本の PR を 5 段（M0 基盤、M1 容量と構造、M2 互換を壊す変更→alpha、M3 Device API と実行時→beta、M4 大きいデータ・E2E・仕上げ→rc）で進める。partition を 4 MB・OTA 2 面へ、LegacyFixture の撤去、HostLink の本番認証、C ABI 3、Device API、#146（同じ NodeId での復帰）、#176、#179、#197 を含む。出荷機と本番の site DB は無く、v2 への移行は全消去と再 provision で行う。
-- 作業規約は [AGENTS.md](../AGENTS.md) と [docs/development/](development/design-principles.md)、変更履歴は [CHANGELOG.md](../CHANGELOG.md)。
+基点 `origin/main`：`4a931258`（V2-STAB-B／#229 まで）。SDK は **2.0.0-dev**。C ABI 3、Device C API 1、wire major 2、HostLink 2、API1 envelope 1／caps_version 2。番号の正本は [manifest](../protocol/manifest.json)。
+
+C3/S3/C5/C6 の build cell は [CI 一覧](../tools/ci/cells.json)が正本。Device の起動、所属・接続・leave、Device C API と外部 consumer は merged。reference／bridge／examples と component の既定は DevRam（Development）、bench は MemberEdhoc（Candidate）。製品既定の切替は V2-17b／H2 待ち。本番認定は未完了。
+
+[利用者文書 index](README.md)から入門、移行、運用、API reference と API1 kit を読む。V2-15／V2-16／V2-18／V2-19 は pending（main を確認した時点）。release pipeline の最終受入は V2-22、配布物を使う P06 と K05 の実機手順は H4 に残る。Pages の有効化は利用者の repo 設定で行う。
+
+最新の [STAB-B follow-up](hil/2026-10-01-stab-fix.md)では強制 2-hop relay reset **61/100**、通常 image の同時起動 **4/5**、channel 6→1 後の配送は各 member **0/20**。いずれも未合格。host sim／firmware build／短い診断 run を実機認定へ置き換えない。C5 は実機確認待ち。
+
+Member の API1 payload read は full network 引数が拒否されるため **K05-M red**。DevRam consumer の host smoke と区別する。5 台／3-hop Member 構成の収束も文書 workload の試験で失敗し、既存 M01-T3 の red に関係する。production の修正はこの文書 PR に含めない。
+
+## 過去の基点記録
+
+以下は `77b57926`（2026-09-28、#202 まで）の状況と未完了ゲートの記録。現 main の feature/default や chip の CI 分類を読むときは上の案内と正本を使う。
 
 ## #162〜#202 で加わったもの
 

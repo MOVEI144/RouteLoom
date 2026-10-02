@@ -52,7 +52,7 @@ def run(root: Path) -> dict:
     def check(name: str, ok: bool, detail: str = "") -> None:
         checks.append({"name": name, "passed": bool(ok), "detail": detail})
 
-    markdown = sorted([root / "README.md", *(root / "docs").rglob("*.md")])
+    markdown = sorted([root / "README.md", root / "MIGRATING-v2.md", *(root / "docs").rglob("*.md"), *(root / "examples").rglob("README.md")])
     check("documentation_exists", len(markdown) >= 25)
     texts = {}
     for file in markdown:
