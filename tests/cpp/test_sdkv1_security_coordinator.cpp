@@ -36,6 +36,7 @@ namespace routeloom::sdkv1 {
 struct SecurityCoordinatorTestAccess {
   static Status queue_crypto(SecurityCoordinator& coordinator, CryptoWorker& worker,
                              MonotonicMs now) noexcept {
+    coordinator.deps_.crypto_worker = &worker;
     auto& engine = coordinator.member().engine;
     const Status bound = engine.bind_crypto_worker(&worker);
     if (!bound) return bound;
@@ -1550,7 +1551,9 @@ void test_stop_retains_worker_workspace() {
     CHECK(!coordinator.session_provider().ready());
     CHECK(coordinator.adopt_dev(CoordinatorDevConfig{}, now + 1).code == StatusCode::Busy);
     CHECK(coordinator.step(stop).code == StatusCode::Busy);
+    CHECK(coordinator.next_deadline(now + 1) == kJoinNoDeadline);
     CHECK(worker.execute());
+    CHECK(coordinator.next_deadline(now + 1) == now + 1);
     CHECK(coordinator.step(stop).ok());
     CHECK(worker.idle());
     CHECK(coordinator.snapshot().link_sessions == 0);

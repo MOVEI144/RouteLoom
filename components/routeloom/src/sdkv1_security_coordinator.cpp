@@ -661,7 +661,11 @@ Status SecurityCoordinator::member_discovery_config(DiscoveryConfig& out) noexce
 }
 
 MonotonicMs SecurityCoordinator::next_deadline(const MonotonicMs now) const noexcept {
-  if (workspace_retiring_ || swap_waiting_) return now;
+  if (workspace_retiring_ || swap_waiting_) {
+    // Completion wakes Owner; polling an unfinished loan must not starve
+    // the lower-priority worker.
+    return deps_.crypto_worker != nullptr && deps_.crypto_worker->ready() ? now : kJoinNoDeadline;
+  }
   if (sleeping_ || mode_ == CoordinatorMode::Fresh) return kJoinNoDeadline;
   MonotonicMs deadline = kJoinNoDeadline;
   const auto sooner = [&](const MonotonicMs candidate) {
