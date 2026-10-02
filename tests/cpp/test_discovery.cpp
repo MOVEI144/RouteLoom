@@ -1925,6 +1925,43 @@ void test_cold_start_jitter() {
   CHECK(b.engine.stats().auths_completed == 1);
 }
 
+// A busy physical TX lane must not consume the requester's discovery
+// attempt or its response window. Cover immediate and deferred starts.
+void test_discover_local_refusal_retries_promptly() {
+  for (const std::uint32_t jitter_max : {0U, 1000U}) {
+    DiscWorld world;
+    Unit& a = world.add(1, 0xA1, true, 0xC0FFEE, 7, 0, 0, jitter_max);
+    Unit& b = world.add(2, 0xB2, true);
+    a.hooks.peer_members.insert(2);
+    b.hooks.peer_members.insert(1);
+    world.start_all();
+    a.port.fail_next = 1;
+    CHECK_OK(a.engine.begin_discovery(0));
+    while (a.port.fail_next != 0 && world.medium.now < 1000) world.run(5);
+    const auto refused_at = world.medium.now;
+    world.run(100);
+    CHECK(a.port.count_kind(FrameType::Discover) == 1);
+    const auto times = a.port.times_of(FrameType::Discover, false);
+    if (!times.empty()) CHECK(times.front() <= refused_at + 100);
+    world.run(1500);
+    CHECK(a.engine.stats().auths_completed == 1);
+  }
+}
+
+void test_discover_local_refusal_stays_bounded() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true, 0xC0FFEE, 7, 0, 0, 1000, 0, 1);
+  world.start_all();
+  a.port.fail_next = 1000;
+  CHECK_OK(a.engine.begin_discovery(0));
+  world.run(10000);
+  CHECK(a.port.count_kind(FrameType::Discover) == 0);
+  CHECK(a.observer.has("DISCOVERY_FAILED"));
+  const auto send_failures = a.engine.stats().send_failures;
+  world.run(10000);
+  CHECK(a.engine.stats().send_failures == send_failures);
+}
+
 // radio.md §7/§13 / radio-defaults.json discovery.powered_retry_*: the first
 // retry waits a uniform [500, 2000] draw, each later failure doubles it, and
 // the wait clamps at backoff_max_ms — never a fixed base or per-poll storm.
@@ -2063,6 +2100,8 @@ int main() {
   test_forget_revoked_peer();
   test_reauth_revoked_rate_limit();
   test_cold_start_jitter();
+  test_discover_local_refusal_retries_promptly();
+  test_discover_local_refusal_stays_bounded();
   test_retry_backoff_draw_double_cap();
   test_retry_backoff_draw_clamped_to_cap();
   test_handle_issuance_never_zero_never_wraps();
