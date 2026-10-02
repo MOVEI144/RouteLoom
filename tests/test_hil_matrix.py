@@ -9,6 +9,13 @@ from tools.hil import rig, scenarios
 
 
 class HilMatrixTests(unittest.TestCase):
+    def test_two_site_move_requires_two_gateways(self):
+        bench = rig.load_rigs("tools/hil/rigs.yaml")["bench-2026-09-29-h0"]
+        with patch.object(rig, "resolve_rig", side_effect=AssertionError("hardware touched")):
+            plan = scenarios.matrix_plan("J05-A", bench, Path("tests/e2e/scenarios.json"))
+        self.assertFalse(plan["ready"], "one gateway cannot represent two RF sites")
+        self.assertIn("bridge:1", plan["missing"])
+
     def test_shared_row_preserves_acceptance_and_matches_distinct_boards(self):
         rigs = rig.load_rigs("tools/hil/rigs.yaml")
         bench = rigs["bench-2026-09-29-h0"]
