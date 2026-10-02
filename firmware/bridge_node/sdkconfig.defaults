@@ -29,3 +29,5 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # gateway (128 end sessions) here; the C3 defaults select gateway_small.
 CONFIG_ROUTELOOM_ROLE_GATEWAY=y
 CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY=y
+# Distribution images use device identity and Site Authority admission.
+CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y

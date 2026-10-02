@@ -44,9 +44,10 @@ def firmware_matrix() -> list[dict]:
                           ('endpoint', 'reference_node')):
             for mode in ('member', 'devram'):
                 security = 'MEMBER_EDHOC' if mode == 'member' else 'DEV_RAM'
-                wanted = [f'CONFIG_ROUTELOOM_SECURITY_MODE_{security}=y'] if mode == 'member' else []
+                wanted = [f'CONFIG_ROUTELOOM_SECURITY_MODE_{security}=y']
                 matches = [c for c in cells if c['target'] == target and c['app'] == app
-                           and c['overlay'] == wanted and
+                           and (c['overlay'] == wanted or not c['overlay'])
+                           and wanted[0] in c['overlay'] + c.get('expect', []) and
                            (c['id'].endswith('-owner_member') or c['id'].endswith('-member')
                             if mode == 'member' else c['id'].endswith('-normal-off-off') or
                             c['id'].endswith('-devram'))]
@@ -57,7 +58,7 @@ def firmware_matrix() -> list[dict]:
                 if role == 'endpoint':
                     overlay += ['CONFIG_ROUTELOOM_RESOURCE_PROFILE_ENDPOINT=y',
                                 'CONFIG_ROUTELOOM_ROLE_ENDPOINT=y']
-                # Release selection is explicit; SDK defaults belong to V2-17.
+                # Release selection is explicit for both security modes.
                 if f'CONFIG_ROUTELOOM_SECURITY_MODE_{security}=y' not in overlay:
                     overlay.append(f'CONFIG_ROUTELOOM_SECURITY_MODE_{security}=y')
                 matrix.append({'id': f'{role}-{target}-{mode}', 'app': app,
@@ -83,7 +84,8 @@ def firmware_errors(image: bytes, symbols: list[str], settings: list[str], mode:
         if 'CONFIG_ROUTELOOM_DEV_KCONFIG_IDENTITY=y' in lines:
             errors.append('product image enables development identity')
         # Inspect the linked ELF: config alone cannot prove a provider was removed.
-        if any(re.search(r'Dev(Psk|Group|Scope|Session).*Provider|DevelopmentPskSecurityProvider',
+        if any(re.search(r'Dev(Psk|Group|Scope|Session).*Provider|DevelopmentPskSecurityProvider|'
+                         r'DevMembershipHooks|DevPskAuthenticator|DevConfigAuthorityVerifier',
                          name) for name in symbols):
             errors.append('product image links a development provider')
     if 'CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y' in lines:

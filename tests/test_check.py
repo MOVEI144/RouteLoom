@@ -48,6 +48,19 @@ def elf32(symbols):
 
 
 class CellList(unittest.TestCase):
+    def test_distribution_defaults_and_quick_start_modes(self):
+        dev = "CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"
+        member = "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"
+        for app in ("bridge_node", "reference_node"):
+            self.assertIn(member, (ROOT / "firmware" / app / "sdkconfig.defaults").read_text())
+        for cell in check.load_cells()["cells"]:
+            settings = cell["overlay"] + cell.get("expect", [])
+            if cell["app"] in ("bridge_node", "reference_node") and not cell["overlay"]:
+                self.assertIn(member, settings, cell["id"])
+            if "devram" in cell["id"] or cell["app"] in (
+                    "endpoint_cpp", "endpoint_c", "standalone_gateway", "idf_consumer"):
+                self.assertIn(dev, settings, cell["id"])
+
     def test_check_parallelism_is_bounded(self):
         build = check.core()[1]
         self.assertLessEqual(int(build.argv[-1]), 8)
@@ -65,7 +78,7 @@ class CellList(unittest.TestCase):
         data = check.load_cells()
         cells = data["cells"]
         # Every app/target and feature branch, including C6 external antenna selection.
-        self.assertEqual(len(cells), 55)
+        self.assertEqual(len(cells), 61)
         self.assertTrue({
             "bridge_node-esp32c3-normal-off-maintenance_member",
             "reference_node-esp32c6-normal-off-maintenance_member",
@@ -378,6 +391,24 @@ class Budget(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("development key", err)
         # The explicit development profile still admits its quick-start key.
+        data["cells"][0]["expect"] = ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"]
+        self.cells.write_text(json.dumps(data))
+        self.assertEqual(self.size("a")[0], 0)
+
+    def test_member_image_refuses_development_providers(self):
+        data = json.loads(self.cells.read_text())
+        member = "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"
+        data["cells"][0]["expect"] = [member]
+        self.cells.write_text(json.dumps(data))
+        self.assertEqual(self.size("a")[0], 0)
+        for provider in ("DevGroupProvider", "DevGroupSender", "DevScopeProvider",
+                         "DevMembershipHooks", "DevelopmentPskSecurityProvider",
+                         "DevPskAuthenticator", "DevConfigAuthorityVerifier"):
+            with self.subTest(provider=provider):
+                self.build("a", 1000, 500, 40, symbols=("app_main", provider))
+                code, _, err = self.size("a")
+                self.assertEqual(code, 1)
+                self.assertIn(provider, err)
         data["cells"][0]["expect"] = ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"]
         self.cells.write_text(json.dumps(data))
         self.assertEqual(self.size("a")[0], 0)
