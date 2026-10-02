@@ -33,13 +33,11 @@ constexpr std::uint32_t kAutonomyWireLifetimeMs = 500;
 TickType_t ms_to_ticks_ceil(const std::uint64_t ms) noexcept {
   constexpr std::uint64_t kMaxTicks = portMAX_DELAY - 1;  // portMAX_DELAY waits forever
   constexpr std::uint64_t kTickRate = configTICK_RATE_HZ;
-  const std::uint64_t whole_ms = ms / 1000U;
-  const std::uint64_t fraction = (ms % 1000U * kTickRate + 999U) / 1000U;
-  if (whole_ms > kMaxTicks / kTickRate) return static_cast<TickType_t>(kMaxTicks);
-  const std::uint64_t whole_ticks = whole_ms * kTickRate;
-  if (fraction >= kMaxTicks - whole_ticks) return static_cast<TickType_t>(kMaxTicks);
-  const std::uint64_t ticks = whole_ticks + fraction;
-  return static_cast<TickType_t>(ticks == 0 ? 1 : ticks);
+  static_assert(kMaxTicks <= UINT32_MAX, "ESP-IDF tick width");
+  if (ms >= kMaxTicks * 1000U / kTickRate) return static_cast<TickType_t>(kMaxTicks);
+  const auto ticks =
+      static_cast<TickType_t>(kTickRate == 1000 ? ms : (ms * kTickRate + 999U) / 1000U);
+  return ticks == 0 ? 1 : ticks;
 }
 
 void saturating_inc(std::uint32_t& counter) noexcept {
@@ -731,7 +729,10 @@ void EspNowRuntime::task_entry(void* argument) noexcept {
   runtime->bind_wake_task(xTaskGetCurrentTaskHandle());
   while (runtime->started_) {
     runtime->poll_once();
-    runtime->wait_for_event(kOwnerPollPeriodMs);
+    const auto now = runtime->now_ms();
+    const auto due =
+        std::min(runtime->next_deadline(now), now > UINT64_MAX - 100 ? UINT64_MAX : now + 100);
+    runtime->wait_for_event(due > now ? due - now : 0);
   }
   runtime->bind_wake_task(nullptr);
   runtime->task_ = nullptr;
@@ -1266,6 +1267,9 @@ void EspNowRuntime::poll_bootstrap(const MonotonicMs now) noexcept {
 }
 
 MonotonicMs EspNowRuntime::next_deadline(const MonotonicMs now_ms) const noexcept {
+  if ((event_queue_ != nullptr && uxQueueMessagesWaiting(event_queue_) != 0) ||
+      (bootstrap_queue_ != nullptr && uxQueueMessagesWaiting(bootstrap_queue_) != 0))
+    return now_ms;
   MonotonicMs due = node_.next_deadline(now_ms);
   const auto sooner = [&](const MonotonicMs at) {
     if (at < due) due = at;
@@ -1325,6 +1329,11 @@ Status EspNowRuntime::send_application(
 
 Status EspNowRuntime::send_raw(const MacAddress& mac,
                                const ByteView frame) noexcept {
+#if !defined(ESP_PLATFORM) || CONFIG_ROUTELOOM_DEEP_SLEEP
+  if (now_ms() >= radio_until_ms_)
+    return Status::error(StatusCode::DiscoveryBudgetExhausted, "wake radio budget exhausted");
+#endif
+
   if (!espnow_initialized_) {
     return Status::error(StatusCode::InvalidState,
                          "ESP-NOW not initialized");
@@ -1415,7 +1424,10 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
   ++raw_tx_count_;
   portEXIT_CRITICAL(&callback_lock_);
   const esp_err_t error =
-      esp_now_send(mac.bytes.data(), frame.data, frame.size);
+#if !defined(ESP_PLATFORM) || CONFIG_ROUTELOOM_DEEP_SLEEP
+      now_ms() >= radio_until_ms_ ? ESP_ERR_ESPNOW_NO_MEM :
+#endif
+                                  esp_now_send(mac.bytes.data(), frame.data, frame.size);
 #if CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
   if (error == ESP_OK) trace_rld1("tx", frame);
 #endif
@@ -1640,6 +1652,11 @@ Status EspNowRuntime::reply_send_bound(const ReplyBinding binding,
 
 Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
                            const ByteView frame) noexcept {
+#if !defined(ESP_PLATFORM) || CONFIG_ROUTELOOM_DEEP_SLEEP
+  if (now_ms() >= radio_until_ms_)
+    return Status::error(StatusCode::DiscoveryBudgetExhausted, "wake radio budget exhausted");
+#endif
+
   if (channel_runner_.busy()) {
     // A serialized channel operation owns the radio: DATA submissions wait
     // rather than transmit against a stale configuration (04 §8).
@@ -1747,7 +1764,10 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
   // any particular neighbor. Never seed per-peer telemetry with this key.
   if (peer != kBroadcastNodeId) node_.note_tx_submit_identity(token, submit_key);
   const esp_err_t error =
-      esp_now_send(peer_mac.bytes.data(), frame.data, frame.size);
+#if !defined(ESP_PLATFORM) || CONFIG_ROUTELOOM_DEEP_SLEEP
+      now_ms() >= radio_until_ms_ ? ESP_ERR_ESPNOW_NO_MEM :
+#endif
+                                  esp_now_send(peer_mac.bytes.data(), frame.data, frame.size);
 #if CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
   if (error == ESP_OK) {
     wire::Header trace{};

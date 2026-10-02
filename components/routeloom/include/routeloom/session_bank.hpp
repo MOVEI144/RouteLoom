@@ -359,12 +359,7 @@ class SessionBank {
   std::uint32_t remaining(std::uint32_t deadline) const noexcept {
     return deadline - static_cast<std::uint32_t>(last_tick_);
   }
-  std::uint32_t expires_after(std::uint32_t duration) noexcept {
-    const MonotonicMs deadline =
-        duration > UINT64_MAX - last_tick_ ? UINT64_MAX : last_tick_ + duration;
-    if (deadline < next_expiry_) next_expiry_ = deadline;
-    return static_cast<std::uint32_t>(deadline);
-  }
+  std::uint32_t expires_after(std::uint32_t duration) noexcept;
   std::uint32_t install_serial_{0};
   std::uint32_t lru_clock_{0};
   mutable bool in_port_{false};

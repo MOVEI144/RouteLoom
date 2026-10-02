@@ -768,6 +768,11 @@ Status EspNowSecurityOwner::adopt_dev(const DevConfig& config,
 
 MonotonicMs EspNowSecurityOwner::next_deadline(const MonotonicMs now_ms) const noexcept {
   if (!booted_) return UINT64_MAX;
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  // Dev has no handshake, bank expiry or lifecycle poll work. Channel
+  // operations retain the compatibility cadence until their next event.
+  return tune_.active ? (now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2) : UINT64_MAX;
+#else
   MonotonicMs due = coordinator().next_deadline(now_ms);
   // Authority transports and channel tuning retain fallback while their
   // pending slots do not publish a complete deadline contract.
@@ -776,6 +781,7 @@ MonotonicMs EspNowSecurityOwner::next_deadline(const MonotonicMs now_ms) const n
     if (fallback < due) due = fallback;
   }
   return due;
+#endif
 }
 
 void EspNowSecurityOwner::poll(const MonotonicMs now_ms) noexcept {

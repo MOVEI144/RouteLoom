@@ -665,6 +665,19 @@ int "Uptime before sleep_prepare is requested"
             sized against docs/spec/power.md.
 ```
 
+### CONFIG_ROUTELOOM_SLEEP_RADIO_BUDGET_MS
+
+```text
+int "Maximum radio-on time per deep-sleep wake"
+        range 1000 3600000
+        default 40000
+        depends on ROUTELOOM_DEEP_SLEEP
+        help
+            Bounds discovery, membership recovery and sleep drain together.
+            Exhaustion stops the radio and uses the existing bounded fault
+            backoff, including when an isolated node never adopts membership.
+```
+
 ### CONFIG_ROUTELOOM_SLEEP_DURATION_MS
 
 ```text

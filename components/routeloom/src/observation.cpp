@@ -266,7 +266,7 @@ Status MeshNode::build_observation_snapshot(
     const RemoteObservationQuery& query, const MonotonicMs now_ms,
     RemoteObservationSnapshot& out, DiagnosticRejectReason& reject_reason) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   return build_observation_snapshot_impl(query, now_ms, out, reject_reason);
 }
 

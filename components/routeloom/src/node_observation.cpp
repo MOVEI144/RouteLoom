@@ -238,7 +238,7 @@ void MeshNode::obs_final(const Delivery& delivery, const DeliveryState state,
 Status MeshNode::note_radio_tx(const RadioTxObservation& observation,
                                const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   if (!started_ || observation.peer == kInvalidNodeId) return Status::success();
   const std::uint64_t service_us =
       observation.completed_us > observation.submitted_us

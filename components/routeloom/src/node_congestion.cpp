@@ -99,7 +99,7 @@ void MeshNode::refresh_link_cost(Neighbor& neighbor, const MonotonicMs now_ms) n
 
 Status MeshNode::note_peer_stale(const NodeId peer) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   telemetry_peers_.mark_stale(peer);
   if (Neighbor* neighbor = find_neighbor(peer)) {
     reset_neighbor_measurement(*neighbor);
@@ -118,6 +118,8 @@ void MeshNode::refresh_neighbor_load(const MonotonicMs now_ms) noexcept {
     last_admission_rejections_ = scheduler_.stats_.admissions_rejected;
     last_refusal_ms_ = now_ms;
   }
+  if (last_refusal_ms_ != 0 && now_ms - last_refusal_ms_ <= kObservationWindowMs)
+    note_timer(last_refusal_ms_, kObservationWindowMs + 1);
   neighbors_.for_each([&](Neighbor& neighbor) {
     if (!neighbor.active) return;
     // Decaying observation window (03 §3): halve the exchange counters per
@@ -176,11 +178,22 @@ void MeshNode::refresh_neighbor_load(const MonotonicMs now_ms) noexcept {
       routes_.clear_next_hop_busy(neighbor.node);
     }
     refresh_link_cost(neighbor, now_ms);
+    if (neighbor.exchange_window_ms != 0)
+      note_timer(neighbor.exchange_window_ms, kObservationWindowMs);
+    if (neighbor.sojourn_window_ms != 0)
+      note_timer(neighbor.sojourn_window_ms, kObservationWindowMs);
+    if (neighbor.last_sojourn_ms != 0 && now_ms - neighbor.last_sojourn_ms <= kObservationWindowMs)
+      note_timer(neighbor.last_sojourn_ms, kObservationWindowMs + 1);
+    if (neighbor.busy_active) note_timer(neighbor.last_busy_feedback_ms, kFeedbackTtlMs + 1);
+    if (neighbor.last_cost_relax_ms >
+        now_ms - std::min<MonotonicMs>(now_ms, kLinkCostRelaxWindowMs))
+      note_timer(neighbor.last_cost_relax_ms, kLinkCostRelaxWindowMs);
+
   });
   // Route-switch hysteresis (03 §7): pending improvements commit here once
   // their hold elapsed, and committed selections that lost validity repair
   // immediately — load never admits an infeasible route.
-  routes_.evaluate(now_ms);
+  routes_.evaluate(now_ms, &next_poll_ms_);
 }
 
 RouteMetric MeshNode::peer_link_cost(const NodeId peer) const noexcept {
@@ -201,7 +214,7 @@ Status MeshNode::note_peer_pressure(const NodeId peer, const std::uint8_t pressu
                                     const std::uint32_t feedback_sequence,
                                     const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   auto* neighbor = find_neighbor(peer);
   if (neighbor == nullptr || !neighbor->active) return Status::success();
   // Same ordering rule as BUSY (03 §5): a stale or replayed feedback
@@ -244,7 +257,7 @@ std::uint8_t MeshNode::peer_tx_window(const NodeId peer) const noexcept {
 
 Status MeshNode::set_peer_busy_capable(const NodeId peer, const bool capable) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   if (auto* neighbor = find_neighbor(peer)) {
     neighbor->busy_capable = capable;
     // A host/configured grant carries the same bounded validity as an

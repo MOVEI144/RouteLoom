@@ -649,6 +649,7 @@ add_test(NAME routeloom_sdkv1_dev_route_tests COMMAND routeloom_sdkv1_dev_route_
 # Multi-node mesh peer (D04, issue #168): one real Owner + runtime + USB
 # node per process, driven by the Rust mesh tests and the board boot checks.
 add_library(routeloom_owner_mesh_boot OBJECT owner_mesh_peer.cpp owner_mesh_c_app.c
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_power.cpp
     espnow_idf_stubs/idf_stubs.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device_c.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device_config.cpp
@@ -902,3 +903,8 @@ set_tests_properties(routeloom_routing_scale_100_node_tests routeloom_group_100_
 
 # K02 exceeds the management airtime envelope; tracked by #59.
 set_tests_properties(routeloom_periodic_load_tests PROPERTIES DISABLED TRUE)
+
+add_executable(routeloom_deadline_tests test_deadlines.cpp)
+target_link_libraries(routeloom_deadline_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_deadline_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_deadline_tests COMMAND routeloom_deadline_tests)

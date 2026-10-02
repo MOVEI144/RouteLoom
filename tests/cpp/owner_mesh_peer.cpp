@@ -207,6 +207,7 @@
 #include <vector>
 
 #include "bootloader_random.h"
+#include "esp_sleep.h"
 #include "esp_wifi.h"
 #include "nvs.h"
 #include "psa/crypto.h"
@@ -214,6 +215,7 @@
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/edhoc.hpp"
 #include "routeloom/espnow_autonomy.hpp"
+#include "routeloom/espnow_power.hpp"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/espnow_sdkv1_entropy.hpp"
@@ -230,6 +232,13 @@
 #include "idf_stubs.hpp"
 #include "owner_mesh_c_app.h"
 #include "../../examples/standalone_gateway/main/app.hpp"
+
+esp_err_t esp_sleep_enable_timer_wakeup(std::uint64_t) { return ESP_OK; }
+esp_err_t esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(std::uint64_t,
+                                                              esp_sleep_gpio_wake_up_mode_t) {
+  return ESP_OK;
+}
+void esp_deep_sleep_start() {}
 
 namespace {
 
@@ -549,6 +558,7 @@ struct DeviceTestAccess {
   static usb::UsbBridge* bridge(Device& device) noexcept { return device.bridge_; }
   static const GatewayDelivery* gateway(Device& device) noexcept { return device.gateway_; }
   static NodeObserver* app(Device& device) noexcept { return device.app_; }
+  static PowerEvents& power_events() noexcept { return Device::observer(); }
 };
 
 }  // namespace routeloom
@@ -1121,6 +1131,43 @@ class GatewayTxObserver final : public routeloom::GatewayDeliveryObserver {
 // Device events and operation results (the harness asserts one event per
 // change). The counters ride the fake flash image across restarts, since a
 // finished leave is reported right before the unassigned restart.
+// Only the non-returning platform sleep syscall is modeled. Security
+// parking, RTC persistence, driver quiescence and recovery use the adapter.
+class SleepPort final : public routeloom::PowerPort {
+ public:
+  explicit SleepPort(routeloom::espnow::EspNowRuntime& runtime) : adapter(runtime) {}
+  routeloom::espnow::EspNowPowerPort adapter;
+  bool asleep{false};
+  routeloom::Status prepare_sleep(routeloom::MonotonicMs now) noexcept override {
+    return adapter.prepare_sleep(now);
+  }
+  void abort_sleep(routeloom::MonotonicMs now) noexcept override { adapter.abort_sleep(now); }
+  bool matches_context(const routeloom::PowerImage& image,
+                       routeloom::NetworkId network) const noexcept override {
+    return adapter.matches_context(image, network);
+  }
+  routeloom::Status capture_cache(routeloom::PowerImage& image) noexcept override {
+    return adapter.capture_cache(image);
+  }
+  routeloom::Status quiesce_radio() noexcept override { return adapter.quiesce_radio(); }
+  routeloom::Status start_radio(const routeloom::PowerImage* image) noexcept override {
+    asleep = false;
+    return adapter.start_radio(image);
+  }
+  routeloom::Status configure_wake(const routeloom::WakePlan& plan) noexcept override {
+    return adapter.configure_wake(plan);
+  }
+  routeloom::Status enter_sleep() noexcept override {
+    if (esp_wifi_stop() != ESP_OK)
+      return routeloom::Status::error(routeloom::StatusCode::RadioFailure, "sleep radio stop");
+    asleep = true;
+    return routeloom::Status::success();
+  }
+  routeloom::Status start_discovery(const routeloom::PowerImage& image) noexcept override {
+    return adapter.start_discovery(image);
+  }
+};
+
 struct DeviceEvents final : public routeloom::DeviceObserver {
   std::uint32_t membership_events{0};
   std::uint16_t last_cause{0};
@@ -1534,7 +1581,9 @@ int main(int argc, char** argv) {
   Status status = device.open_storage(setup.gateway ? profile::Role::Gateway : profile::kRole,
                                       security);
   if (!status) boot_failed(status);
+  static routeloom::sdkv1::RtcSessionImage sleep_image{};
   DeviceConfig config{};
+  config.sleep_image = &sleep_image;
   config.log_tag = "mesh_peer";
   config.role = setup.gateway ? profile::Role::Gateway : profile::kRole;
   config.security = security;
@@ -1623,6 +1672,17 @@ int main(int argc, char** argv) {
     device.observe(&observer);
   }
 
+  SleepPort sleep_port(runtime);
+  std::array<std::uint8_t, routeloom::sdkv1::kRtcSessionRecordSize> rtc_bytes{};
+  routeloom::sdkv1::BufferRtcSessionPort rtc({rtc_bytes.data(), rtc_bytes.size()});
+  sleep_port.adapter.bind_owner(owner, &rtc);
+  routeloom::espnow::NvsBlobNamespace power_namespace;
+  if (!power_namespace.open(routeloom::espnow::kSecurityNvsPartition, "rlpwrmem"))
+    fatal("power namespace");
+  routeloom::sdkv1::BlobPowerStorage power_storage(power_namespace);
+  routeloom::PowerCoordinator power(routeloom::PowerConfig{}, runtime.node(), sleep_port,
+                                    power_storage, DeviceTestAccess::power_events());
+  bool power_bound = false;
   const std::uint32_t send_count_base = idf_stub::send_count();
   AppTx app_tx[kAppTxMax]{};
   GatewayTx gw_tx{};
@@ -1640,6 +1700,62 @@ int main(int argc, char** argv) {
     Bytes payload(length);
     if (!read_exact(payload.data(), length)) return 0;
     switch (payload[0]) {
+      case 'd': {
+        if (length != 1) fatal("bad d");
+        Bytes reply{'d'};
+        put_u64(reply, device.next_deadline(now));
+        write_frame(reply);
+        break;
+      }
+      case 's': {
+        if (length != 18) fatal("bad s");
+        const std::uint64_t at = ([&] {
+          std::uint64_t v = 0;
+          for (unsigned i = 0; i < 8; ++i) v |= std::uint64_t{payload[2 + i]} << (8 * i);
+          return v;
+        }());
+        const std::uint64_t duration = ([&] {
+          std::uint64_t v = 0;
+          for (unsigned i = 0; i < 8; ++i) v |= std::uint64_t{payload[10 + i]} << (8 * i);
+          return v;
+        }());
+        if (at < now) fatal("sleep clock regressed");
+        now = at;
+        idf_stub::set_now_us(static_cast<std::int64_t>(now) * 1000);
+        Status status = Status::success();
+        if (payload[1] == 0) {
+          if (!power_bound) {
+            status = device.bind_sleep(power, routeloom::ResetCause::ColdBoot, {}, now);
+            power_bound = status.ok();
+          }
+          if (status) {
+            routeloom::SleepRequest request{};
+            request.wake.wake_after_ms = duration;
+            status = device.prepare_sleep(request);
+          }
+        } else if (payload[1] == 1) {
+          status = device.enter_sleep(device.sleep_ticket());
+        } else if (payload[1] == 2) {
+          runtime.set_radio_deadline(UINT64_MAX);
+          status =
+              device.wake(routeloom::ResetCause::DeepSleepWake, {duration, duration, true}, now);
+        } else if (payload[1] == 3) {
+          status = device.abort_sleep();
+        } else if (payload[1] == 5) {
+          runtime.set_radio_deadline(now > UINT64_MAX - duration ? UINT64_MAX : now + duration);
+        } else if (payload[1] != 4)
+          fatal("sleep operation");
+        Bytes reply{'s', static_cast<std::uint8_t>(status.code),
+                    static_cast<std::uint8_t>(power.state()),
+                    static_cast<std::uint8_t>(device.sleep_ticket().issued),
+                    static_cast<std::uint8_t>(owner.coordinator().snapshot().sleeping)};
+        put_u64(reply, power.stats().sleeps);
+        put_u64(reply, power.stats().wakes);
+        reply.push_back(static_cast<std::uint8_t>(rtc_bytes[0] != 0));
+        put_u32(reply, idf_stub::send_count());
+        write_frame(reply);
+        break;
+      }
       case 'T': {
         if (length != 9) fatal("bad T");
         std::uint64_t next = 0;

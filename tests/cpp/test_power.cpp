@@ -412,6 +412,32 @@ struct PowerWorld {
   }
 };
 
+void test_fixed_sleep_record_compatibility() {
+  MemoryPowerStorage storage;
+  PowerWorld w(storage);
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot, {}, 0));
+  for (unsigned i = 0; i < kPowerPeerCacheCapacity; ++i)
+    w.platform_peer(0x1020304050607000ULL + i, static_cast<std::uint8_t>(i + 1),
+                    static_cast<RouteMetric>(i + 2));
+  for (unsigned i = 0; i < kPowerPendingCapacity; ++i) {
+    std::array<std::uint8_t, kMaxApplicationPayload> payload{};
+    for (unsigned j = 0; j < payload.size(); ++j) payload[j] = static_cast<std::uint8_t>(i + j);
+    SendOptions options{};
+    options.lifetime_ms = 1000;
+    MessageId id{};
+    CHECK_OK(
+        w.node.send(0x1020304050608000ULL + i, {payload.data(), payload.size()}, options, 0, id));
+  }
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Save;
+  CHECK_OK(w.coordinator.sleep_prepare(request, 0));
+  CHECK(w.pump_until(PowerState::ReadyToSleep));
+  std::array<std::uint8_t, kPowerImageRecordSize> record{};
+  CHECK_OK(
+      storage.read(static_cast<std::uint8_t>(storage.last_slot), {record.data(), record.size()}));
+  CHECK(crc32_iso_hdlc({record.data(), record.size() - 4}) == 0xec6a432bU);
+}
+
 void test_cold_boot_and_errors() {
   MemoryPowerStorage storage;
   PowerWorld w(storage);
@@ -5567,6 +5593,7 @@ int main() {
   test_send_lifetime_ceiling();
   test_platform_context_refuses_saved_image();
   test_power_stats_accumulate();
+  test_fixed_sleep_record_compatibility();
   test_cold_boot_and_errors();
   test_full_cycle_transition_order();
   test_ticket_invalidated_by_app_event();

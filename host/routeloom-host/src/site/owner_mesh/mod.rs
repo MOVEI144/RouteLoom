@@ -78,6 +78,7 @@ mod load;
 mod membership;
 mod mesh;
 mod peer;
+mod power;
 mod product;
 mod recovery;
 mod report;

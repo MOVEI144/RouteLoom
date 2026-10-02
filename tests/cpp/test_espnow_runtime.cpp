@@ -705,6 +705,34 @@ void test_idle_deadline_poll_equivalence() {
   std::printf("idle Owner polls: eager=%u deadline=%u\n", polls[0], polls[1]);
 }
 
+void test_active_deadline_noop() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize());
+  CHECK(runtime.start());
+  idf_stub::set_now_us(10000);
+  SendOptions options{};
+  options.lifetime_ms = 501;
+  MessageId id{};
+  CHECK(runtime.send_application(99, ByteView{}, options, id));
+  runtime.poll_once();
+  const auto due = runtime.node().next_deadline(10);
+  CHECK(due > 12 && due <= 511);
+  const auto scanned = runtime.node().work_stats().expiry_slots_scanned;
+  CHECK(runtime.node().poll(11));
+  CHECK(runtime.node().work_stats().expiry_slots_scanned == scanned);
+  CHECK(runtime.node().next_deadline(11) == due);
+  // A new application event invalidates the cached timer, even at the
+  // same timestamp. A clock regression also forces a fresh pass.
+  CHECK(runtime.send_application(98, ByteView{}, options, id));
+  CHECK(runtime.node().next_deadline(10) == 10);
+  CHECK(runtime.node().poll(10));
+  CHECK(runtime.node().next_deadline(9) == 9);
+  runtime.stop();
+}
+
 void test_owner_trace_includes_node_work() {
   idf_stub::reset();
   TestSecurity security;
@@ -1473,6 +1501,7 @@ void test_hil_rx_diagnostics_are_owner_serialized() {
 int main() {
   test_notification_keeps_external_and_racing_wakes();
   test_idle_deadline_poll_equivalence();
+  test_active_deadline_noop();
   test_hil_rx_diagnostics_are_owner_serialized();
   test_completions_attribute_in_send_order_after_take_tx();
   test_cutover_fence_recovers_when_driver_omits_completion();

@@ -1,5 +1,6 @@
 #include "routeloom/session_bank.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 #include "routeloom/discovery_scope.hpp"  // hmac_sha256
@@ -54,6 +55,15 @@ bool unicast_scope(const SecurityScope scope) noexcept {
 }
 
 }  // namespace
+
+template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
+std::uint32_t SessionBank<kLinkCapacity, kEndCapacity>::expires_after(
+    const std::uint32_t duration) noexcept {
+  const MonotonicMs deadline =
+      duration > UINT64_MAX - last_tick_ ? UINT64_MAX : last_tick_ + duration;
+  next_expiry_ = std::min(next_expiry_, deadline);
+  return static_cast<std::uint32_t>(deadline);
+}
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
 Status SessionBank<kLinkCapacity, kEndCapacity>::configure(const LocalView& local,

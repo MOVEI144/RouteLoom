@@ -733,7 +733,10 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   owner_power_port.bind_owner(*owner_, &owner_rtc_port);
   const std::int64_t owner_prepare_at_us =
       esp_timer_get_time() + static_cast<std::int64_t>(CONFIG_ROUTELOOM_SLEEP_AFTER_MS) * 1000LL;
-  const std::int64_t owner_stop_at_us = owner_prepare_at_us + 30000000LL;
+  const std::int64_t owner_stop_at_us =
+      esp_timer_get_time() +
+      static_cast<std::int64_t>(CONFIG_ROUTELOOM_SLEEP_RADIO_BUDGET_MS) * 1000LL;
+  runtime.set_radio_deadline(static_cast<MonotonicMs>(owner_stop_at_us / 1000));
   sdkv1::SecurityCoordinator& coordinator = owner_->coordinator();
 #endif
 #if CONFIG_ROUTELOOM_ROLE_GATEWAY
@@ -774,6 +777,10 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
 
 #endif
     const MonotonicMs now_ms = monotonic_now_ms();
+#if CONFIG_ROUTELOOM_DEEP_SLEEP
+    if (now_ms >= static_cast<MonotonicMs>(owner_stop_at_us / 1000))
+      fail("sleep radio-on budget exhausted");
+#endif
     step(now_ms);
 #if CONFIG_ROUTELOOM_TRACE && CONFIG_ROUTELOOM_ROLE_GATEWAY
     if (now_ms - last_usb_trace_ms >= 2000) {
@@ -824,7 +831,6 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
     }
     // The demo has a finite radio-on window even when no parent/adoption
     // completes. A failed drain or commit takes the bounded fault backoff.
-    if (esp_timer_get_time() >= owner_stop_at_us) fail("sleep radio-on budget exhausted");
     if (power_bound && esp_timer_get_time() >= owner_prepare_at_us) {
       if (!sleep_requested) {
         SleepRequest request{};
@@ -845,7 +851,17 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
     }
 #endif
     const MonotonicMs wait_now_ms = monotonic_now_ms();
-    runtime.wait_for_event(next_deadline(wait_now_ms) - wait_now_ms);
+    MonotonicMs wait_ms = next_deadline(wait_now_ms) - wait_now_ms;
+#if CONFIG_ROUTELOOM_DEEP_SLEEP
+    // A role ceiling must not delay the per-wake radio budget or sleep
+    // preparation. Both use the same monotonic clock as the Owner.
+    const MonotonicMs stop_ms = static_cast<MonotonicMs>(owner_stop_at_us / 1000);
+    const MonotonicMs prepare_ms = static_cast<MonotonicMs>(owner_prepare_at_us / 1000);
+    wait_ms = std::min(wait_ms, stop_ms > wait_now_ms ? stop_ms - wait_now_ms : 0);
+    if (!sleep_requested && power_bound)
+      wait_ms = std::min(wait_ms, prepare_ms > wait_now_ms ? prepare_ms - wait_now_ms : 0);
+#endif
+    runtime.wait_for_event(wait_ms);
   }
 }
 

@@ -511,7 +511,7 @@ Status MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
                                   const RadioRxMetadata& metadata,
                                   const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   // V1 callers carry no observation provenance; every in-tree V1 path is a
   // test/sim shim, so evidence is marked InjectedTest rather than invented.
   RadioRxMetadataV2 v2{};
@@ -526,7 +526,7 @@ Status MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
                                   const RadioRxMetadataV2& metadata,
                                   const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   receive_impl(peer, encoded, &metadata, now_ms);
   return Status::success();
 }

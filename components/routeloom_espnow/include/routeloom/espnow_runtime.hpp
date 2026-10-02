@@ -190,6 +190,11 @@ class EspNowRuntime final : public RadioPort,
   }
   // Marks the runtime as started when node bring-up was driven by a
   // PowerCoordinator resume path instead of start().
+#if !defined(ESP_PLATFORM) || CONFIG_ROUTELOOM_DEEP_SLEEP
+  // Owner sets an absolute per-wake budget before starting discovery.
+  // A new wake may arm a fresh budget; individual attempts cannot extend it.
+  void set_radio_deadline(MonotonicMs until) noexcept { radio_until_ms_ = until; }
+#endif
   void mark_started() noexcept { started_ = true; }
 
   Status send_application(NodeId destination, ByteView payload,
@@ -704,6 +709,9 @@ class EspNowRuntime final : public RadioPort,
   bool broadcast_peer_{false};
   bool wifi_initialized_{false};
   bool espnow_initialized_{false};
+#if !defined(ESP_PLATFORM) || CONFIG_ROUTELOOM_DEEP_SLEEP
+  MonotonicMs radio_until_ms_{UINT64_MAX};
+#endif
   std::atomic<bool> started_{false};
 };
 

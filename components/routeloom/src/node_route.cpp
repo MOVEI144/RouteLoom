@@ -458,10 +458,14 @@ void MeshNode::expire_sequence_requests(const MonotonicMs now_ms) noexcept {
   if (seqno_seen_.size() == 0 && seqno_state_.size() == 0) return;
   saturating_add(work_stats_.expiry_slots_scanned,
                  seqno_seen_.capacity() + seqno_state_.capacity());
-  seqno_seen_.erase_if(
-      [&](const SeqnoSeen& value) { return value.expires_at_ms <= now_ms; });
-  seqno_state_.erase_if(
-      [&](const SeqnoState& value) { return value.expires_at_ms <= now_ms; });
+  seqno_seen_.erase_if([&](const SeqnoSeen& value) {
+    if (value.expires_at_ms > now_ms) note_deadline(value.expires_at_ms);
+    return value.expires_at_ms <= now_ms;
+  });
+  seqno_state_.erase_if([&](const SeqnoState& value) {
+    if (value.expires_at_ms > now_ms) note_deadline(value.expires_at_ms);
+    return value.expires_at_ms <= now_ms;
+  });
 }
 
 void MeshNode::schedule_sequence_requests(const MonotonicMs now_ms) noexcept {
@@ -473,6 +477,7 @@ void MeshNode::schedule_sequence_requests(const MonotonicMs now_ms) noexcept {
   // fresh advertisement. Bounded so a dead origin cannot pile up requests.
   std::size_t inflight = 0;
   seqno_state_.for_each([&](const SeqnoState& value) {
+    if (value.next_request_ms > now_ms) note_deadline(value.next_request_ms);
     if (value.last_sent_ms != 0 &&
         value.last_sent_ms + kSeqnoRequestLifetimeMs > now_ms) {
       ++inflight;
@@ -615,8 +620,8 @@ void MeshNode::run_triggered_advertisement(const MonotonicMs now_ms) noexcept {
 void MeshNode::scan_selection_changes(const MonotonicMs now_ms) noexcept {
   if (!gateway_scoped()) {
     routes_.for_each_selected_change(
-        [&](const RouteSelection&) { trigger_route_advertisement(now_ms); },
-        now_ms);
+        [&](const RouteSelection&) { trigger_route_advertisement(now_ms); }, now_ms,
+        &next_poll_ms_);
     return;
   }
   routes_.for_each_selected_change(

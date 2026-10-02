@@ -6,7 +6,7 @@ Status MeshNode::send(const NodeId destination, const ByteView payload,
                       const SendOptions& options, const MonotonicMs now_ms,
                       MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   // Any application TX intent is activity: it must invalidate an outstanding
@@ -64,7 +64,7 @@ Status MeshNode::send_applied(const NodeId destination, const ByteView payload,
                               const ExecutionLease& lease, const SendOptions& options,
                               const MonotonicMs now_ms, MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   ++work_generation_;
@@ -134,7 +134,7 @@ Status MeshNode::resume_delivery(const MessageId& id, const NodeId destination,
                                  const ByteView payload, const SendOptions& options,
                                  const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   ++work_generation_;
   if (paused(pause::kAppAdmission)) {
@@ -282,7 +282,7 @@ Status MeshNode::enqueue_delivery(const MessageId& id, const NodeId destination,
 
 Status MeshNode::cancel(const MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   auto* record = find_delivery(id);
   if (record == nullptr) return Status::error(StatusCode::NotFound, "delivery not found");
   switch (record->state) {
@@ -303,7 +303,7 @@ Status MeshNode::cancel(const MessageId& id) noexcept {
 
 Status MeshNode::cancel_all(const char* untransmitted_reason) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   deliveries_.for_each([&](Delivery& record) {
     switch (record.state) {
       case DeliveryState::Accepted:
@@ -677,7 +677,7 @@ Status MeshNode::send_service(const NodeId destination, const ByteView payload,
                               const std::uint32_t lifetime_ms,
                               const MonotonicMs now_ms, MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   return send_service_impl(destination, payload, lifetime_ms, Priority::Normal,
                            now_ms, id);
 }
@@ -686,7 +686,7 @@ Status MeshNode::send_service(const NodeId destination, const ByteView payload,
                               const std::uint32_t lifetime_ms, const Priority priority,
                               const MonotonicMs now_ms, MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   return send_service_impl(destination, payload, lifetime_ms, priority, now_ms, id);
 }
 
@@ -717,7 +717,7 @@ Status MeshNode::resend_service(const MessageId& id, const NodeId destination,
                                 const std::uint32_t lifetime_ms,
                                 const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   ++work_generation_;
@@ -740,7 +740,7 @@ Status MeshNode::send_typed(const FrameType type, const NodeId destination,
                             const ByteView payload, const std::uint32_t lifetime_ms,
                             const MonotonicMs now_ms, MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   ++work_generation_;
@@ -769,7 +769,7 @@ Status MeshNode::send_bootstrap(const NodeId destination, const FrameType type,
                                 const ByteView payload, const std::uint32_t lifetime_ms,
                                 const MonotonicMs now_ms, MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   ++work_generation_;
