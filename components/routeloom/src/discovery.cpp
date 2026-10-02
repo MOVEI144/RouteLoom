@@ -1955,7 +1955,10 @@ Status NeighborDiscovery::complete_handshake(const std::uint32_t token,
   // Decide once the new binding's first probe has left and the late OFFERs
   // of the last DISCOVER had their chance.
   if (sweep_armed_) {
-    sweep_retry_ = false;
+    // A second OFFER may have been lost while our first neighbour
+    // authenticated. Continue that requester's bounded unbound sweep;
+    // an unrelated responder completion must not start another round.
+    sweep_retry_ = peer_node == sweep_first_peer_;
     sweep_due_ms_ = std::max(add_sat(now_ms, config_.backoff_min_ms), sweep_window_end_ms_);
   }
   return Status::success();

@@ -2849,16 +2849,18 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
   }
   for (auto& record : records_) {
     if (!record.used) continue;
-    if (record.state == RecordState::EdhocM4Sent && record.scope == SecurityScope::Link &&
-        (!edhoc_flight_.active || edhoc_flight_.owner_token != record.token)) {
+    if (record.state == RecordState::EdhocM4Sent && record.scope == SecurityScope::Link) {
       std::uint32_t rx_context = 0;
       std::memcpy(&rx_context, record.last_tx.data() + kM4RxContextOffset,
                   sizeof(rx_context));
       // Proof in the exact installed context ends the retry duty; another
       // exchange cannot confirm it merely by taking the crypto workspace.
       if (sink_.has_authenticated_rx(record.scope, record.peer, rx_context)) {
-        drop_record(record);
-        return Status::success();
+        if (!edhoc_flight_.active || edhoc_flight_.owner_token != record.token) {
+          drop_record(record);
+          return Status::success();
+        }
+        record.retransmit_at = record.deadline;
       }
     }
     if (now < record.deadline) continue;
@@ -2880,8 +2882,11 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
     }
   }
   for (auto& record : records_) {
+    // The chunk receiver acknowledges a repeated completed M3 without
+    // redelivering it. Bounded quiet link M4 retries must reach the peer
+    // even when that chunk receipt suppresses the duplicate-triggered reply.
     if (!record.used || now < record.retransmit_at ||
-        record.state == RecordState::EdhocM4Sent) continue;  // quiet: duplicate replies only
+        (record.state == RecordState::EdhocM4Sent && record.scope != SecurityScope::Link)) continue;
     const bool small_tx = record.last_tx_size != 0;
     const bool big_tx = (record.state == RecordState::EdhocWaitM4 ||
                          record.state == RecordState::EdhocM4Pending) && edhoc_flight_.active &&
@@ -2889,9 +2894,10 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
                         big_tx_owner_ == record.token;
     if (!small_tx && !big_tx) continue;
     if (record.retransmits >= kMaxRetransmits) {
-      if (record.state == RecordState::ResumeWaitR2) {
-        // R1 exhausted: stop hammering, let the rlres1 deadline drive
-        // the EDHOC fallback.
+      if (record.state == RecordState::ResumeWaitR2 ||
+          record.state == RecordState::EdhocM4Sent) {
+        // Stop quiet M4 retries without shortening its duplicate-reply
+        // retention; unanswered R1 still falls back at the rlres1 deadline.
         record.retransmit_at = record.deadline;
         continue;
       }
@@ -3038,8 +3044,8 @@ bool HandshakeEngine::has_quiet_link_retry(const std::uint32_t token) const noex
   if (token == 0) return false;
   for (const auto& record : records_) {
     if (record.used && record.token == token && record.scope == SecurityScope::Link &&
-        record.role == HandshakeRole::Initiator &&
-        record.state == RecordState::ResumeR3Confirm) {
+        (record.state == RecordState::ResumeR3Confirm ||
+         record.state == RecordState::EdhocM4Sent)) {
       return true;
     }
   }

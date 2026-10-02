@@ -12,7 +12,7 @@ const STEP_MS: u64 = 25;
 const CONNECTIVITY_REACHABLE: u8 = 1;
 const CONNECTIVITY_ISOLATED: u8 = 3;
 
-fn run_for(world: &mut MeshWorld, ms: u64) {
+pub(super) fn run_for(world: &mut MeshWorld, ms: u64) {
     for _ in 0..ms / STEP_MS {
         world.step(STEP_MS);
     }
@@ -249,7 +249,7 @@ fn mesh_j08_k1b_pull_answers_dropped() {
 }
 
 /// Every peer a Member, Active, channel-ready and confirmed.
-fn all_ready(snaps: &[MeshSnap]) -> bool {
+pub(super) fn all_ready(snaps: &[MeshSnap]) -> bool {
     snaps.iter().all(|s| {
         s.mode == MODE_MEMBER && s.phase == PHASE_ACTIVE && s.authority_ready && s.join_confirmed
     })

@@ -741,6 +741,9 @@ fn mesh_k1_gk_double_miss() {
         "pre-rotation A->B delivered: {:?}",
         world.snaps[1].app_tx
     );
+    // Keep A's actual old-GK DISCOVER while it is dark. Its later
+    // generation rejection must not depend on a random retry phase.
+    world.switch.c7_capture = true;
     // A misses two rotations outright. Both rotate through the service
     // with the virtual clock: the API socket would stamp the process
     // monotonic clock while the harness ticks the authority on
@@ -828,19 +831,20 @@ fn mesh_k1_gk_double_miss() {
         "A still holds g0 past the overlap"
     );
 
-    // Stale-key rejection in the first breath after the heal: A's
-    // links are down so it re-discovers immediately, still keyed g0,
-    // while its own rescue (channel re-handshake, then Pull/ZT) needs
-    // far longer. Arrival plus the generation verdict plus no
-    // admission is the complete evidence: an unknown generation never
-    // reaches tag verification — a replay verdict would need an
-    // accepted generation first — so growth here is key rejection,
-    // not replay. The trailing gk check voids the window loudly if A
-    // ever converges too fast to judge.
+    // Release the actual old-GK carrier after the heal. Arrival plus the
+    // generation verdict plus no admission proves key rejection: an
+    // unknown generation cannot reach tag or replay verification. A's
+    // ordinary retry/Pull recovery still runs without a reset below.
     world.switch.heal(1);
     let b_raw = world.snaps[2].scope_raw_rx;
     let b_unkgen = world.snaps[2].scope_unknown_generation;
     let b_scope_ok = world.snaps[2].scope_accepted;
+    let stale_discover = world
+        .switch
+        .c7_old_discover
+        .as_ref()
+        .expect("A emitted an old-GK DISCOVER");
+    world.peers[2].send_rx(&MAC_A, &BROADCAST_MAC, stale_discover);
     for _ in 0..150 {
         world.step(25);
     }
