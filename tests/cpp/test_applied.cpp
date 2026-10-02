@@ -920,6 +920,38 @@ void test_result_timeout_indeterminate() {
   CHECK(w.obs(1)->applied.empty());
 }
 
+void test_retry_wait_expiry_keeps_execution_uncertainty() {
+  World w;
+  MeshNode* a = w.add(1);
+  w.add(2);
+  w.start_all();
+  w.link(1, 2);
+  CountingSink* sink = w.install_sink(2);
+  // The request executes, but neither hop acceptance nor its verdict returns.
+  w.net.drop_frame = [](const SimNetwork::Pending& p) {
+    return p.from == 2 && p.to == 1 && p.frame.size() > 4 &&
+           (p.frame[4] == static_cast<std::uint8_t>(FrameType::HopAccept) ||
+            p.frame[4] == static_cast<std::uint8_t>(FrameType::EndReceipt) ||
+            p.frame[4] == static_cast<std::uint8_t>(FrameType::AppResult));
+  };
+  const MessageId sent = applied_exchange(w, 30000);
+  MessageId unsent{};
+  CHECK_OK(a->send_applied(3, user_payload(), w.at(2)->applied_lease(),
+                           applied_options(30000, 1), w.now, unsent));
+  CHECK(w.run_until([&] {
+    return w.radio(1)->sent_type(FrameType::Data) >= 4 &&
+           a->delivery(sent).state == DeliveryState::WaitingForRoute;
+  }, 4000));
+  CHECK(sink->calls == 1);
+  // A delayed Owner drive can pass the deadline while the final round waits.
+  w.now = 30001;
+  w.step();
+  CHECK(a->delivery(sent).state == DeliveryState::Indeterminate);
+  CHECK(std::strcmp(a->delivery(sent).reason, "APP_RESULT_TIMEOUT") == 0);
+  CHECK(a->delivery(unsent).state == DeliveryState::Expired);
+  CHECK(sink->calls == 1);
+}
+
 void test_late_result_after_timeout() {
   World w;
   MeshNode* a = w.add(1);
@@ -1813,6 +1845,7 @@ int main() {
   test_happy_path();
   test_end_receipt_alone_never_promotes();
   test_result_timeout_indeterminate();
+  test_retry_wait_expiry_keeps_execution_uncertainty();
   test_late_result_after_timeout();
   test_app_rejected_verdict();
   test_no_sink_commits_no_endpoint();

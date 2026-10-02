@@ -1,4 +1,5 @@
 - Preserve a final bounded Reliable retry for receiver admission recovery and return Busy before accepting into a full live delivery table.
+- Preserve APPLIED execution uncertainty when a transmitted request expires while waiting for a retry or a repaired route.
 - Coalesce scoped metric and sequence refreshes into periodic route advertisements while retaining immediate topology repair.
 - Accept epoch-qualified API1 operation networks, use the admission context's monotonic clock, and retain a gateway refusal when a skipped dispatch position is reclaimed.
 - Enable congestion and periodic traffic coverage through real Owners and the product-timer mesh model, including bounded admission, cursor restart and group traffic.
