@@ -2823,6 +2823,70 @@ void test_direct_allow_commits() {
   current.clear();
 }
 
+void test_worker_join_deadline() {
+  current = "worker join deadline";
+  CryptoWorker worker;
+  DirectRig rig;
+  auto& joiner = rig.device().joiner;
+  CHECK(joiner.bind_crypto_worker(&worker).ok());
+  CHECK(joiner.start_direct(boot_input(), rig.port(), 0).ok());
+  for (unsigned i = 0; i < 20 && joiner.snapshot().state != JoinState::WaitM2; ++i) {
+    (void)worker.execute();
+    CHECK(rig.round());
+  }
+  CHECK(joiner.snapshot().state == JoinState::WaitM2);
+  const MonotonicMs deadline = rig.now() - 5 + join_m2_deadline_ms(0);
+  CHECK(rig.round());  // lend the retained M2, without executing it
+  CHECK(joiner.crypto_pending());
+  CHECK(joiner.next_deadline() == deadline);
+  CHECK(joiner.poll(deadline).ok());
+  CHECK(joiner.snapshot().counters.timeouts == 1);
+  CHECK(joiner.next_deadline() > deadline);
+  CHECK(worker.execute());
+  CHECK(joiner.stop(deadline + 1).ok());
+  CHECK(!rig.device().site_store.has_site());
+  current.clear();
+}
+
+void test_worker_join_retains_rrs() {
+  current = "worker join retains RRS";
+  CryptoWorker worker;
+  SignatureProgress signature;
+  DirectRig rig;
+  auto& dev = rig.device();
+  CHECK(dev.joiner.bind_crypto_worker(&worker, &signature).ok());
+  CHECK(dev.joiner.start_direct(boot_input(), rig.port(), 0).ok());
+  for (unsigned i = 0; i < 30 && dev.joiner.snapshot().state != JoinState::SendM3; ++i) {
+    (void)worker.execute();
+    CHECK(rig.round());
+  }
+  CHECK(dev.joiner.snapshot().state == JoinState::SendM3);
+  auto set = revocation_set(14, 0, 2, kNetworkA);
+  set.site_id = kSiteA;
+  const auto first = revocation_object(set);
+  ++set.rs_epoch;
+  const auto later = revocation_object(set);
+  CHECK(dev.joiner.on_direct_message(JoinAuthPhase::RrsDelivery, 0, first.view(), rig.now()).ok());
+  unsigned certs = 0;
+  for (unsigned i = 0; i < 40 && certs < 2; ++i) {
+    if (signature.pending()) ++certs;
+    (void)worker.execute();
+    CHECK(rig.round());
+  }
+  CHECK(certs == 2 && signature.pending());  // both certificates checked, RRS loan started
+  CHECK(dev.joiner.on_direct_message(JoinAuthPhase::RrsDelivery, 0, later.view(), rig.now()).ok());
+  for (unsigned i = 0; i < 30 && !rig.has_pending(); ++i) {
+    (void)worker.execute();
+    (void)rig.round();
+  }
+  CHECK(rig.has_pending() && rig.pending().kind == JoinActionKind::MemberReady);
+  CHECK(dev.revocation_store.has_set() && dev.revocation_store.rs_epoch() == 14);
+  (void)dev.joiner.stop(rig.now());
+  (void)worker.execute();
+  CHECK(dev.joiner.stop(rig.now()).ok());
+  current.clear();
+}
+
 void test_direct_refresh_uses_usb_leg() {
   current = "direct-refresh-uses-usb";
   DirectRig rig;
@@ -3065,6 +3129,8 @@ int main() {
   test_refresh_proxy_is_attempted_proxy();
   test_joiner_size_budget();
   test_direct_allow_commits();
+  test_worker_join_deadline();
+  test_worker_join_retains_rrs();
   test_direct_refresh_uses_usb_leg();
   test_direct_refresh_rechecks_after_transient_read_error();
   test_direct_initial_join_retries_after_transient_read_error();

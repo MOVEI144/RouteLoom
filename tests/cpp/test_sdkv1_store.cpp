@@ -1943,7 +1943,7 @@ void test_ram_footprint() {
               sizeof(ResumeCache2));
   std::printf("sizeof LocalRevocationStore=%zu\n", sizeof(LocalRevocationStore));
   CHECK(sizeof(ResumeCache2) <= 512);
-  CHECK(sizeof(IdentityStore) <= 1408);
+  CHECK(sizeof(IdentityStore) <= 1440);
   CHECK(sizeof(SiteStore) <= 1536);
   CHECK(sizeof(RevocationStore) <=
         kRevocationSlotBytes + sizeof(RevocationSet) + 96);

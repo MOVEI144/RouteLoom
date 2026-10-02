@@ -13,8 +13,10 @@
 // the Owner drains take_result() before every call. No heap, no exceptions.
 
 #include <array>
+
 #include <cstddef>
 #include <cstdint>
+#include "routeloom/crypto_progress.hpp"
 
 #include "routeloom/discovery.hpp"  // AuthenticatedPeerProof (link elevation)
 #include "routeloom/edhoc.hpp"
@@ -132,10 +134,19 @@ struct LocalCredential {
   std::array<std::uint8_t, 32> privkey{};  // scalar only; handles refuse
 };
 
+struct PeerVerificationContext {
+  P256PublicKey sak{};
+  std::uint64_t site_id{0};
+  NetworkId network{0};
+  const Es256Verifier* verifier{nullptr};
+};
+
 class SessionCredentialVerifier {
  public:
   virtual ~SessionCredentialVerifier() = default;
   virtual bool local_credential(LocalCredential& out) noexcept = 0;
+  // Snapshot on the Owner before lending the flight; the worker never reads stores.
+  virtual bool worker_context(PeerVerificationContext&) const noexcept { return false; }
   // Verify `cert` (a staged MemberCert by value) for `expected_node`:
   // chain, issuer/site/network/role/assignment checks. Reports the
   // claims it verified; the engine cross-checks them against its own
@@ -156,6 +167,7 @@ class StoreCredentialVerifier final : public SessionCredentialVerifier {
       : identity_(identity), site_(site), verifier_(verifier) {}
 
   bool local_credential(LocalCredential& out) noexcept override;
+  bool worker_context(PeerVerificationContext& out) const noexcept override;
   bool verify_peer(ByteView cert, NodeId expected_node,
                    PeerCertClaims& out) noexcept override;
 
@@ -306,6 +318,13 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   // Wipes the armed dev PSK (exchange secrets die with their records and
   // flights; the policy is configuration and outlives them otherwise).
   ~HandshakeEngine() noexcept;
+  // The executor and its credential snapshot backend outlive every loan.
+  // Cancel and poll until crypto_pending() is false before destruction.
+  Status bind_crypto_worker(CryptoWorker* worker) noexcept {
+    if (!quiescent()) return Status::error(StatusCode::Busy, "handshake exchange active");
+    return crypto_.bind(worker);
+  }
+  bool crypto_pending() const noexcept { return crypto_.pending(); }
 
   HandshakeEngine(const HandshakeEngine&) = delete;
   HandshakeEngine& operator=(const HandshakeEngine&) = delete;
@@ -528,6 +547,23 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   Status begin_dev_resume(CarrierRecord& record, const keys::Secret& rms,
                           MonotonicMs now) noexcept;
   Status begin_edhoc(CarrierRecord& record, MonotonicMs now) noexcept;
+  Status initiator_compose_m1(CarrierRecord& record, MonotonicMs now) noexcept;
+  Status responder_continue_m1(CarrierRecord& record, ByteView message, MonotonicMs now) noexcept;
+  enum class CryptoOp : std::uint8_t {
+    Process1,
+    Process2,
+    Process3,
+    Process4,
+    Compose1,
+    Compose2,
+    Compose3,
+    Compose4
+  };
+  static Status run_crypto(void* context) noexcept;
+  Status crypto_call(CryptoOp op, ByteView input, MutableByteView output,
+                     std::size_t& length) noexcept;
+  Status poll_crypto(MonotonicMs now) noexcept;
+  void clear_crypto_stage() noexcept;
   // Responder m1 intake (fresh or parked): starts the flight and
   // answers m2, or parks the bytes in the shared stash when the flight
   // is busy, the ECC budget is unready, or entropy is transiently out.
@@ -622,6 +658,23 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   bool ecc_primed_{false};
   std::uint32_t next_token_{1};
 
+  CryptoProgress crypto_{};
+  CryptoOp crypto_op_{CryptoOp::Compose1};
+  std::uint8_t crypto_step_{0};
+  std::uint32_t crypto_token_{0};
+  std::array<std::uint8_t, 960> crypto_message_{};
+  std::size_t crypto_input_size_{0};
+  std::size_t crypto_output_size_{0};
+  ScopeDigest crypto_input_hash_{};
+  Status crypto_processed_{};
+  Status crypto_composed_{};
+  bool crypto_stage_active_{false};
+  bool crypto_replaying_{false};
+  bool crypto_process_done_{false};
+  bool crypto_compose_done_{false};
+  HandshakeLocal crypto_local_{};
+  NodeId crypto_peer_{kInvalidNodeId};
+  PeerVerificationContext crypto_peer_context_{};
   edhoc::Session edhoc_;
   MemberCredentials credentials_;
   rlres1::Engine rlres1_;

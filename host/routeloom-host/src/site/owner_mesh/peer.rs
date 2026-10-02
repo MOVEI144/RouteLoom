@@ -462,6 +462,10 @@ pub(super) struct MeshSnap {
     pub(super) rx_queue_max: u32,
     pub(super) expiry_slots_scanned: u64,
     pub(super) hop_accept_expired: u64,
+    pub(super) crypto_submitted: u32,
+    pub(super) crypto_completed: u32,
+    pub(super) crypto_owner_ms: u32,
+    pub(super) crypto_pending: u8,
     /// Extension frames this terminal refused as UNSUPPORTED (P04).
     pub(super) ext_unsupported: u32,
     pub(super) group_delivered: u32,
@@ -700,6 +704,13 @@ pub(super) fn parse_mesh_snap(payload: &[u8]) -> MeshSnap {
     snap.c_check_failures = get_u32(payload, &mut pos);
     snap.c_posted_runs = get_u32(payload, &mut pos);
     snap.c_messages = get_u32(payload, &mut pos);
+    if payload.len() > pos {
+        snap.crypto_submitted = get_u32(payload, &mut pos);
+        snap.crypto_completed = get_u32(payload, &mut pos);
+        snap.crypto_owner_ms = get_u32(payload, &mut pos);
+        snap.crypto_pending = payload[pos];
+        pos += 1;
+    }
     assert_eq!(pos, payload.len(), "G fully consumed");
     snap
 }

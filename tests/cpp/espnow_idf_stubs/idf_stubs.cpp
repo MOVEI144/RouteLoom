@@ -18,6 +18,7 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_now.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -27,6 +28,8 @@
 #include "nvs_flash.h"
 
 namespace {
+std::uint32_t g_random = 0;
+unsigned g_random_calls = 0;
 uint32_t notification_count = 0;
 void (*notification_hook)(void*) = nullptr;
 void* notification_context = nullptr;
@@ -92,6 +95,8 @@ struct FakeQueue {
 namespace idf_stub {
 
 void reset() noexcept {
+  g_random = 0;
+  g_random_calls = 0;
   static const std::uint8_t kDefaultMac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
   g_gpio_calls = 0;
   g_gpio_fail_call = 0;
@@ -162,6 +167,9 @@ void record_log(const char* tag, const char* format, ...) noexcept {
 bool log_contains(const char* text) noexcept {
   return text != nullptr && std::strstr(g_logs, text) != nullptr;
 }
+
+void set_random(const std::uint32_t value) noexcept { g_random = value; }
+unsigned random_calls() noexcept { return g_random_calls; }
 
 void set_now_us(const std::int64_t now_us) noexcept { g_now_us = now_us; }
 
@@ -244,6 +252,10 @@ unsigned tx_drops() noexcept { return tx_overruns(); }
 int64_t esp_timer_get_time(void) { return g_now_us; }
 
 std::uint32_t esp_log_timestamp(void) { return static_cast<std::uint32_t>(g_now_us / 1000); }
+std::uint32_t esp_random(void) {
+  ++g_random_calls;
+  return g_random;
+}
 
 esp_err_t nvs_flash_init_partition(const char* partition) {
   return partition == nullptr ? ESP_FAIL : ESP_OK;

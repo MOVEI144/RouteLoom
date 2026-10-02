@@ -1,4 +1,5 @@
 #include "routeloom/espnow_security_owner.hpp"
+#include "routeloom/espnow_crypto_worker.hpp"
 
 #include <cstdio>
 
@@ -35,6 +36,8 @@ constexpr MonotonicMs kRetiredPullWindowMs = 10000;
 }  // namespace
 
 EspNowSecurityOwner::~EspNowSecurityOwner() noexcept {
+  (void)lifecycle_signature_.cancel();
+  assert(!lifecycle_signature_.pending());
   if (authority_live_) {
     mesh_sink()->~AuthorityMeshSink();
     if (gateway_role()) {
@@ -196,7 +199,10 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::remove_member_runtime() noexce
     stop.kind = sdkv1::CoordinatorEventKind::StopForLifecycle;
     stop.now = owner.runtime_ != nullptr ? owner.runtime_->now_ms() : 0;
     const Status halted = owner.coordinator().step(stop);
-    if (!halted) return halted;
+    if (!halted)
+      return halted.code == StatusCode::Busy
+                 ? Status::error(StatusCode::WouldBlock, "member crypto retiring")
+                 : halted;
   }
   owner.removal_pending_ = true;
   for (PeerTxStage& slot : owner.peer_tx_staged_) {
@@ -320,9 +326,9 @@ void EspNowSecurityOwner::LifecycleObjectSink::on_rrs_object(
     const NodeId peer, const ByteView object, const MonotonicMs now_ms) noexcept {
   (void)now_ms;
   EspNowSecurityOwner& owner = owner_;
-  // Latest-wins staging for the poll feed: gossip duplicates, so keeping
-  // the newest completion is always at least as good. Never dispatches
-  // here (the lifecycle holds its guard).
+  // Keep the first completion until Owner consumes it. A verification
+  // retry must see the same peer and bytes; gossip can retry later.
+  if (owner.completed_object_valid_) return;
   if (object.data == nullptr || object.size == 0 ||
       object.size > owner.completed_object_.size()) {
     return;
@@ -496,6 +502,11 @@ void EspNowSecurityOwner::emit_recovery_diagnostic(const std::uint8_t reason) no
   bridge()->on_diagnostic(text, kInvalidNodeId, nullptr);
 }
 
+void EspNowSecurityOwner::crypto_completed(void* context) noexcept {
+  auto& owner = *static_cast<EspNowSecurityOwner*>(context);
+  if (owner.runtime_ != nullptr) owner.runtime_->notify_owner();
+}
+
 Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
                                   const Config& config,
                                   sdkv1::RtcSessionImage* sleep_image) noexcept {
@@ -521,12 +532,21 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
   // and the cookie key must be drawn only after the radio entropy source
   // is ready (G-SEC P4 §8.4) — boot() arms it once entropy.begin() has
   // run. seal() refuses until then; nothing seals before boot.
+  crypto_worker_ = config.crypto_worker;
+#if CONFIG_ROUTELOOM_CRYPTO_WORKER
+  if (crypto_worker_ == nullptr) {
+    crypto_worker_ = start_crypto_worker(&crypto_completed, this);
+    if (crypto_worker_ == nullptr)
+      return Status::error(StatusCode::NoCapacity, "crypto worker start failed");
+  }
+#endif
   config_ = config;
   stores_ = &stores;
   entropy_ = &entropy;
   new (sealer_box_.data()) sdkv1::HmacJoinCookie();
   new (verifier_box_.data()) sdkv1::StoreCredentialVerifier(stores_->identity(), stores_->site());
   sdkv1::SecurityCoordinator::Deps deps{};
+  deps.crypto_worker = crypto_worker_;
   deps.identity = &stores_->identity();
   deps.site = &stores_->site();
   deps.revocations = &stores_->revocation();
@@ -566,6 +586,7 @@ Status EspNowSecurityOwner::begin(Sdkv1Stores& stores, EspOwnerEntropy& entropy,
       sdkv1::MembershipLifecycle(lifecycle_config, stores_->identity(), stores_->site(),
                                  stores_->revocation(), stores_->resume_cache(), lifecycle_ports,
                                  sdkv1::default_es256_verifier(), &stores_->lifecycle());
+  (void)lifecycle().bind_crypto_worker(crypto_worker_, lifecycle_signature_);
   lifecycle_live_ = true;
   lifecycle_box_in_use_ = true;
   begun_ = true;
@@ -617,12 +638,39 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   // after entropy.begin() in main): boot-RAM-only, so a reboot
   // invalidates every outstanding cookie. Unbegun entropy fails the boot
   // — an unkeyed coordinator must never run.
-  std::array<std::uint8_t, 32> cookie_key{};
-  Status key_status = entropy_->fill(MutableByteView{cookie_key.data(), cookie_key.size()});
-  if (!key_status) return key_status;
-  key_status = sealer().install_key(cookie_key);
-  secure_clear(cookie_key.data(), cookie_key.size());
-  if (!key_status) return key_status;
+  if (!sealer().keyed()) {
+    std::array<std::uint8_t, 32> cookie_key{};
+    Status key_status = entropy_->fill(MutableByteView{cookie_key.data(), cookie_key.size()});
+    if (!key_status) return key_status;
+    key_status = sealer().install_key(cookie_key);
+    secure_clear(cookie_key.data(), cookie_key.size());
+    if (!key_status) return key_status;
+  }
+  // Publish stable transport endpoints before asynchronous boot returns:
+  // Device attaches its sinks once. Membership remains gated by lifecycle.
+  if (gateway_role() && bridge() == nullptr) {
+    return Status::error(StatusCode::InvalidState, "gateway without usb bridge");
+  }
+  if (!authority_live_) {
+    new (mesh_port_box_.data()) MeshConfigPort(runtime_->node());
+    authority_live_ = true;  // the accessors below (and the dtor) go live here
+    if (gateway_role()) {
+      new (transport_box_.gateway.data())
+          sdkv1::AuthorityGateway(*mesh_port(), *this, *this, config_.local_node);
+      new (mesh_sink_box_.data()) sdkv1::AuthorityMeshSink(*gateway());
+      direct_port_.bind(this);
+      Status authority_status = coordinator().attach_authority_port(direct_port_);
+      if (!authority_status) return authority_status;
+      authority_status = bridge()->attach_authority(*this);
+      if (!authority_status) return authority_status;
+    } else {
+      new (transport_box_.endpoint.data())
+          sdkv1::AuthorityEndpoint(*mesh_port(), config_.local_node);
+      new (mesh_sink_box_.data()) sdkv1::AuthorityMeshSink(*endpoint());
+      const Status authority_status = coordinator().attach_authority_port(*endpoint());
+      if (!authority_status) return authority_status;
+    }
+  }
   // The lifecycle boots first (journal before member): a leftover
   // Removing/Holdoff intent from before the reboot runs to completion
   // before the coordinator may adopt anything.
@@ -642,7 +690,15 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   if (!factory_fresh) {
     const Status lifecycle_boot =
         lifecycle().dispatch(sdkv1::LifecycleInput::Boot(rlboot_prepared), now_ms);
-    if (!lifecycle_boot) return lifecycle_boot;
+    if (!lifecycle_boot) {
+      if (lifecycle_boot.code != StatusCode::WouldBlock && lifecycle_boot.code != StatusCode::Busy)
+        return lifecycle_boot;
+      boot_pending_ = true;
+      boot_usb_direct_ = usb_direct;
+      boot_witness_ = rlboot_witness;
+      booted_ = true;
+      return Status::success();
+    }
     lifecycle_booted_ = true;
     boot_snap = lifecycle().snapshot();
   }
@@ -668,31 +724,6 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
     booted_ = true;
     ESP_LOGW(config_.log_tag, "boot: journal holds removal intent — erasure runs first");
     return Status::success();
-  }
-  // The authority transport needs the runtime (mesh port over the node)
-  // and, on gateways, the bridge (USB lane + local direct port): both
-  // attach before boot. Port attach precedes the Boot step so the first
-  // adoption can start its channel immediately.
-  if (gateway_role() && bridge() == nullptr) {
-    return Status::error(StatusCode::InvalidState, "gateway without usb bridge");
-  }
-  new (mesh_port_box_.data()) MeshConfigPort(runtime_->node());
-  authority_live_ = true;  // the accessors below (and the dtor) go live here
-  if (gateway_role()) {
-    new (transport_box_.gateway.data())
-        sdkv1::AuthorityGateway(*mesh_port(), *this, *this, config_.local_node);
-    new (mesh_sink_box_.data()) sdkv1::AuthorityMeshSink(*gateway());
-    direct_port_.bind(this);
-    Status authority_status = coordinator().attach_authority_port(direct_port_);
-    if (!authority_status) return authority_status;
-    authority_status = bridge()->attach_authority(*this);
-    if (!authority_status) return authority_status;
-  } else {
-    new (transport_box_.endpoint.data())
-        sdkv1::AuthorityEndpoint(*mesh_port(), config_.local_node);
-    new (mesh_sink_box_.data()) sdkv1::AuthorityMeshSink(*endpoint());
-    const Status authority_status = coordinator().attach_authority_port(*endpoint());
-    if (!authority_status) return authority_status;
   }
   // The stored intake policy of this site applies before the proxy starts.
   if (stores_->site().has_site()) {
@@ -799,13 +830,25 @@ void EspNowSecurityOwner::poll(const MonotonicMs now_ms) noexcept {
 }
 
 void EspNowSecurityOwner::poll_steps(const MonotonicMs now_ms) noexcept {
+  if (boot_pending_) {
+    booted_ = false;
+    boot_pending_ = false;
+    const Status resumed = boot(boot_witness_, true, boot_usb_direct_, now_ms);
+    if (!resumed) {
+      boot_pending_ = true;
+      booted_ = true;
+    }
+    return;
+  }
   poll_lifecycle(now_ms);
   if (removal_pending_) return;  // erasure owns the device until the reboot
   // RRS enforcement changes the handshake's signed local epoch and cancels
   // its pending flights. Finish the bounded local apply before starting a
   // fresh member discovery exchange, so its m1 can still accept m2.
   if (lifecycle_live_ && lifecycle_booted_ &&
-      lifecycle().snapshot().phase == sdkv1::LifecyclePhase::ApplyingRrs) return;
+      lifecycle().snapshot().phase == sdkv1::LifecyclePhase::ApplyingRrs &&
+      !lifecycle().crypto_waiting())
+    return;
   sdkv1::CoordinatorEvent event{};
   event.kind = sdkv1::CoordinatorEventKind::Poll;
   event.now = now_ms;
@@ -1014,7 +1057,33 @@ bool EspNowSecurityOwner::claim_rrs_chunk(const NodeId peer, const FrameType car
 }
 
 void EspNowSecurityOwner::poll_lifecycle(const MonotonicMs now_ms) noexcept {
-  if (!lifecycle_live_ || !lifecycle_booted_) return;
+  if (!lifecycle_live_) return;
+  if (lifecycle_recovery_pending_) complete_lifecycle_recovery(lifecycle_recovery_success_, now_ms);
+  if (removal_notice_pending_) {
+    const Status accepted =
+        lifecycle().dispatch(sdkv1::LifecycleInput::RemovalRequired(
+                                 ByteView{removal_notice_.data(), removal_notice_.size()}),
+                             now_ms);
+    if (accepted.code != StatusCode::WouldBlock && accepted.code != StatusCode::Busy) {
+      removal_notice_pending_ = false;
+      secure_clear(removal_notice_);
+      complete_lifecycle_recovery(false, now_ms);
+    }
+  }
+  if (member_ready_pending_) {
+    if (!lifecycle_booted_) {
+      if (!lifecycle().dispatch(sdkv1::LifecycleInput::Boot(true), now_ms)) return;
+      lifecycle_booted_ = true;
+    }
+    const Status adopted = lifecycle().dispatch(
+        sdkv1::LifecycleInput::MemberReady(stores_->site().commit_seq(), member_ready_fetch_),
+        now_ms);
+    if (adopted) {
+      member_ready_pending_ = false;
+      complete_lifecycle_recovery(true, now_ms);
+    }
+  }
+  if (!lifecycle_booted_) return;
   sync_lifecycle_peers(now_ms);
   feed_lifecycle_inputs(now_ms);
   drain_authority_tx(now_ms);
@@ -1216,8 +1285,10 @@ void EspNowSecurityOwner::feed_lifecycle_inputs(const MonotonicMs now_ms) noexce
         if (slot.type == sdkv1::kAuthorityTypeProxyPolicy) {
           apply_proxy_policy(tail);
         } else {
-          (void)lifecycle().dispatch(sdkv1::LifecycleInput::Authority(stamp, slot.type, tail),
-                                     now_ms);
+          const Status accepted = lifecycle().dispatch(
+              sdkv1::LifecycleInput::Authority(stamp, slot.type, tail), now_ms);
+          if (accepted.code == StatusCode::WouldBlock || accepted.code == StatusCode::Busy)
+            continue;
         }
       }
       secure_clear(slot.body);
@@ -1248,12 +1319,12 @@ void EspNowSecurityOwner::feed_lifecycle_inputs(const MonotonicMs now_ms) noexce
       secure_clear(slot.body);
     }
     if (completed_object_valid_) {
-      completed_object_valid_ = false;
-      (void)lifecycle().dispatch(
+      const Status accepted = lifecycle().dispatch(
           sdkv1::LifecycleInput::Completed(
-              completed_object_peer_,
-              ByteView{completed_object_.data(), completed_object_size_}),
+              completed_object_peer_, ByteView{completed_object_.data(), completed_object_size_}),
           now_ms);
+      if (accepted.code != StatusCode::WouldBlock && accepted.code != StatusCode::Busy)
+        completed_object_valid_ = false;
     }
   } else {
     for (AuthorityRxStage& slot : authority_rx_staged_) {
@@ -1356,11 +1427,21 @@ void EspNowSecurityOwner::on_lifecycle_recovery(const sdkv1::LifecycleAction& ac
 
 void EspNowSecurityOwner::complete_lifecycle_recovery(const bool reprovisioned,
                                                       const MonotonicMs now_ms) noexcept {
-  if (lifecycle_recovery_token_ == 0 || !lifecycle_live_) return;
-  const std::uint64_t token = lifecycle_recovery_token_;
-  lifecycle_recovery_token_ = 0;
-  (void)lifecycle().dispatch(sdkv1::LifecycleInput::ActionDone(token, Status::success()), now_ms);
-  (void)lifecycle().dispatch(sdkv1::LifecycleInput::Recovery(reprovisioned), now_ms);
+  if (!lifecycle_live_ || (lifecycle_recovery_token_ == 0 && !lifecycle_recovery_pending_)) return;
+  if (!lifecycle_recovery_pending_) {
+    lifecycle_recovery_pending_ = true;
+    lifecycle_recovery_success_ = reprovisioned;
+  }
+  if (lifecycle_recovery_token_ != 0) {
+    const Status completed = lifecycle().dispatch(
+        sdkv1::LifecycleInput::ActionDone(lifecycle_recovery_token_, Status::success()), now_ms);
+    if (completed.code == StatusCode::WouldBlock || completed.code == StatusCode::Busy) return;
+    lifecycle_recovery_token_ = 0;
+  }
+  const Status recovered =
+      lifecycle().dispatch(sdkv1::LifecycleInput::Recovery(lifecycle_recovery_success_), now_ms);
+  if (recovered.code != StatusCode::WouldBlock && recovered.code != StatusCode::Busy)
+    lifecycle_recovery_pending_ = false;
 }
 
 Status EspNowSecurityOwner::local_leave(const MonotonicMs now_ms) noexcept {
@@ -1472,6 +1553,8 @@ void EspNowSecurityOwner::drive_authority(const MonotonicMs now_ms) noexcept {
 
 Status EspNowSecurityOwner::prepare_sleep(const MonotonicMs now_ms,
                                          const bool drain_deadline) noexcept {
+  if (crypto_worker_ != nullptr && !crypto_worker_->idle())
+    return Status::error(StatusCode::Busy, "crypto work pending");
   if (!booted_ || runtime_ == nullptr) {
     return Status::error(StatusCode::InvalidState, "owner not booted");
   }
@@ -1912,11 +1995,8 @@ void EspNowSecurityOwner::drain_actions(const MonotonicMs now_ms) noexcept {
         // cleanup) → Holdoff → UnassignedReady → reboot. A recovery join
         // that lands here found the removal instead of reprovisioning.
         if (lifecycle_live_ && lifecycle_booted_) {
-          (void)lifecycle().dispatch(
-              sdkv1::LifecycleInput::RemovalRequired(ByteView{action.removal.object.data(),
-                                                              action.removal.object.size()}),
-              now_ms);
-          complete_lifecycle_recovery(false, now_ms);
+          removal_notice_ = action.removal.object;
+          removal_notice_pending_ = true;
         }
         break;
       case sdkv1::CoordinatorActionKind::ReportRecovery:
@@ -2048,6 +2128,8 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   // The lifecycle needs the verified package RS target at fresh adoption;
   // boot re-adoption carries zero and uses its durable floor.
   if (lifecycle_live_ && stores_ != nullptr) {
+    member_ready_pending_ = true;
+    member_ready_fetch_ = member.rs_epoch_to_fetch;
     // First adoption of a factory-fresh device: the lifecycle boots on the
     // committed site now, then takes the package RS target like any adoption.
     if (!lifecycle_booted_ &&
@@ -2055,10 +2137,11 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
       lifecycle_booted_ = true;
     }
     if (lifecycle_booted_) {
-      (void)lifecycle().dispatch(
-          sdkv1::LifecycleInput::MemberReady(stores_->site().commit_seq(),
-                                             member.rs_epoch_to_fetch), now_ms);
-      complete_lifecycle_recovery(true, now_ms);
+      const Status adopted = lifecycle().dispatch(
+          sdkv1::LifecycleInput::MemberReady(stores_->site().commit_seq(), member_ready_fetch_),
+          now_ms);
+      member_ready_pending_ = !adopted;
+      if (adopted) complete_lifecycle_recovery(true, now_ms);
     }
   }
   // Adoption binds the authority transport's self id (self-downs deliver

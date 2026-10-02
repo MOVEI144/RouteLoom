@@ -2,6 +2,7 @@ idf_component_register(
   SRCS
     src/espnow_autonomy.cpp
     src/espnow_board_config.cpp
+    src/espnow_crypto_worker.cpp
     src/espnow_flash_layout.cpp
     src/espnow_migration.cpp
     src/espnow_sdkv1.cpp

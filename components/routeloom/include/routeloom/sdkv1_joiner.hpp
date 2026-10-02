@@ -25,6 +25,7 @@
 #include <cstdint>
 
 #include "routeloom/admission.hpp"  // MembershipState
+#include "routeloom/crypto_progress.hpp"
 #include "routeloom/edhoc.hpp"      // AeadCcm
 #include "routeloom/sdkv1_ead.hpp"  // RemovalNotice
 #include "routeloom/sdkv1_join_candidates.hpp"
@@ -32,6 +33,7 @@
 #include "routeloom/sdkv1_join_relay.hpp"
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_store.hpp"
+#include "routeloom/signature_progress.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
@@ -263,6 +265,12 @@ class Joiner final {
          RevocationStore& revocations, EntropySource& entropy, ZtRld1Port& port,
          JoinObserver& observer, const edhoc::AeadCcm* aead = nullptr) noexcept;
   ~Joiner();
+  // Bind before boot. The executor, signature helper and identity record
+  // remain valid and immutable during a loan; stop() returns Busy until drained.
+  Status bind_crypto_worker(CryptoWorker* worker, SignatureProgress* signature = nullptr) noexcept;
+  bool crypto_pending() const noexcept {
+    return crypto_.pending() || (signature_ != nullptr && signature_->pending());
+  }
   Joiner(const Joiner&) = delete;
   Joiner& operator=(const Joiner&) = delete;
 
@@ -383,7 +391,7 @@ class Joiner final {
   // Verifies the staged RRS1 against the adopted site's SAK and stores
   // it when it is a strict advance for that site/network. A refusal
   // never fails the join — the site stands and the fetch paths remain.
-  void store_staged_rrs() noexcept;
+  Status store_staged_rrs() noexcept;
   // Full re-verification of an adopted RLS1 before it may drive anything.
   bool verify_adopted(const SiteRecord& site, const IdentityRecord& identity) noexcept;
   bool below_removal_watermark(const SiteRecord& site) const noexcept;
@@ -407,6 +415,27 @@ class Joiner final {
   ZtJoinerLink link_;
   JoinCandidates candidates_;
   JoinHandshake handshake_;
+  enum class CryptoOp : std::uint8_t { M1, M2, M3, M4, Decide };
+  static Status run_crypto(void* context) noexcept;
+  Status progress_crypto(CryptoOp op) noexcept;
+  CryptoProgress crypto_{};
+  SignatureProgress* signature_{nullptr};
+  const Es256Verifier& store_verifier() const noexcept {
+    return signature_ == nullptr ? default_es256_verifier() : *signature_;
+  }
+  bool signature_waiting() const noexcept { return signature_ != nullptr && signature_->waiting(); }
+  Status cancel_signature() noexcept {
+    return signature_ == nullptr ? Status::success() : signature_->cancel();
+  }
+  CryptoOp crypto_op_{CryptoOp::M1};
+  JoinHandshakeConfig crypto_handshake_config_{};
+  bool crypto_begin_{false};
+  std::size_t crypto_length_{0};
+  std::size_t crypto_message_size_{0};
+  JoinDecideInput crypto_input_{};
+  JoinMembershipEvidence crypto_evidence_{};
+  JoinDecided crypto_decided_{};
+  JoinAttemptStats crypto_stats_{};
 
   JoinState state_{JoinState::Stopped};
   // True until the first DISCOVER of a scan cycle: one nonce per cycle

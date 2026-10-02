@@ -4,10 +4,6 @@
 
 #include "routeloom/discovery_scope.hpp"  // sha256
 
-extern "C" {
-#include "uECC.h"
-}
-
 namespace routeloom {
 namespace {
 
@@ -174,9 +170,14 @@ Status TrustView::verify_permit(
   if (!built.ok()) return built;
   ScopeDigest digest{};
   sha256(to_verify.view(), digest);
-  if (uECC_verify(key->pubkey.data(), digest.data(),
-                  static_cast<unsigned>(digest.size()),
-                  parts.signature.data, uECC_secp256r1()) == 0) {
+  sdkv1::Es256Signature signature{};
+  std::memcpy(signature.data(), parts.signature.data, signature.size());
+  bool signature_ok = false;
+  const auto& verifier =
+      signature_verifier_ == nullptr ? sdkv1::default_es256_verifier() : *signature_verifier_;
+  const Status checked = verifier.progress_digest(key->pubkey, digest, signature, signature_ok);
+  if (!checked) return checked;
+  if (!signature_ok) {
     return Status::success();  // bad signature: denied
   }
 
@@ -264,9 +265,14 @@ Status TrustView::verify_recovery(
   if (!built.ok()) return built;
   ScopeDigest digest{};
   sha256(to_verify.view(), digest);
-  if (uECC_verify(key->pubkey.data(), digest.data(),
-                  static_cast<unsigned>(digest.size()),
-                  parts.signature.data, uECC_secp256r1()) == 0) {
+  sdkv1::Es256Signature signature{};
+  std::memcpy(signature.data(), parts.signature.data, signature.size());
+  bool signature_ok = false;
+  const auto& verifier =
+      signature_verifier_ == nullptr ? sdkv1::default_es256_verifier() : *signature_verifier_;
+  const Status checked = verifier.progress_digest(key->pubkey, digest, signature, signature_ok);
+  if (!checked) return checked;
+  if (!signature_ok) {
     return Status::success();  // bad signature: denied
   }
 

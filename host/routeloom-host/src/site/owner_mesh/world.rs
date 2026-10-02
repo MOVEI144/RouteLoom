@@ -700,7 +700,7 @@ impl MeshWorld {
         Self::start_booted(tag, switch, &boot_ms, false, identity_only, &[])
     }
 
-    fn start_booted(
+    pub(super) fn start_booted(
         tag: &str,
         switch: Switch,
         boot_ms: &[u64],

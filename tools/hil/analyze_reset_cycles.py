@@ -25,6 +25,7 @@ def health(path: pathlib.Path, node: str) -> dict:
     samples = 0
     auth = 0
     route_up = 0
+    route_unknown = 0
     errors = 0
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
@@ -35,13 +36,16 @@ def health(path: pathlib.Path, node: str) -> dict:
         session = row.get("adapter", {}).get("session", {})
         auth += session.get("authenticated") is True
         errors = max(errors, row.get("adapter", {}).get("protocol_errors") or 0)
-        nodes = row.get("nodes", {}).get("result", {}).get("nodes", [])
+        nodes = row.get("nodes", {}).get("result", {}).get("nodes")
+        if not isinstance(nodes, list):
+            route_unknown += 1
+            continue
         route_up += any(item.get("node") == node and item.get("connected") and
                         item.get("next_hop") is not None and
                         item.get("route_metric") is not None for item in nodes)
     return {"samples": samples, "authenticated": auth,
             "protocol_errors_max": errors, "route_up": route_up,
-            "route_down": samples - route_up}
+            "route_down": samples - route_up - route_unknown, "route_unknown": route_unknown}
 
 
 def main() -> int:

@@ -88,6 +88,7 @@ struct DeviceChannelPlan;
 class GatewayDelivery;
 class ObservationSource;
 struct DeviceRemoteConfig;
+class CryptoWorker;
 
 namespace sdkv1 {
 class SecurityCoordinator;
@@ -132,6 +133,7 @@ struct DeviceConfig {
   // verifies the development permit key derived from its PSK, issued by
   // `config_authority` at `config_authority_generation`.
   bool remote_config{false};
+  CryptoWorker* crypto_worker{nullptr};
   NodeId config_authority{kInvalidNodeId};
   std::uint32_t config_authority_generation{1};
   // Manual channel plan (Member, ROUTELOOM_DEVICE_MIGRATION builds): the
