@@ -316,6 +316,18 @@ bool "member-edhoc (EDHOC membership via the security owner)"
 
 生成元：[components/routeloom_device/Kconfig](../../components/routeloom_device/Kconfig)
 
+### CONFIG_ROUTELOOM_BOARD_C6_EXTERNAL_ANTENNA
+
+```text
+bool "C6 board: select external antenna"
+        default n
+        depends on IDF_TARGET_ESP32C6
+        help
+            Selects the external antenna path with GPIO14 high. By default
+            GPIO14 is low for the internal antenna. Device startup enables
+            the board RF switch with GPIO3 low before initializing Wi-Fi.
+```
+
 ### CONFIG_ROUTELOOM_OWNER_TASK_STACK_SIZE
 
 ```text
