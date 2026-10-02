@@ -63,28 +63,32 @@ using JoinNonce = std::array<std::uint8_t, 16>;
 constexpr std::uint32_t kJoinRetryAfterMaxMs = 600000;
 
 // ===================================================================================
-// RLD1 body v3 — ZeroTouch DISCOVER / OFFER (02 §5.1 / §5.2)
+// RLD1 body v3/v4 — ZeroTouch DISCOVER / OFFER (02 §5.1 / §5.2)
 // ===================================================================================
-constexpr std::uint8_t kZtBodyVersion = 3;
+constexpr std::uint8_t kZtBodyVersion = 4;
 constexpr std::uint8_t kZtClass = 3;  // 1 Member, 2 Commissioning (endpoint_wire.hpp)
-constexpr std::size_t kZtDiscoverBodySize = 24;
+constexpr std::size_t kZtDiscoverBodySize = 40;
 constexpr std::size_t kZtOfferBodySize = 48;
 constexpr std::uint16_t kZtDiscoverPreferredValid = 0x0001;
 constexpr std::uint8_t kZtOfferAuthorityReachable = 0x01;
 constexpr std::uint8_t kZtOfferProxyBusy = 0x02;
-constexpr std::uint8_t kZtOfferFlagMask = 0x03;
+constexpr std::uint8_t kZtOfferExpected = 0x04;
+constexpr std::uint8_t kZtOfferFlagMask = 0x07;
 constexpr std::uint8_t kZtHopsUnknown = 255;
 constexpr std::size_t kZtAvoidHints = 2;
 
-// DISCOVER body (24 B):
+// DISCOVER body (v3 24 B; v4 40 B adds the nonce-bound mark at offset 24):
 //   0 u8 body_version = 3 | 1 u8 class = 3 | 2 u16 flags (bit0 preferred_site_valid)
 //   4 u32 profile_bits (bit0 RLJOIN1 required, bit1 RLRES1) | 8 u32 org_hint
 //  12 u32 preferred_site_hint (nonzero iff flags bit0) | 16 u32 avoid[0] | 20 u32 avoid[1]
 // Avoid slots pack from the front (avoid[1] != 0 needs avoid[0] != 0), are
 // distinct, and never equal the preferred hint. The encoder derives flags.
-// Header: kind DISCOVER, network_hint 0, claimed_node = own NodeId (valid),
+// Header: kind DISCOVER, network_hint 0, claimed_node = own NodeId (v3)
+// or a transaction pseudonym (v4),
 // capability_bits 0, broadcast destination, fresh transaction nonce.
 struct ZtDiscoverBody {
+  bool smart{false};
+  std::array<std::uint8_t, 16> mark{};
   std::uint32_t profile_bits{kJoinProfileRljoin1};
   std::uint32_t org_hint{0};
   std::uint32_t preferred_site_hint{0};
@@ -100,7 +104,7 @@ bool zt_discover_avoids(const ZtDiscoverBody& body, std::uint32_t site_hint) noe
 
 // OFFER body (48 B):
 //   0 u8 body_version = 3 | 1 u8 class = 3 | 2 u8 density | 3 u8 flags
-//     (bit0 authority_reachable, bit1 proxy_busy)
+//     (bit0 authority_reachable, bit1 proxy_busy, v4 bit2 expected)
 //   4 16B cookie | 20 16B responder_nonce | 36 u32 org_hint | 40 u32 site_hint
 //  44 u8 authority_hops (255 unknown) | 45 u8 load | 46 u16 reserved = 0
 // Header: kind OFFER, network_hint = site network_low32 (nonzero),
@@ -108,6 +112,7 @@ bool zt_discover_avoids(const ZtDiscoverBody& body, std::uint32_t site_hint) noe
 // capability_bits 0, unicast to the observed requester MAC. Everything here
 // is an UNAUTHENTICATED selection hint, never evidence (02 §5.2).
 struct ZtOfferBody {
+  bool smart{false};
   std::uint8_t density{0};
   std::uint8_t flags{kZtOfferAuthorityReachable};
   JoinCookieBytes cookie{};

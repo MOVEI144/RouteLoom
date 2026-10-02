@@ -60,6 +60,14 @@ struct EspNowSecurityOwnerTestAccess {
   static void set_flat_group_routing(EspNowSecurityOwner& owner, bool flat) noexcept {
     owner.config_.flat_group_routing = flat;
   }
+  static Status adopt_dev(EspNowSecurityOwner& owner, const EspNowSecurityOwner::DevConfig& config,
+                          MonotonicMs now) noexcept {
+    // The fixture supplies the coordinator and runtime instead of NVS boot.
+    owner.begun_ = true;
+    const Status status = owner.adopt_dev(config, now);
+    owner.begun_ = false;
+    return status;
+  }
 };
 
 // The real Owner's boot-only PSA and NVS wiring is outside this test. Its
@@ -402,6 +410,7 @@ void test_member_root_mapping(bool flat) {
   CHECK(take_apply(owner.coordinator(), now, member));
   EspNowSecurityOwnerTestAccess::apply(owner, member);
   CHECK(runtime.node().started());
+  CHECK(owner.session_provider().security_profile() == SecurityProfile::Candidate);
   const NodeConfig& node = runtime.node().config();
   EspNowPowerPort power_port(runtime);
   power_port.bind_owner(owner);
@@ -588,6 +597,43 @@ routeloom::PowerEvents& device_sleep_events(routeloom::Device& device) noexcept 
   return routeloom::DeviceTestAccess::sleep_events(device);
 }
 int run_device_sleep_scenarios();
+void test_dev_profile_survives_radio_failure() {
+  idf_stub::reset();
+  Stores stores{};
+  CHECK(stores.init());
+  EspNowSecurityOwner owner{};
+  EspNowSecurityOwnerTestAccess::install_coordinator(owner, stores.deps(owner));
+  routeloom_test::CapturingObserver observer{};
+  EspNowRuntime runtime(radio_config(), owner.session_provider(), observer);
+  EspNowSecurityOwnerTestAccess::attach_runtime(owner, runtime);
+  CHECK(runtime.initialize().ok());
+  CHECK(owner.security_profile() == SecurityProfile::Candidate);
+  CHECK(owner.session_provider().security_profile() == SecurityProfile::Candidate);
+  EspNowSecurityOwner::DevConfig config{};
+  config.psk.fill(0xA5);
+  config.network = kNetwork;
+  config.node = kNode;
+  config.channel = radio_config().channel;
+  config.boot = kBoot;
+  config.role = kMemberRoleEndpoint;
+  CHECK(EspNowSecurityOwnerTestAccess::adopt_dev(owner, config, kStart).ok());
+  CHECK(owner.security_profile() == SecurityProfile::Development);
+  CHECK(owner.session_provider().security_profile() == SecurityProfile::Development);
+  CoordinatorAction action{};
+  CHECK(owner.coordinator().take_action(action).ok());
+  CHECK(action.kind == CoordinatorActionKind::ApplyMemberConfig);
+  EspNowSecurityOwnerTestAccess::apply(owner, action.member);
+  CHECK(runtime.node().started());
+  CoordinatorEvent failed{};
+  failed.kind = CoordinatorEventKind::ChannelReady;
+  failed.now = kStart + 1;
+  failed.channel = config.channel;
+  failed.channel_result = StatusCode::RadioFailure;
+  CHECK(owner.coordinator().step(failed).ok());
+  CHECK(owner.coordinator().mode() == CoordinatorMode::Recovery);
+  CHECK(owner.security_profile() == SecurityProfile::Development);
+  runtime.stop();
+}
 
 int main() {
   test_usb_network_after_cutover();
@@ -601,5 +647,6 @@ int main() {
   test_device_post_bound();
   test_device_post_during_runtime_publication();
   test_device_begin_clears_key_on_failure();
+  test_dev_profile_survives_radio_failure();
   return failures == 0 ? 0 : 1;
 }

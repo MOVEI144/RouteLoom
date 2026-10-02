@@ -1300,6 +1300,37 @@ impl MeshPeer {
         self.send(&[b'G', u8::from(on)]);
     }
 
+    pub(super) fn join_mark(&mut self) -> [u8; 16] {
+        self.send(b"a");
+        let reply = self.recv().expect("private mark reply");
+        assert_eq!(reply.len(), 18);
+        assert_eq!(&reply[..2], &[b'a', 0]);
+        reply[2..].try_into().expect("16-byte mark")
+    }
+
+    pub(super) fn smart_join_policy(&mut self, boot: bool, same_site: bool, search_ms: u32) {
+        self.join_policy_mode(true, boot, same_site, search_ms);
+    }
+
+    pub(super) fn join_policy_mode(
+        &mut self,
+        smart: bool,
+        boot: bool,
+        same_site: bool,
+        search_ms: u32,
+    ) {
+        let mut command = vec![b'X'];
+        command.extend_from_slice(&600u32.to_le_bytes());
+        command.extend_from_slice(&0u32.to_le_bytes());
+        command.extend_from_slice(&0u32.to_le_bytes());
+        command.extend_from_slice(&[u8::from(smart), u8::from(boot), u8::from(same_site), 0]);
+        command.extend_from_slice(&1000u32.to_le_bytes());
+        command.extend_from_slice(&search_ms.to_le_bytes());
+        self.send(&command);
+        let reply = self.recv().expect("smart policy reply");
+        assert_eq!(&reply[..2], &[b'x', 0]);
+    }
+
     /// Device::set_join_policy with `holdoff_s` as the removal holdoff:
     /// the status code and the stored revision.
     pub(super) fn set_join_policy(&mut self, holdoff_s: u32, expected: u32) -> (u8, u32) {

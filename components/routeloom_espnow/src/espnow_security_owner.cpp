@@ -760,6 +760,7 @@ Status EspNowSecurityOwner::adopt_dev(const DevConfig& config,
     return Status::error(StatusCode::RecoveryRequired, "dev adopt failed");
   }
   booted_ = true;  // the pump now drives the dev-armed coordinator
+  security_profile_ = SecurityProfile::Development;
   ESP_LOGI(config_.log_tag, "dev adopted (node 0x%llx, boot %lu)",
            static_cast<unsigned long long>(config.node),
            static_cast<unsigned long>(config.boot));
@@ -1126,13 +1127,14 @@ void EspNowSecurityOwner::apply_proxy_policy(const ByteView tail) noexcept {
     record.generation = set.generation;
     record.zero_touch_open = set.zero_touch_open;
     record.content = set.content;
+    record.expected = set.expected;
     const Status committed = store.commit(record);
     const Status readback = store.load(site_id, stored, has);
     if (!readback) coordinator().set_proxy_policy(site_id, false);
     if (!committed || !readback) status = sdkv1::ProxyPolicyStatus::StorageFailed;
   }
   if (status == sdkv1::ProxyPolicyStatus::Applied && has) {
-    coordinator().set_proxy_policy(site_id, stored.zero_touch_open);
+    coordinator().set_proxy_policy(site_id, stored.zero_touch_open, &stored.expected, runtime_->now_ms());
   }
   std::array<std::uint8_t, sdkv1::kProxyPolicyAckSize> ack{};
   if (!sdkv1::proxy_policy_ack_encode(status, has ? stored.generation : 0, ack)) return;
@@ -1826,9 +1828,9 @@ Status EspNowSecurityOwner::send_relay_abort_to_host(
 }
 
 SecurityProfile EspNowSecurityOwner::security_profile() const noexcept {
-  // EXPERIMENTAL until P8 declares production (§15): the node surfaces
-  // SECURITY_PROFILE_EXPERIMENTAL and nothing claims production status.
-  return SecurityProfile::Development;
+  // The selected profile survives recovery; membership is not qualification.
+  // MemberEdhoc remains Candidate until all production gates are met.
+  return security_profile_;
 }
 
 bool EspNowSecurityOwner::binds_scope() const noexcept {

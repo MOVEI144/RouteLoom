@@ -27,6 +27,7 @@
 #include "routeloom/device_credential.hpp"  // CredentialKeyLocation (RLC1 values)
 #include "routeloom/rlcw1.hpp"
 #include "routeloom/status.hpp"
+#include "routeloom/secure_clear.hpp"
 #include "routeloom/types.hpp"
 
 namespace routeloom::sdkv1 {
@@ -425,8 +426,8 @@ Status local_revocation_record_structure(ByteView record) noexcept;
 // body head (host op 1, device op 2):
 //   Set (host->device): ver=1 u8 | sub=1 u8 | flags u8 (bit0 zero_touch_open,
 //     others zero) | reserved u8 = 0 | generation u32 (>= 1) | tlv_len u16 |
-//     tlv[tlv_len <= 64]. The TLV area is reserved for the power-on join
-//     schedule (V2-18): carried and digested, never interpreted here.
+//     tlv[tlv_len <= 64]. TLV 0x18 carries the expected-device marks;
+//     earlier opaque reserved content is digested without activating a list.
 //   Ack (device->host): ver=1 | sub=2 | status u8 | reserved u8 = 0 |
 //     generation u32 — the generation durable and applied after this Set.
 // A proxy keeps generations monotonic: an older Set is Stale, the same
@@ -448,10 +449,26 @@ enum class ProxyPolicyStatus : std::uint8_t {
   StorageFailed = 3,
 };
 
+// TLV 0x18: version=1, count (0..3), ttl_s u32 (1..86400), then
+// count 16-byte opaque keys. Empty count cancels the list. Missing or
+// expired lists never authorize a smart probe to start EDHOC.
+constexpr std::size_t kExpectedJoinMax = 3;
+using JoinMark = std::array<std::uint8_t, 16>;
+struct ExpectedJoinList {
+  std::array<JoinMark, kExpectedJoinMax> marks{};
+  std::uint32_t ttl_s{0};
+  std::uint8_t count{0};
+  ~ExpectedJoinList() { for (auto& mark : marks) secure_clear(mark); }
+};
+Status expected_join_decode(ByteView tlv, ExpectedJoinList& out) noexcept;
+Status identity_join_mark(const IdentityRecord& identity, JoinMark& out) noexcept;
+void join_probe_mark(const JoinMark& key, ByteView nonce, JoinMark& out) noexcept;
+
 struct ProxyPolicySet {
   std::uint32_t generation{0};
   bool zero_touch_open{true};
   Digest256 content{};  // SHA-256 of the whole Set body
+  ExpectedJoinList expected{};
 };
 
 Status proxy_policy_set_decode(ByteView body, ProxyPolicySet& out) noexcept;
@@ -461,17 +478,19 @@ Status proxy_policy_ack_encode(ProxyPolicyStatus status, std::uint32_t generatio
 // RLPP1: the applied ProxyPolicySet (namespace rlsite, key "p0"), bound to
 // its site so another site's record reads as absent. One blob write (NVS
 // replaces a blob atomically); a record failing its CRC reads as absent.
-//  0 u32 magic "RLPP" | 4 u16 format=1 | 6 u16 used_len=60 | 8 u64 site_id |
+//  0 u32 magic "RLPP" | 4 u16 format=2 | 6 u16 used_len=116 | 8 u64 site_id |
 // 16 u32 generation | 20 u8 flags (bit0 zero_touch_open) | 21 3 reserved |
-// 24 32B content_sha256 | 56 u32 crc32
+// 24 32B content_sha256 | 56 u32 ttl_s | 60 u8 count | 61 3 reserved |
+// 64 marks[3] x 16 | 112 u32 crc32. Format 1 (60 B) reads without a list.
 constexpr std::uint32_t kProxyPolicyMagic = 0x524C5050U;  // "RLPP"
-constexpr std::size_t kProxyPolicyRecordLen = 60;
+constexpr std::size_t kProxyPolicyRecordLen = 116;
 
 struct ProxyPolicyRecord {
   std::uint64_t site_id{0};
   std::uint32_t generation{0};
   bool zero_touch_open{true};
   Digest256 content{};
+  ExpectedJoinList expected{};
 };
 
 Status proxy_policy_record_encode(const ProxyPolicyRecord& record,
@@ -501,12 +520,18 @@ struct JoinPolicy {
   // Requested member role bits (endpoint 1, relay 2, gateway 4); 0 keeps the
   // image default.
   std::uint8_t role{0};
+  bool smart_join{false};
+  bool boot_join{true};
+  bool same_site_only{false};
+  std::uint32_t listen_ms{3000};
+  std::uint32_t search_ms{60000};
 
   bool operator==(const JoinPolicy& o) const noexcept {
     return avoid_not_here_s == o.avoid_not_here_s && avoid_blocked_s == o.avoid_blocked_s &&
            removal_holdoff_s == o.removal_holdoff_s && retry_max_s == o.retry_max_s &&
            isolation_notice_s == o.isolation_notice_s && start_jitter_ms == o.start_jitter_ms &&
-           role == o.role;
+           role == o.role && smart_join == o.smart_join && boot_join == o.boot_join &&
+           same_site_only == o.same_site_only && listen_ms == o.listen_ms && search_ms == o.search_ms;
   }
 };
 
@@ -515,12 +540,13 @@ struct JoinPolicy {
 Status join_policy_check(const JoinPolicy& policy, std::uint8_t allowed_roles) noexcept;
 
 // RLJP1 (namespace rlmaint, key "j0"; a leave or removal keeps it):
-//  0 u32 magic "RLJP" | 4 u16 format=1 | 6 u16 used_len=40 | 8 u32 revision |
+//  0 u32 magic "RLJP" | 4 u16 format=2 | 6 u16 used_len=48 | 8 u32 revision |
 // 12 u32 avoid_not_here_s | 16 u32 avoid_blocked_s | 20 u32 removal_holdoff_s |
 // 24 u32 retry_max_s | 28 u32 isolation_notice_s | 32 u16 start_jitter_ms |
-// 34 u8 role | 35 u8 reserved | 36 u32 crc32
+// 34 u8 role | 35 flags (smart 1, boot disabled 2, same-site 4) |
+// 36 u32 listen_ms | 40 u32 search_ms | 44 u32 crc32. Format 1 reads with defaults.
 constexpr std::uint32_t kJoinPolicyMagic = 0x524C4A50U;  // "RLJP"
-constexpr std::size_t kJoinPolicyRecordLen = 40;
+constexpr std::size_t kJoinPolicyRecordLen = 48;
 
 Status join_policy_record_encode(const JoinPolicy& policy, std::uint32_t revision,
                                  std::array<std::uint8_t, kJoinPolicyRecordLen>& out) noexcept;

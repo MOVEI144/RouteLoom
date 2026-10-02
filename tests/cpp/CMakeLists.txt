@@ -564,6 +564,12 @@ add_test(NAME routeloom_sdkv1_join_candidates_tests COMMAND routeloom_sdkv1_join
 # SDK v1 join FSM (plan P3-4 PR 3): the portable Joiner end to end in the
 # two-site simulator (V1-J01, V1-J04-V1-J07, V1-J13, the V1-J12 remainder,
 # the V1-J08 FSM fault matrix, re-entrancy, the #109 path, quiescence).
+add_executable(routeloom_smart_join_tests test_smart_join.cpp)
+target_link_libraries(routeloom_smart_join_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_smart_join_tests PRIVATE ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_smart_join_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_smart_join_tests COMMAND routeloom_smart_join_tests)
+
 add_executable(routeloom_sdkv1_joiner_tests test_sdkv1_joiner.cpp)
 target_link_libraries(routeloom_sdkv1_joiner_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_sdkv1_joiner_tests PRIVATE

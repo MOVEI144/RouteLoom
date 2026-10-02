@@ -215,13 +215,15 @@ class Documentation(unittest.TestCase):
         cases = (
             ("bench_node-esp32c3-normal-off-off", "MEMBER_EDHOC"),
             ("bench_node-esp32c3-deep_sleep-off-owner_member", "MEMBER_EDHOC"),
-            ("reference_node-esp32c3-normal-off-off", "DEV_RAM"),
+            ("reference_node-esp32c3-normal-off-off", "MEMBER_EDHOC"),
+            ("bridge_node-esp32c3-normal-off-off", "MEMBER_EDHOC"),
+            ("experimental-c6-reference_node-devram", "DEV_RAM"),
         )
         for cell_id, security in cases:
             with self.subTest(cell=cell_id):
                 cell = cells[cell_id]
                 wanted = cell["overlay"] + cell.get("expect", [])
-                modes = [line for line in wanted if "_SECURITY_MODE_" in line]
+                modes = sorted({line for line in wanted if "_SECURITY_MODE_" in line})
                 self.assertEqual(modes, [f"CONFIG_ROUTELOOM_SECURITY_MODE_{security}=y"])
 
     def test_owner_matrix_covers_targets(self):

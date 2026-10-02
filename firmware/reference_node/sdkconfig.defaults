@@ -23,3 +23,5 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # no join relay gateway, no USB bridge.
 CONFIG_ROUTELOOM_ROLE_RELAY=y
 CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y
+# Distribution images use device identity and Site Authority admission.
+CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y

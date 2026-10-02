@@ -257,6 +257,18 @@
       "discover_network_hint": 0,
       "capability_bits": 0
     },
+    "rld1_body_v4": {
+      "body_version": 4,
+      "scope_class": 3,
+      "discover_body_bytes": 40,
+      "offer_body_bytes": 48,
+      "discover_network_hint": 0,
+      "capability_bits": 0,
+      "mark_bytes": 16,
+      "offer_expected_flag": 4,
+      "policy_expected_tlv": 24,
+      "expected_devices_max": 3
+    },
     "bootstrap_auth_phases": {"EDHOC_MESSAGE": 4, "RESUME": 5, "RELAY_STATUS": 6},
     "join_object_max_bytes": 1024,
     "join_message_max_bytes": 960,

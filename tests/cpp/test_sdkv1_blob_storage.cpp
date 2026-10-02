@@ -18,6 +18,7 @@
 #include <string>
 
 #include "routeloom/sdkv1_blob_storage.hpp"
+#include "routeloom/crc32.hpp"
 #include "test_sdkv1.hpp"
 
 namespace {
@@ -564,6 +565,25 @@ void test_proxy_policy_store() {
   nvs.read_error = true;
   CHECK(!reboot.load(0x5173, stored, found).ok() && !found);
   nvs.disarm();
+  // The original 60-byte format remains readable without activating a list.
+  auto legacy = nvs.blobs[kProxyPolicyKey];
+  legacy.resize(60);
+  legacy[5] = 1;
+  legacy[7] = 60;
+  const auto crc = crc32_iso_hdlc(ByteView{legacy.data(), 56});
+  for (std::size_t i = 0; i < 4; ++i) legacy[56 + i] = static_cast<std::uint8_t>(crc >> (24 - 8 * i));
+  nvs.blobs[kProxyPolicyKey] = legacy;
+  CHECK(reboot.load(0x5173, stored, found).ok() && found && stored.expected.count == 0);
+  // A full expected list survives commit/readback; malformed lists never land.
+  auto expected = record_of(open3);
+  expected.expected.count = 3;
+  expected.expected.ttl_s = 300;
+  for (std::size_t i = 0; i < 3; ++i) expected.expected.marks[i].fill(static_cast<std::uint8_t>(i + 1));
+  CHECK(reboot.commit(expected).ok());
+  CHECK(reboot.load(0x5173, stored, found).ok() && found &&
+        stored.expected.marks == expected.expected.marks && stored.expected.ttl_s == 300);
+  expected.expected.count = 4;
+  CHECK(!reboot.commit(expected).ok());
   CHECK(reboot.erase().ok());
   CHECK(nvs.blobs.count(kProxyPolicyKey) == 0);
   CHECK(reboot.load(0x5173, stored, found).ok() && !found);
@@ -588,6 +608,13 @@ void test_join_policy_store() {
   CHECK(rejects([](JoinPolicy& p) { p.isolation_notice_s = 299; }));
   CHECK(rejects([](JoinPolicy& p) { p.start_jitter_ms = 60001; }));
   CHECK(rejects([](JoinPolicy& p) { p.role = static_cast<std::uint8_t>(kMemberRoleGateway); }));
+  CHECK(rejects([](JoinPolicy& p) { p.search_ms = 999; }));
+  CHECK(rejects([](JoinPolicy& p) { p.listen_ms = 60001; }));
+  policy.smart_join = true;
+  policy.boot_join = false;
+  policy.same_site_only = true;
+  policy.listen_ms = 1000;
+  policy.search_ms = 30000;
   policy.removal_holdoff_s = 60;
   policy.isolation_notice_s = 300;
   policy.start_jitter_ms = 60000;
