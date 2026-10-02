@@ -70,6 +70,8 @@ void set_notify_wait_hook(void (*hook)(void*), void* context) noexcept;
 // Ticks passed to the most recent blocking notification take (0 if signalled).
 unsigned last_peek_ticks() noexcept;
 bool log_contains(const char* text) noexcept;
+void set_random(std::uint32_t value) noexcept;
+unsigned random_calls() noexcept;
 
 // Pop the oldest captured TX frame; false when the capture ring is empty.
 bool pop_tx(TxFrame& out) noexcept;

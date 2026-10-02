@@ -486,6 +486,10 @@ def e2e(tier: str, shard: str, build: str, test_bin: str | None) -> list[Step]:
         raise SystemExit("\n".join(errors))
     all_cases = e2e_cases(rows, tier, shard)
     cases = [case for case in all_cases if "::object::" not in case]
+    load_case = "site::owner_mesh::load::mesh_m08_repeated_bursts_account_for_every_send"
+    gateway_load = load_case in cases
+    if gateway_load:
+        cases.remove(load_case)
     env = {"ROUTELOOM_OWNER_PEER": str(ROOT / build / "tests/cpp/routeloom_joiner_interop_peer"),
            "ROUTELOOM_MESH_PEER": str(ROOT / build / "tests/cpp/routeloom_owner_mesh_peer"),
            "UBSAN_OPTIONS": "halt_on_error=1", "ROUTELOOM_E2E_TIER": tier}
@@ -497,6 +501,22 @@ def e2e(tier: str, shard: str, build: str, test_bin: str | None) -> list[Step]:
             Step(["assert-peer-version", env["ROUTELOOM_MESH_PEER"], MESH_PEER_VERSION]),
             Step([*argv, "--nocapture", f"--test-threads={1 if tier == 'nightly' else 2}", *cases],
                  cwd="." if test_bin else "host", env=env, forbid=SKIP_MARK, require=cases)]
+    if gateway_load:
+        # Four sources can retain 192 terminal pins in the 60 s horizon.
+        # Use the existing gateway pool; never shorten exactly-once retention.
+        gateway_build = build + "-gateway"
+        gateway_env = {**env, "ROUTELOOM_MESH_PEER_GW":
+                       str(ROOT / gateway_build / "tests/cpp/routeloom_owner_mesh_peer")}
+        steps += [
+            Step(["cmake", "-S", ".", "-B", gateway_build,
+                  "-DROUTELOOM_ENABLE_SANITIZERS=ON", "-DCMAKE_BUILD_TYPE=Debug",
+                  "-DROUTELOOM_DEDUP_PROFILE=gateway"]),
+            Step(["cmake", "--build", gateway_build, "--parallel", str(min(int(JOBS), 4)),
+                  "--target", "routeloom_owner_mesh_peer"]),
+            Step([*argv, "--nocapture", "--test-threads=2", load_case],
+                 cwd="." if test_bin else "host", env=gateway_env,
+                 forbid=SKIP_MARK, require=[load_case]),
+        ]
     object_env = {**env,
                   "ROUTELOOM_MESH_PEER": str(ROOT / (build + "-object") / "tests/cpp/routeloom_owner_mesh_peer"),
                   "ROUTELOOM_MESH_PEER_B": env["ROUTELOOM_MESH_PEER"]}

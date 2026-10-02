@@ -27,10 +27,20 @@ fn mesh_m08_repeated_bursts_account_for_every_send() {
         }
     }
     let nodes = if max_nodes() == 32 { 5 } else { 3 };
-    let Some(mut world) = route_loss_world("m08", Switch::new(&Topology::full(nodes)), false)
-    else {
+    let mut switch = Switch::new(&Topology::full(nodes));
+    // Pin each initial binding to the gateway before exposing other peers.
+    // Full audibility alone does not require discovery to bind every pair.
+    for from in 1..nodes {
+        for to in 1..nodes {
+            switch.set_audible(from, to, false);
+        }
+    }
+    let Some(mut world) = route_loss_world("m08", switch, false) else {
         return;
     };
+    for peer in 1..nodes {
+        world.switch.heal(peer);
+    }
     // Start the load after the full topology and its improvement hold settle.
     world.pump_until(2400, |snaps| {
         snaps.iter().enumerate().all(|(index, snap)| {
@@ -57,6 +67,7 @@ fn mesh_m08_repeated_bursts_account_for_every_send() {
     let mut terminal = std::collections::BTreeMap::new();
     let mut refused = 0;
     for round in 0..32 {
+        let round_end = world.now + 10_000;
         if round < 30 {
             for source in 1..nodes {
                 let results = world.peers[source].tracked_burst(16, testkit::GATEWAY);
@@ -76,8 +87,15 @@ fn mesh_m08_repeated_bursts_account_for_every_send() {
             }
         }
         // Keep the 10 s burst cadence and allow every send its 30 s lifetime.
-        for _ in 0..400 {
-            world.step(25);
+        let mut draining = true;
+        while world.now < round_end {
+            // Stub callbacks have no transport latency. Drive accepted work
+            // before a coarse idle tick can manufacture a hop timeout.
+            world.step((if draining { 1 } else { 25 }).min(round_end - world.now));
+            draining = world
+                .snaps
+                .iter()
+                .any(|s| s.queued != 0 || s.app_tx.iter().any(|tx| tx.state < DELIVERY_DELIVERED));
             for (peer, &hop) in world.peers.iter_mut().skip(1).zip(&routes) {
                 assert_eq!(peer.next_hop(testkit::GATEWAY), hop, "no route flap");
             }
