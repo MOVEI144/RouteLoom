@@ -467,6 +467,22 @@ class Scenarios(unittest.TestCase):
         code, _, err = run_main(["scenarios"])
         self.assertEqual((code, err), (0, ""))
 
+    def test_repeated_bursts_use_gateway_dedup_without_changing_other_peers(self):
+        case = "site::owner_mesh::load::mesh_m08_repeated_bursts_account_for_every_send"
+        for tier in ("pr", "nightly"):
+            with self.subTest(tier=tier):
+                steps = check.e2e(tier, "mesh", "build-e2e", None)
+                load = next(step for step in steps if case in (step.require or ()))
+                self.assertEqual(load.require, [case])
+                self.assertEqual(load.env["ROUTELOOM_MESH_PEER_GW"],
+                                 str(ROOT / "build-e2e-gateway/tests/cpp/routeloom_owner_mesh_peer"))
+                self.assertEqual(load.env["ROUTELOOM_MESH_PEER"],
+                                 str(ROOT / "build-e2e/tests/cpp/routeloom_owner_mesh_peer"))
+                self.assertTrue(any("-DROUTELOOM_DEDUP_PROFILE=gateway" in step.argv
+                                    for step in steps))
+                other = next(step for step in steps if step.require and step is not load)
+                self.assertNotIn("ROUTELOOM_MESH_PEER_GW", other.env)
+
     def test_object_rows_are_live_and_use_feature_peers(self):
         for row_id in ("M10", "P04-O"):
             self.assertEqual(self.rows(row_id)[0]["status"], "live")
