@@ -23,6 +23,8 @@ pub(super) struct PendingFrame {
 /// stragglers, D04 §5.1).
 #[allow(dead_code)]
 pub(super) struct UsbHost {
+    /// Optional production receive-log/API1 endpoint for consumer scenarios.
+    pub(super) receive_state: Option<Arc<State>>,
     pub(super) session: DeviceSession,
     pub(super) decoder: StreamDecoder,
     pub(super) request: u64,
@@ -80,6 +82,7 @@ impl UsbHost {
         session.credentials =
             crate::HostlinkCredentials::Directory(hostlink_credentials.to_path_buf());
         Self {
+            receive_state: None,
             session,
             decoder: StreamDecoder::default(),
             request: 1,
@@ -293,6 +296,20 @@ impl UsbHost {
                 self.session_losses += 1;
             }
             let Some(inner) = inbound.inner else { continue };
+            if let Some(state) = &self.receive_state {
+                *state.session.lock().expect("receive session") = crate::SessionInfo {
+                    authenticated: self.session.phase == SessionPhase::Active,
+                    id: Some(frame.session),
+                    node: self.hello_node,
+                    boot: self.hello_boot,
+                    network: self.hello_network,
+                    capability: self.hello_capability,
+                    version: Some(2),
+                };
+                if kind == FrameKind::DataFromMesh {
+                    crate::record_frame(state, &frame, &inner, crate::now_ms());
+                }
+            }
             let request_at = |at: usize| {
                 inner
                     .get(at..at + 8)
