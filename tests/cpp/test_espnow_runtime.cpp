@@ -666,6 +666,32 @@ void test_notification_keeps_external_and_racing_wakes() {
   runtime.stop();
 }
 
+void test_wake_budget_stops_radio_submissions() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize());
+  CHECK(runtime.start());
+  CHECK(runtime.register_neighbor(kPeer, peer_mac(), 1));
+  CHECK(runtime.node().set_pause(routeloom::PauseReason::SurveyVisit,
+                                 routeloom::pause::kBackgroundWork));
+  const std::uint8_t frame = 42;
+  runtime.set_radio_deadline(1000);
+  idf_stub::set_now_us(999000);
+  CHECK(EspNowRuntimeTestAccess::raw_send(runtime, peer_mac()));
+  CHECK(idf_stub::complete_send(true));
+  runtime.poll_once();
+  const auto submissions = idf_stub::send_count();
+  idf_stub::set_now_us(1000000);
+  CHECK(EspNowRuntimeTestAccess::raw_send(runtime, peer_mac()).code ==
+        routeloom::StatusCode::DiscoveryBudgetExhausted);
+  CHECK(runtime.send(kPeer, 1, {&frame, 1}).code ==
+        routeloom::StatusCode::DiscoveryBudgetExhausted);
+  CHECK(idf_stub::send_count() == submissions);
+  runtime.stop();
+}
+
 void test_idle_deadline_poll_equivalence() {
   std::uint32_t polls[2]{};
   std::vector<std::string> diagnostics[2];
@@ -1500,6 +1526,7 @@ void test_hil_rx_diagnostics_are_owner_serialized() {
 
 int main() {
   test_notification_keeps_external_and_racing_wakes();
+  test_wake_budget_stops_radio_submissions();
   test_idle_deadline_poll_equivalence();
   test_active_deadline_noop();
   test_hil_rx_diagnostics_are_owner_serialized();

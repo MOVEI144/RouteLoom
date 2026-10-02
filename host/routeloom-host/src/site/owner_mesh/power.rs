@@ -10,6 +10,7 @@ fn mesh_f03_g5_deadlines_survive_host_wall_skew() {
     };
     let start = world.now;
     let before = world.snaps[0].rx_count;
+    world.peers[1].app_send(testkit::GATEWAY, b"wall-skew");
     let due = world.peers[1].deadline();
     // The authority receives explicit wall values, while every peer and
     // the distributor retain the same process-monotonic time.
@@ -21,7 +22,6 @@ fn mesh_f03_g5_deadlines_survive_host_wall_skew() {
         });
         assert_eq!(world.peers[1].deadline(), due);
     }
-    world.peers[1].app_send(testkit::GATEWAY, b"wall-skew");
     let mut polls = 0;
     while world.now - start < 5000 && world.snaps[0].rx_count == before {
         let deadline = world
@@ -110,16 +110,23 @@ fn mesh_f09_member_unified_sleep_and_isolated_day() {
     // one external timer event, rather than 86 million empty polls.
     world.step(duration);
     world.switch.heal(leaf);
+    let wake_at = world.now;
     let woke = world.peers[leaf].sleep(2, world.now, duration);
     assert_eq!(woke.0, 0, "Device wake");
     assert!(!woke.3, "security unparked");
     assert_eq!(woke.5, 1);
+    // Deep sleep discards CPU RAM. The platform handoff uses the existing
+    // peer respawn path, retaining flash and booting a fresh real Device.
+    // The 24 h interval cannot reuse the old session's remaining lifetime.
+    world.peers[leaf].power_cut();
+    world.step(25);
     world.pump_until(2400, |snaps| {
         snaps[leaf].authority_ready && snaps[leaf].join_confirmed
     });
-    let before = world.snaps[0].rx_count;
-    world.peers[leaf].app_send(testkit::GATEWAY, b"after-sleep");
-    world.pump_until(2400, |snaps| snaps[0].rx_count > before);
-    assert_eq!(world.snaps[0].rx_count, before + 1);
-    assert_eq!(world.snaps[0].rx, b"after-sleep");
+    assert_eq!(world.peers[leaf].sleep(5, world.now, 40_000).0, 0);
+    mesh::deliver_each(&mut world, leaf, 0, 10, b"after-sleep");
+    assert!(
+        world.now - wake_at <= 60_000,
+        "10/10 within the wake recovery bound"
+    );
 }
