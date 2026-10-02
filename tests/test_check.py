@@ -498,6 +498,8 @@ class Scenarios(unittest.TestCase):
         self.assertEqual(set.union(*cases), set(check.e2e_cases(self.data, "pr", "all")))
         self.assertFalse(any(a & b for i, a in enumerate(cases) for b in cases[i + 1:]))
         self.assertTrue(any("cpp_joiner_removed_rediscovers" in c for c in cases[1]))
+        self.assertTrue(any("mesh_j08_k1b_isolated_miss_recovers" in c for c in cases[0]))
+        self.assertTrue(any("mesh_j08_k1b_pull_answers_dropped" in c for c in cases[2]))
         self.assertFalse(any("mesh_k01" in c or "three_hops" in c for group in cases for c in group))
 
     def test_interop_requires_every_live_pr_case(self):

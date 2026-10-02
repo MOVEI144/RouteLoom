@@ -303,6 +303,8 @@ def scenario_errors(data: dict, root: Path = ROOT) -> list[str]:
         if rid in seen:
             errors.append(f"{rid}: duplicate id")
         seen.add(rid)
+        if row.get("shard") is not None and row["shard"] not in E2E_SHARDS:
+            errors.append(f"{rid}: shard {row['shard']!r}")
         tiers = set(row["tier"])
         if not tiers or tiers - {"pr", "nightly", "hil"}:
             errors.append(f"{rid}: tier {row['tier']!r}")
@@ -385,14 +387,18 @@ def live_cases(data: dict, source: str, tier: str = "pr") -> list[str]:
 E2E_SHARDS = ("mesh", "join", "fault")
 
 
+def scenario_shard(row: dict) -> str:
+    return row.get("shard", "mesh" if row["family"] == "mesh" else
+                   "join" if row["family"] == "join" else "fault")
+
+
 def e2e_cases(data: dict, tier: str, shard: str) -> list[str]:
     refs = []
     seen = set()
     for row in data["rows"]:
         if row["status"] != "live" or not ({"pr", tier} & set(row["tier"])):
             continue
-        group = ("mesh" if row["family"] == "mesh" else
-                 "join" if row["family"] == "join" else "fault")
+        group = scenario_shard(row)
         for ref in row["test"]:
             if ref in seen:
                 continue
@@ -795,8 +801,7 @@ def main(argv: list[str] | None = None) -> int:
             failed = getattr(steps[-1], "failed", set())
             rows = []
             for row in load_scenarios()["rows"]:
-                group = ("mesh" if row["family"] == "mesh" else
-                         "join" if row["family"] == "join" else "fault")
+                group = scenario_shard(row)
                 if args.shard != "all" and args.shard != group:
                     continue
                 cases = rust_cases(row["test"])

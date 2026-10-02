@@ -19,7 +19,10 @@ ROUTELOOM_E2E_OUT="$PWD/build/e2e-out" python3 tools/check.py e2e --tier pr --sh
 compiled Rust libtest executable. The runner checks peer RPC versions, rejects
 missing peers and success-shaped skips, and requires every selected case to
 pass. Shards are `mesh`, `join` (including cutover), and `fault` (including
-periodic load and product API scenarios). Shared cases belong to the first row
+periodic load and product API scenarios). A row may override its `shard`: the
+two long K1b variants are split between mesh (isolation) and fault (lost Pull
+answers) to balance the measured load. Both stay required on PRs with their
+original assertions. Shared cases belong to the first row
 that names them, so shards do not duplicate work. All existing joiner interop
 cases remain required. `matrix-summary.json` records the revision, tier, wall
 time and row verdicts. Mixed CTest/Rust rows remain `NOT_RUN` in that summary
@@ -36,6 +39,18 @@ peak RSS beside the reports. These limits are budgets; a completed GitHub run
 is needed to establish CI wall time. The `long` CTest label keeps the 100-node
 models out of sanitizer core cells; sanitizer-free profile cells still run
 them. M07-N's 20-seed/24-hour campaign remains pending.
+
+The first local PR-shard run passed all 89 selected cases on a shared host:
+
+| Shard before K1b redistribution | Cases | Wall time | Peak RSS |
+| --- | ---: | ---: | ---: |
+| mesh | 25 | 980.92 s | 269,272 KiB |
+| join | 35 | 2,115.72 s | 254,300 KiB |
+| fault | 29 | 740.16 s | 148,804 KiB |
+
+These runs exceeded ten minutes and do not establish the CI budget. The
+redistributed 26/33/30-case layout preserves the same 89 cases; its wall time
+and the prepare job still need measurement on GitHub runners.
 
 K01/K03/K05 retain ignored reproducers: authenticated HelloAck reports an
 epoch-qualified network that API1 rejects as outside wire-v1's range
