@@ -11,6 +11,7 @@
 
 #include "routeloom/device.hpp"
 #include "routeloom/status.hpp"
+#include "routeloom/secure_clear.hpp"
 
 namespace {
 using namespace routeloom;
@@ -506,6 +507,15 @@ rl_status_code_t rl_dev_connectivity(rl_dev_t* device, rl_dev_connectivity_t* ou
   return RL_STATUS_OK;
 }
 
+rl_status_code_t rl_dev_join_mark(rl_dev_t* device, uint8_t out[16]) {
+  if (device == nullptr || device->device == nullptr || out == nullptr) return RL_STATUS_INVALID_ARGUMENT;
+  sdkv1::JoinMark mark{};
+  const Status status = device->device->join_mark(mark);
+  std::memcpy(out, mark.data(), mark.size());
+  secure_clear(mark);
+  return to_c(status);
+}
+
 rl_status_code_t rl_dev_request_join(rl_dev_t* device, uint32_t* out_operation) {
   if (device == nullptr || device->device == nullptr || out_operation == nullptr) {
     return RL_STATUS_INVALID_ARGUMENT;
@@ -528,7 +538,8 @@ rl_status_code_t rl_dev_leave(rl_dev_t* device, uint32_t* out_operation) {
 
 rl_status_code_t rl_dev_set_join_policy(rl_dev_t* device, const rl_dev_join_policy_t* policy,
                                         const uint32_t expected_revision, uint32_t* out_revision) {
-  if (device == nullptr || device->device == nullptr || !dev_sized(policy) ||
+  if (device == nullptr || device->device == nullptr || policy == nullptr ||
+      policy->version != RL_DEV_API_VERSION || policy->struct_size < offsetof(rl_dev_join_policy_t, smart_join) ||
       out_revision == nullptr) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
@@ -540,6 +551,16 @@ rl_status_code_t rl_dev_set_join_policy(rl_dev_t* device, const rl_dev_join_poli
   converted.isolation_notice_s = policy->isolation_notice_s;
   converted.start_jitter_ms = policy->start_jitter_ms;
   converted.role = policy->role;
+  if (policy->struct_size >= sizeof(*policy)) {
+    if (policy->smart_join > 1 || policy->boot_join > 1 || policy->same_site_only > 1) {
+      return RL_STATUS_INVALID_ARGUMENT;
+    }
+    converted.smart_join = policy->smart_join != 0;
+    converted.boot_join = policy->boot_join != 0;
+    converted.same_site_only = policy->same_site_only != 0;
+    converted.listen_ms = policy->smart_join ? policy->listen_ms : 3000;
+    converted.search_ms = policy->smart_join ? policy->search_ms : 60000;
+  }
   std::uint32_t revision = 0;
   const Status status = device->device->set_join_policy(converted, expected_revision, revision);
   *out_revision = revision;
@@ -548,7 +569,8 @@ rl_status_code_t rl_dev_set_join_policy(rl_dev_t* device, const rl_dev_join_poli
 
 rl_status_code_t rl_dev_join_policy(rl_dev_t* device, rl_dev_join_policy_t* out,
                                     uint32_t* out_revision) {
-  if (device == nullptr || device->device == nullptr || !dev_sized(out) ||
+  if (device == nullptr || device->device == nullptr || out == nullptr || out->version != RL_DEV_API_VERSION ||
+      out->struct_size < offsetof(rl_dev_join_policy_t, smart_join) ||
       out_revision == nullptr) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
@@ -566,7 +588,13 @@ rl_status_code_t rl_dev_join_policy(rl_dev_t* device, rl_dev_join_policy_t* out,
   c.isolation_notice_s = policy.isolation_notice_s;
   c.start_jitter_ms = policy.start_jitter_ms;
   c.role = policy.role;
-  *out = c;
+  c.smart_join = policy.smart_join;
+  c.boot_join = policy.boot_join;
+  c.same_site_only = policy.same_site_only;
+  c.listen_ms = policy.listen_ms;
+  c.search_ms = policy.search_ms;
+  c.struct_size = out->struct_size;
+  std::memcpy(out, &c, out->struct_size < sizeof(c) ? out->struct_size : sizeof(c));
   *out_revision = revision;
   return RL_STATUS_OK;
 }

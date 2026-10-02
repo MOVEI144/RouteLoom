@@ -323,6 +323,9 @@ class Device {
   ConnectivitySnapshot connectivity() const noexcept;
   // Unassigned: the zero-touch scan starts now (avoid holds stay). Member:
   // re-verifies the membership with the site. Ends with on_operation.
+  // Opaque installation mark for the expected-device policy. Keep it
+  // private: possession permits correlating this device's light probes.
+  Status join_mark(sdkv1::JoinMark& out) noexcept;
   Status request_join(OperationId& operation) noexcept;
   // Leaves the site: the intent is durable before anything is erased, and
   // a power cut resumes it at the next boot. The site membership, resume
@@ -458,6 +461,8 @@ class Device {
   OperationId operation_id_{0};  // the last one issued; live while operation_ != None
   std::uint32_t operation_denies_{0};
   std::uint32_t operation_pendings_{0};
+  bool smart_join_{false};
+  std::uint32_t search_ms_{60000};
   std::uint32_t isolation_notice_ms_{0};  // JoinPolicy
   std::uint16_t stage_reason_{0};
   std::uint16_t connectivity_reason_{0};

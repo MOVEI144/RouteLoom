@@ -51,6 +51,7 @@ ESP-IDF の機器は `components/routeloom_device` の `routeloom::Device` を�
 | `connectivity()` | 自現場の gateway に届くか（scope = SiteGateway）。Unknown／Reachable／Degraded／Isolated／Sleeping、`since_ms`、boot、最後の gateway の証拠の時刻、理由 ID。証拠は gateway 本人から直接受けた認証済みの通信と、E2E の検証に通った gateway の message・制御返信・END_RECEIPT（RSSI、表への登録、中継機による経路 lease の更新は数えない）。証拠が 60 s 以内で経路があれば Reachable、それより古いか経路が無ければ Degraded、120 s 無ければ Isolated。所属とは独立で、Isolated でも所属は捨てない。gateway 自身は Reachable。Sleeping は sleep の経路（V2-15）が設定する |
 | `request_join(op)` | 未所属：zero-touch の scan の待ちを今終える（避ける一覧は守る）。所属済み：既存の所属を site に再検証させる。結果は `on_operation`（JOINED／JOIN_DENIED／JOIN_PENDING／JOIN_TIMEOUT（60 s）／RECOVERY_REQUIRED）。DevRam は Unsupported |
 | `leave(op)` | RLX1 に LocalLeave の意図（schema 2）を書いてから消す。消すのは rlsite・rlrevo・rlres2・受付方針と RAM の session、残すのは本人（RLI1）・rlboot・rlcfg・rlkeys・JoinPolicy。自分から離れたので holdoff も RLV1 も残さない。意図の保存後は戻る前に新規受付と送信を止める。消去の失敗は Recovery と RECOVERY_REQUIRED で通知し、耐久 intent は再起動から再開できる。未送信の仕事は `CANCELLED_LEAVE`、送信済みは Indeterminate で終わる。どの段で電源が切れても次の起動で先へ進めて完了する。完了すると `on_membership(LEFT)` と `on_operation(LEFT)` を出して未所属で再起動する。旧現場への通知はしない（host の台帳は変えない） |
+| `join_mark(mark)` | 本人の秘密鍵から導く 16 B の private installation mark。管理者へ provisioning 経路で渡す。認可ではない。詳細は [smart join](../design/v2/smart-join.md) |
 | `set_join_policy(policy, expected_revision, revision)`／`join_policy(policy, revision)` | 下の JoinPolicy。範囲外は InvalidArgument、revision の不一致は Conflict。RLJP1（rlmaint の `j0`）に書いて読み戻してから次の判断に効かせる。再起動と leave の後も残る |
 | `capabilities()` | 役割、MemberEdhoc か、`security_profile`（DevRam は Development、MemberEdhoc は Candidate）、USB gateway、payload の上限など |
 
@@ -79,8 +80,13 @@ C++ の各関数に対応する `rl_dev_*` を置く（`rl_dev_send`、`rl_dev_s
 | `isolation_notice_s` | 0（無効） | 0 または 300〜2592000 |
 | `start_jitter_ms`（未所属で起動したときの開始の散らし） | 0 | 0〜60000 |
 | `role`（名乗る役割の bit、0 は image の既定） | 0 | endpoint／relay、gateway は gateway の image だけ |
+| `smart_join` | false（互換） | true で軽い問い合わせと予定一覧を使う |
+| `boot_join` | true | smart mode の未所属の起動時探索。false は API のきっかけだけ |
+| `same_site_only` | false | true は保持中の現場だけ。未所属では選ばない |
+| `listen_ms` | 3000 | 0〜60000 |
+| `search_ms` | 60000 | 1000〜600000（聞く時間を含む探索全体） |
 
-既定は方針ができる前の固定値と同じで、既定のままなら挙動は変わらない。有界の backoff と撤去後の holdoff を無効にする値は範囲検査で拒否する。避ける一覧そのものは RAM に置き、再起動で消える。
+既定は方針ができる前の固定値と同じで、既定のままなら挙動は変わらない。有界の backoff と撤去後の holdoff を無効にする値は範囲検査で拒否する。避ける一覧そのものは RAM に置き、再起動で消える。smart mode の `isolation_notice_s` は保持中の現場を 1 回だけ再検証するきっかけにもなる。[予定一覧・wire・追跡の限界](../design/v2/smart-join.md)を参照。
 
 ### 設計のみ（未実装）
 

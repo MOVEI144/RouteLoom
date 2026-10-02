@@ -525,6 +525,7 @@ class Scenarios(unittest.TestCase):
                 self.assertNotIn(case, all_cases)
         self.assertIn("site::owner_mesh::kg::mesh_k05_cursor_replay_gap_and_epoch_change",
                       all_cases)
+        self.assertIn("site::owner_mesh::mesh::mesh_line_three_hops_delivers", all_cases)
 
     def test_interop_requires_every_live_pr_case(self):
         steps = [s for s in check.interop() if s.require is not None]

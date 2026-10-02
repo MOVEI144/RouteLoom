@@ -2592,3 +2592,42 @@ fn live_owner_power_cut_keeps_group_keys() {
     let _ = std::fs::remove_file(&flash_path);
     let _ = std::fs::remove_file(&ext_path);
 }
+
+/// J02b/e: the real C++ joiner selects only scheduled B; its mark cannot
+/// turn an Authority deny into membership. Missing lists stop at the deadline.
+#[test]
+fn smart_join_two_sites_and_authority_boundary() {
+    for (tag, expected, denied) in [
+        ("smart-allow", 1u8, false),
+        ("smart-deny", 1, true),
+        ("smart-missing", 255, false),
+    ] {
+        let Some(mut world) = World::start(tag, 0x197) else {
+            return;
+        };
+        world.sites[0]
+            .decider
+            .assign(DEVICE_NODE, Assignment::Here(Role::Endpoint));
+        world.sites[1].decider.assign(
+            DEVICE_NODE,
+            if denied {
+                Assignment::Elsewhere
+            } else {
+                Assignment::Here(Role::Endpoint)
+            },
+        );
+        let mut command = vec![b'S', expected];
+        command.extend_from_slice(&60000u32.to_le_bytes());
+        world.peer.send(&command);
+        let tick = world.pump_until(2500, |t| t.snap.action_pending || t.snap.state == 0);
+        assert!(world.sites[0].link.discovered().unwrap().is_empty());
+        if expected == 1 && !denied {
+            check_terminal(&tick.snap, MEMBER_READY);
+            world.check_member_material(1, &tick.member);
+            assert_eq!(tick.snap.store_site, SITE_B);
+        } else {
+            assert_eq!(tick.snap.store_site, 0);
+            assert!(world.member_row(1).is_none());
+        }
+    }
+}

@@ -183,7 +183,7 @@ Status zt_discover_body_encode(const ZtDiscoverBody& body,
   const Status status = zt_discover_body_validate(body);
   if (!status) return status;
   std::uint8_t* p = out.bytes.data();
-  p[0] = kZtBodyVersion;
+  p[0] = body.smart ? kZtBodyVersion : 3;
   p[1] = kZtClass;
   put_u16(p + 2, body.preferred_site_hint != 0 ? kZtDiscoverPreferredValid : 0);
   put_u32(p + 4, body.profile_bits);
@@ -191,18 +191,22 @@ Status zt_discover_body_encode(const ZtDiscoverBody& body,
   put_u32(p + 12, body.preferred_site_hint);
   put_u32(p + 16, body.avoid_site_hints[0]);
   put_u32(p + 20, body.avoid_site_hints[1]);
-  out.size = kZtDiscoverBodySize;
+  if (body.smart) std::memcpy(p + 24, body.mark.data(), body.mark.size());
+  out.size = body.smart ? kZtDiscoverBodySize : 24;
   return Status::success();
 }
 
 Status zt_discover_body_decode(const ByteView encoded, ZtDiscoverBody& out) noexcept {
-  if (encoded.data == nullptr || encoded.size != kZtDiscoverBodySize ||
-      encoded.data[0] != kZtBodyVersion || encoded.data[1] != kZtClass) {
+  if (encoded.data == nullptr || (encoded.size != 24 && encoded.size != kZtDiscoverBodySize) ||
+      (encoded.data[0] == 3 ? encoded.size != 24 :
+       encoded.data[0] != kZtBodyVersion || encoded.size != kZtDiscoverBodySize) || encoded.data[1] != kZtClass) {
     return malformed("zt discover body");
   }
   const std::uint8_t* p = encoded.data;
   const std::uint16_t flags = get_u16(p + 2);
   ZtDiscoverBody body{};
+  body.smart = p[0] == kZtBodyVersion;
+  if (body.smart) std::memcpy(body.mark.data(), p + 24, body.mark.size());
   body.profile_bits = get_u32(p + 4);
   body.org_hint = get_u32(p + 8);
   body.preferred_site_hint = get_u32(p + 12);
@@ -223,7 +227,7 @@ bool zt_discover_avoids(const ZtDiscoverBody& body, const std::uint32_t site_hin
 }
 
 Status zt_offer_body_validate(const ZtOfferBody& body) noexcept {
-  if ((body.flags & ~kZtOfferFlagMask) != 0) return invalid("zt offer flags");
+  if ((body.flags & ~(body.smart ? kZtOfferFlagMask : 0x03)) != 0) return invalid("zt offer flags");
   return Status::success();
 }
 
@@ -232,7 +236,7 @@ Status zt_offer_body_encode(const ZtOfferBody& body, ByteBuffer<kZtOfferBodySize
   const Status status = zt_offer_body_validate(body);
   if (!status) return status;
   std::uint8_t* p = out.bytes.data();
-  p[0] = kZtBodyVersion;
+  p[0] = body.smart ? kZtBodyVersion : 3;
   p[1] = kZtClass;
   p[2] = body.density;
   p[3] = body.flags;
@@ -249,11 +253,12 @@ Status zt_offer_body_encode(const ZtOfferBody& body, ByteBuffer<kZtOfferBodySize
 
 Status zt_offer_body_decode(const ByteView encoded, ZtOfferBody& out) noexcept {
   if (encoded.data == nullptr || encoded.size != kZtOfferBodySize ||
-      encoded.data[0] != kZtBodyVersion || encoded.data[1] != kZtClass) {
+      (encoded.data[0] != 3 && encoded.data[0] != kZtBodyVersion) || encoded.data[1] != kZtClass) {
     return malformed("zt offer body");
   }
   const std::uint8_t* p = encoded.data;
   ZtOfferBody body{};
+  body.smart = p[0] == kZtBodyVersion;
   body.density = p[2];
   body.flags = p[3];
   std::memcpy(body.cookie.data(), p + 4, kJoinCookieSize);
@@ -1199,7 +1204,7 @@ bool zt_rld1_frame(const autonomy::Rld1Envelope& env) noexcept {
   switch (env.kind) {
     case FrameType::Discover:
     case FrameType::Offer:
-      return env.body_size >= 1 && env.body[0] == kZtBodyVersion;
+      return env.body_size >= 1 && (env.body[0] == 3 || env.body[0] == kZtBodyVersion);
     case FrameType::BootstrapAuth:
       return env.body_size >= 2 &&
              env.body[1] >= static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage) &&

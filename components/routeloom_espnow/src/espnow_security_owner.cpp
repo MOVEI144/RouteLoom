@@ -1104,13 +1104,14 @@ void EspNowSecurityOwner::apply_proxy_policy(const ByteView tail) noexcept {
     record.generation = set.generation;
     record.zero_touch_open = set.zero_touch_open;
     record.content = set.content;
+    record.expected = set.expected;
     const Status committed = store.commit(record);
     const Status readback = store.load(site_id, stored, has);
     if (!readback) coordinator().set_proxy_policy(site_id, false);
     if (!committed || !readback) status = sdkv1::ProxyPolicyStatus::StorageFailed;
   }
   if (status == sdkv1::ProxyPolicyStatus::Applied && has) {
-    coordinator().set_proxy_policy(site_id, stored.zero_touch_open);
+    coordinator().set_proxy_policy(site_id, stored.zero_touch_open, &stored.expected, runtime_->now_ms());
   }
   std::array<std::uint8_t, sdkv1::kProxyPolicyAckSize> ack{};
   if (!sdkv1::proxy_policy_ack_encode(status, has ? stored.generation : 0, ack)) return;

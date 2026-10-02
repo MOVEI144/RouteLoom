@@ -14,11 +14,13 @@
 #define ROUTELOOM_WIRE_MAJOR 2  /* Mesh wire major */
 #define ROUTELOOM_WIRE_MINOR 0  /* Mesh wire minor */
 #define ROUTELOOM_RLD1_VERSION 1  /* RLD1 carrier */
-#define ROUTELOOM_RLD1_ZT_BODY 3  /* RLD1 ZeroTouch body */
+#define ROUTELOOM_RLD1_ZT_BODY 4  /* RLD1 ZeroTouch body */
 #define ROUTELOOM_HOSTLINK_PROTOCOL 2  /* HostLink (RLU1) protocol */
 #define ROUTELOOM_HOSTOPS_SCHEMA 1  /* HostOps schema */
 #define ROUTELOOM_HOSTOPS_JOIN_RELAY_SCHEMA 2  /* HostOps join relay schema */
 #define ROUTELOOM_AUTHORITY_ENVELOPE 1  /* AuthorityEnvelope */
+#define ROUTELOOM_STORE_PROXY_POLICY_FORMAT 2  /* Proxy policy record */
+#define ROUTELOOM_STORE_JOIN_POLICY_FORMAT 2  /* Device join policy record */
 #define ROUTELOOM_STORE_AUTHORITY_LEDGER_FORMAT 1  /* Authority ledger format */
 #define ROUTELOOM_STORE_AUTHORITY_LEDGER 1  /* Authority ledger (device) */
 #define ROUTELOOM_STORE_CONFIG_JOURNAL_FORMAT 2  /* Config journal format (device) */

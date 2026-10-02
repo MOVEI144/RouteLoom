@@ -15,7 +15,7 @@ pub const WIRE_MINOR: u32 = 0;
 /// RLD1 carrier.
 pub const RLD1_VERSION: u32 = 1;
 /// RLD1 ZeroTouch body.
-pub const RLD1_ZT_BODY: u32 = 3;
+pub const RLD1_ZT_BODY: u32 = 4;
 /// HostLink (RLU1) protocol.
 pub const HOSTLINK_PROTOCOL: u32 = 2;
 /// HostOps schema.
@@ -28,6 +28,10 @@ pub const AUTHORITY_ENVELOPE: u32 = 1;
 pub const API1_ENVELOPE: u32 = 1;
 /// API1 caps_version.
 pub const API1_CAPS: u32 = 2;
+/// Proxy policy record.
+pub const STORE_PROXY_POLICY_FORMAT: u32 = 2;
+/// Device join policy record.
+pub const STORE_JOIN_POLICY_FORMAT: u32 = 2;
 /// Authority ledger format.
 pub const STORE_AUTHORITY_LEDGER_FORMAT: u32 = 1;
 /// Authority ledger (device).

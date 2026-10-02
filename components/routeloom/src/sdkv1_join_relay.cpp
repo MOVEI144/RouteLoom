@@ -110,6 +110,11 @@ Status ZtJoinerLink::emit(const MacAddress& destination, const FrameType kind,
   env.kind = kind;
   env.network_hint = 0;
   env.claimed_node = config_.node;
+  if (kind == FrameType::Discover && smart_discover_) {
+    env.claimed_node = 0;
+    for (std::size_t i = 8; i < 16; ++i) env.claimed_node = (env.claimed_node << 8U) | nonce_[i];
+    if (!id_valid(env.claimed_node)) env.claimed_node = 1;
+  }
   env.transaction_nonce = nonce_;
   env.capability_bits = 0;
   if (body.size != 0) std::memcpy(env.body.data(), body.data, body.size);
@@ -150,8 +155,7 @@ Status ZtJoinerLink::discover_inner(const ZtDiscoverBody& body, const MonotonicM
                                     const bool fresh_nonce) noexcept {
   (void)now_ms;
   if (!id_valid(config_.node)) return invalid("zt joiner node");
-  ByteBuffer<kZtDiscoverBodySize> encoded{};
-  Status status = zt_discover_body_encode(body, encoded);
+  Status status = zt_discover_body_validate(body);
   if (!status) return status;
   close_impl();
   // The nonce's first four bytes are the chunk object id: a zero id
@@ -167,6 +171,13 @@ Status ZtJoinerLink::discover_inner(const ZtDiscoverBody& body, const MonotonicM
     }
     if (!status || join_rld1_object_id(nonce_) == 0) return status;
   }
+  ZtDiscoverBody probe = body;
+  smart_discover_ = body.smart;
+  if (body.smart) join_probe_mark(body.mark, ByteView{nonce_.data(), nonce_.size()}, probe.mark);
+  ByteBuffer<kZtDiscoverBodySize> encoded{};
+  status = zt_discover_body_encode(probe, encoded);
+  secure_clear(probe.mark);
+  if (!status) return status;
   discover_org_hint_ = body.org_hint;
   discovering_ = true;
   status = emit(kBroadcastMac, FrameType::Discover, encoded.view());
@@ -324,6 +335,12 @@ void ZtJoinerLink::on_rld1_rx_impl(const MacAddress& source, const MacAddress& d
       if (!discovering_ || destination != config_.mac ||
           !zt_offer_frame_decode(frame, checked, offer.body) ||
           checked.transaction_nonce != nonce_) {
+        ++stats_.offers_ignored;
+        return;
+      }
+      if (smart_discover_ && (!offer.body.smart || (offer.body.flags & kZtOfferExpected) == 0 ||
+                              (offer.body.flags & kZtOfferProxyBusy) != 0 ||
+                              (offer.body.flags & kZtOfferAuthorityReachable) == 0)) {
         ++stats_.offers_ignored;
         return;
       }
@@ -630,13 +647,40 @@ void JoinProxy::handle_discover(const MacAddress& source, const MacAddress& dest
     ++stats_.offers_suppressed;
     return;
   }
-  const bool pending = offers_.find([&](const PendingOffer& offer) {
-    return offer.mac == source && offer.nonce == env.transaction_nonce;
-  }) != nullptr;
-  if (pending) return;
+  bool expected = retained;
+  if (body.smart && !retained && expected_ != nullptr && now_ms < expected_expires_) {
+    for (std::size_t i = 0; i < expected_->count && i < kExpectedJoinMax; ++i) {
+      JoinMark mark{};
+      join_probe_mark(expected_->marks[i], ByteView{env.transaction_nonce.data(), 16}, mark);
+      expected = expected || constant_time_equal(ByteView{mark.data(), mark.size()},
+                                                 ByteView{body.mark.data(), body.mark.size()});
+      secure_clear(mark);
+    }
+  }
+  // Refresh probes from the chosen MAC keep the same short reservation;
+  // other contenders remain light until that m1 arrives or its cookie expires.
+  PendingOffer* reserved = offers_.find([&](const PendingOffer& offer) {
+    return offer.offered && offer.mac == source && now_ms < offer.due_ms;
+  });
+  if (body.smart && reserved != nullptr) {
+    if (expected) {
+      reserved->nonce = env.transaction_nonce;
+      send_offer(*reserved, now_ms);
+      return;
+    }
+    offers_.release(reserved);
+  }
+  if (offers_.find([&](const PendingOffer& offer) {
+        return offer.mac == source && offer.nonce == env.transaction_nonce;
+      }) != nullptr) return;
   // An OFFER may lead to a relay, which needs the gateway's epoch: a
   // DISCOVER creates the need when the cache is missing (#116 §3.3).
-  need_gateway_epoch(now_ms);
+  if (body.smart && expected && epoch_cache_valid(now_ms) &&
+      (now_ms > ~MonotonicMs{0} - config_.cookie_bucket_ms ||
+       !epoch_cache_valid(now_ms + config_.cookie_bucket_ms))) {
+    gateway_epoch_ = 0;  // refresh before promising the cookie window
+  }
+  if (!body.smart || expected) need_gateway_epoch(now_ms);
   PendingOffer* offer = offers_.allocate();
   if (offer == nullptr) {
     ++stats_.offers_suppressed;
@@ -645,6 +689,8 @@ void JoinProxy::handle_discover(const MacAddress& source, const MacAddress& dest
   offer->mac = source;
   offer->nonce = env.transaction_nonce;
   offer->retained = retained;
+  offer->smart = body.smart;
+  offer->expected = expected;
   std::uint32_t random = 0;
   std::array<std::uint8_t, 4> bytes{};
   if (entropy_.fill(MutableByteView{bytes.data(), bytes.size()})) {
@@ -662,22 +708,33 @@ void JoinProxy::handle_discover(const MacAddress& source, const MacAddress& dest
   offer->due_ms = now_ms + delay;
 }
 
-void JoinProxy::send_offer(const PendingOffer& pending, const MonotonicMs now_ms) noexcept {
+void JoinProxy::send_offer(PendingOffer& pending, const MonotonicMs now_ms) noexcept {
   if (!open_ || (!zero_touch_open_ && !pending.retained) || !reachable_ || relay_.active ||
       membership_ != MembershipState::Member) {
     ++stats_.offers_suppressed;
     return;
   }
   ZtOfferBody body{};
+  body.smart = pending.smart;
   body.density = static_cast<std::uint8_t>(std::min<std::size_t>(offers_.size(), 255));
   // Authority-reachable only with a live gateway epoch whose reply said
   // ready; without it the device should prefer another proxy and retry
   // discovery later (#116 §3.3).
-  body.flags = 0;
-  if (reachable_ && epoch_cache_valid(now_ms) && gateway_ready_) {
+  const bool expected = pending.expected &&
+      (pending.retained || (expected_ != nullptr && now_ms < expected_expires_));
+  body.flags = pending.smart && expected ? kZtOfferExpected : 0;
+  const bool epoch_ready = epoch_cache_valid(now_ms) &&
+      (!pending.smart || (now_ms <= ~MonotonicMs{0} - config_.cookie_bucket_ms &&
+                         epoch_cache_valid(now_ms + config_.cookie_bucket_ms)));
+  if (reachable_ && epoch_ready && gateway_ready_) {
     body.flags |= kZtOfferAuthorityReachable;
   }
-  if (now_ms < next_m1_ms_) body.flags |= kZtOfferProxyBusy;
+  const bool reserved = pending.smart && offers_.find([&](const PendingOffer& offer) {
+    return offer.offered && offer.mac != pending.mac && now_ms < offer.due_ms;
+  }) != nullptr;
+  if (now_ms < next_m1_ms_ || reserved) {
+    body.flags |= kZtOfferProxyBusy;
+  }
   JoinCookieMaterial material{};
   material.requester_mac = pending.mac;
   material.nonce = pending.nonce;
@@ -695,7 +752,15 @@ void JoinProxy::send_offer(const PendingOffer& pending, const MonotonicMs now_ms
   body.load = 0;
   ByteBuffer<kZtOfferBodySize> encoded{};
   if (!zt_offer_body_encode(body, encoded)) return;
-  if (emit_rld1(pending.mac, pending.nonce, FrameType::Offer, encoded.view())) ++stats_.offers_tx;
+  if (emit_rld1(pending.mac, pending.nonce, FrameType::Offer, encoded.view())) {
+    ++stats_.offers_tx;
+    if (pending.smart && expected && !pending.offered &&
+        (body.flags & (kZtOfferProxyBusy | kZtOfferAuthorityReachable)) == kZtOfferAuthorityReachable &&
+        now_ms <= ~MonotonicMs{0} - config_.cookie_bucket_ms) {
+      pending.offered = true;
+      pending.due_ms = now_ms + config_.cookie_bucket_ms;
+    }
+  }
 }
 
 bool JoinProxy::cookie_valid(const MacAddress& mac, const JoinNonce& nonce,
@@ -1503,9 +1568,12 @@ Status JoinProxy::poll(const MonotonicMs now_ms) noexcept {
       return offer.due_ms <= now_ms;
     });
     if (due == nullptr) break;
-    const PendingOffer offer = *due;
-    offers_.release(due);
-    send_offer(offer, now_ms);
+    if (due->offered) {
+      offers_.release(due);
+    } else {
+      send_offer(*due, now_ms);
+      if (!due->offered) offers_.release(due);
+    }
   }
   if (pending_down_.used) {
     const Status retried =

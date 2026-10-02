@@ -420,6 +420,8 @@ fn policy_set<S: OperationStore>(
             "decision_mode",
             "decision_timeout_ms",
             "pending_retry_after_s",
+            "expected_devices",
+            "expected_ttl_s",
         ],
     )?;
     let service = service(ctx)?;
@@ -470,6 +472,37 @@ fn policy_set<S: OperationStore>(
                 .and_then(|v| u32::try_from(v).ok())
                 .ok_or_else(|| invalid("pending_retry_after_s must be 30..=3600"))?,
         );
+    }
+    if let Some(value) = params.get("expected_devices") {
+        let entries = value
+            .as_array()
+            .ok_or_else(|| invalid("expected_devices must be an array"))?;
+        if entries.len() > 3 {
+            return Err(invalid("expected_devices has at most 3 marks"));
+        }
+        let ttl_s = params
+            .get("expected_ttl_s")
+            .and_then(Json::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| (1..=86400).contains(v))
+            .ok_or_else(|| invalid("expected_ttl_s must be 1..=86400"))?;
+        let mut expected = crate::site::ExpectedJoins {
+            count: entries.len() as u8,
+            ttl_s,
+            ..Default::default()
+        };
+        for (i, value) in entries.iter().enumerate() {
+            let mark = value
+                .as_str()
+                .and_then(|s| crate::site::records::parse_hex(s, 16))
+                .ok_or_else(|| invalid("expected_devices entries are 16-byte hex marks"))?;
+            let mark = zeroize::Zeroizing::new(mark);
+            expected.marks[i].copy_from_slice(&mark);
+        }
+        expected.validate().map_err(invalid)?;
+        patch.expected = Some(expected);
+    } else if params.get("expected_ttl_s").is_some() {
+        return Err(invalid("expected_ttl_s requires expected_devices"));
     }
     let (result, events) = service.with(|a| a.update_policy_at(&patch, crate::mono_ms()));
     push_events(ctx, events);
