@@ -22,7 +22,7 @@ raw64標本をdirection×rate×length×neighborごとに保持しない。固定
 
 global handshake同時1、一object最大1024B。実装値を正とする（#54）：SDK v1参加搬送（`sdkv1_join_transport`）の組立は同時1件・3000ms、RLD1 discoveryのbootstrap組立（`discovery.hpp` `kReassemblySlots`）は4 slot×1024B（計4096B）で期限は`candidate_ttl_ms`（既定5000ms）。profile表の`preauth_pool` 1536BはSDK v1参加搬送の枠で、RLD1 discoveryの組立4096Bは別の`discovery_assembly_pool`に計上する。活動予算が先なら中断する。新handshakeは全送信者合算1/s burst1、入力2048B/s burst512B、公開鍵等の高価な演算4回/s burst1を初期capとする。memberの管理object2048Bとは別。
 
-Crypto worker予算100ms/1000ms、協調yield単位10msを目標、非中断可能演算の最大25msを受入条件にする。対象ライブラリが満たさなければ「強制中断できる」と偽らず、別task/実装・入場rateの改訂・profile不認定で扱う。member ACK用queueとCPU機会を保護するが、偽フレームの実RFやcallback負荷を完全排除する保証ではない。
+P-256 は優先度の低い crypto worker で実行し、Owner の最長占有 25 ms 以下を受入条件にする。非中断可能な演算の中断を前提にせず、job と結果の mailbox は各 1 件に有界化する。member ACK用queueとCPU機会を保護するが、偽フレームの実RFやcallback負荷を完全排除する保証ではない。
 
 source MAC単位だけでなくglobal quotaを最後の上限とする。cookieは到達性の確認であり、偽ID大量生成への無限capacityを与えない。再試行の起点が変わってもglobal counterをリセットしない。
 
