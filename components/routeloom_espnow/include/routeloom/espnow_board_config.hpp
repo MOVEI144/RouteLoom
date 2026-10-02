@@ -49,4 +49,7 @@ class BoardStores {
 // never match, which fails closed.
 std::uint8_t board_chip() noexcept;
 
+// Configure the board antenna path before initializing Wi-Fi.
+Status initialize_board_rf() noexcept;
+
 }  // namespace routeloom::espnow
