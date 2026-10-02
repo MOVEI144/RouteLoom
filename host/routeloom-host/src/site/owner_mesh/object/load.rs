@@ -1,3 +1,4 @@
+use super::super::recovery::all_ready;
 use super::*;
 
 fn next_hops(world: &mut MeshWorld) -> Vec<u64> {
@@ -24,7 +25,12 @@ fn next_hops(world: &mut MeshWorld) -> Vec<u64> {
         .collect()
 }
 
-fn control_load(world: &mut MeshWorld, object_bytes: Option<usize>) -> (u64, u32) {
+fn control_load(
+    world: &mut MeshWorld,
+    object_bytes: Option<usize>,
+    blocked_foreground: bool,
+    target_controls: usize,
+) -> (u64, u32, usize) {
     let start = world.now;
     let hops = next_hops(world);
     let timeouts: Vec<_> = world
@@ -53,6 +59,12 @@ fn control_load(world: &mut MeshWorld, object_bytes: Option<usize>) -> (u64, u32
                         );
                     }
                     successes += u32::from(state == 1);
+                    if blocked_foreground {
+                        assert!(
+                            objects - successes <= 1,
+                            "object stalled behind blocked foreground"
+                        );
+                    }
                     if state == 1 {
                         let (received, _, _, payload) = world.peers[0].object_snapshot();
                         assert_eq!(received, successes, "one callback per object result");
@@ -77,6 +89,11 @@ fn control_load(world: &mut MeshWorld, object_bytes: Option<usize>) -> (u64, u32
                 .max()
                 .unwrap_or(0);
             world.peers[0].app_send(world.nodes[1], b"control");
+            if blocked_foreground && (next_control - start) % 30000 == 0 {
+                // An accepted Reliable send to an absent destination has no
+                // frame ready to transmit during its route/retry wait.
+                world.peers[1].app_send(0xffff, b"waiting for route");
+            }
             control_pending = Some((world.now, world.snaps[1].rx_count, last));
             next_control += 1000;
         }
@@ -99,7 +116,7 @@ fn control_load(world: &mut MeshWorld, object_bytes: Option<usize>) -> (u64, u32
         let done = if object_bytes.is_some() {
             objects == 100
         } else {
-            latency.len() >= 100
+            latency.len() >= target_controls
         };
         if done && control_pending.is_none() {
             break;
@@ -110,7 +127,16 @@ fn control_load(world: &mut MeshWorld, object_bytes: Option<usize>) -> (u64, u32
         world
             .snaps
             .iter()
-            .map(|snap| (snap.end_failed, snap.hop_accept_expired))
+            .enumerate()
+            .map(|(index, snap)| {
+                // Only the injected route wait may expire; controls originate at G.
+                let end_failed = if blocked_foreground && index == 1 {
+                    timeouts[index].0
+                } else {
+                    snap.end_failed
+                };
+                (end_failed, snap.hop_accept_expired)
+            })
             .collect::<Vec<_>>(),
         timeouts,
         "no additional receipt or HOP_ACCEPT timeouts"
@@ -132,7 +158,11 @@ fn control_load(world: &mut MeshWorld, object_bytes: Option<usize>) -> (u64, u32
         latency.len()
     );
     latency.sort_unstable();
-    (latency[(latency.len() * 99).div_ceil(100) - 1], successes)
+    (
+        latency[(latency.len() * 99).div_ceil(100) - 1],
+        successes,
+        latency.len(),
+    )
 }
 
 #[test]
@@ -140,7 +170,9 @@ fn control_load(world: &mut MeshWorld, object_bytes: Option<usize>) -> (u64, u32
 fn mesh_m10_immediate_objects_with_1hz_control() {
     for (two_hop, bytes) in [(true, 2048), (false, 2048), (false, 4096)] {
         let mut p99 = Vec::new();
-        for with_object in [false, true] {
+        let mut control_samples = 100;
+        // Use the same number of periodic controls in both campaigns.
+        for with_object in [true, false] {
             let switch = if two_hop {
                 Switch::forced_multihop()
             } else {
@@ -163,7 +195,13 @@ fn mesh_m10_immediate_objects_with_1hz_control() {
                     world.step(5);
                 }
             }
-            let (latency, delivered) = control_load(&mut world, with_object.then_some(bytes));
+            let (latency, delivered, samples) = control_load(
+                &mut world,
+                with_object.then_some(bytes),
+                false,
+                control_samples,
+            );
+            control_samples = samples;
             eprintln!(
                 "M10 immediate: hops={} bytes={bytes} objects={delivered} p99={latency} ms",
                 if two_hop { 2 } else { 1 }
@@ -171,8 +209,75 @@ fn mesh_m10_immediate_objects_with_1hz_control() {
             p99.push(latency);
         }
         assert!(
-            p99[1] * 100 <= p99[0] * 120,
+            p99[0] * 100 <= p99[1] * 120,
             "control p99 increase exceeds 20%: two_hop={two_hop} bytes={bytes} p99={p99:?}"
         );
     }
+}
+
+#[test]
+#[ignore = "requires ROUTELOOM_APP_OBJECT_TRANSFER=ON real Owner mesh peer"]
+fn mesh_m10_objects_progress_while_foreground_waits_for_route() {
+    let mut p99 = Vec::new();
+    let mut control_samples = 100;
+    // Match baseline exposure to the object campaign, including periodic
+    // route/crypto maintenance and the injected 30-second route waits.
+    for with_object in [true, false] {
+        let worker = ["--crypto-ms", "154"];
+        let mut world = MeshWorld::start_booted(
+            "m10-blocked-foreground",
+            Switch::forced_multihop(),
+            &staggered_boot(3),
+            true,
+            &[],
+            &[&worker, &worker],
+        )
+        .expect("M10 requires real Owner peers");
+        world.gate[1] = true;
+        world.pump_until(9000, |snaps| {
+            snaps[0].authority_ready && snaps[2].authority_ready && snaps[2].join_confirmed
+        });
+        assert!(world.snaps[2].authority_ready, "relay reached gateway");
+        world.gate[1] = false;
+        world.pump_until(9000, all_ready);
+        assert!(all_ready(&world.snaps), "worker-enabled mesh converged");
+        assert!(world
+            .snaps
+            .iter()
+            .all(|snap| snap.crypto_submitted > 0 && snap.crypto_completed > 0));
+        assert_eq!(world.peers[0].object_buffer(), 0);
+        for row in &mut world.switch.delay_ms {
+            row.fill(10);
+        }
+        for row in &mut world.switch.callback_delay_ms {
+            row.fill(10);
+        }
+        for _ in 0..30 {
+            mesh::deliver_each(&mut world, 1, 0, 1, b"warm");
+            for _ in 0..200 {
+                world.step(5);
+            }
+        }
+
+        let (latency, delivered, samples) = control_load(
+            &mut world,
+            with_object.then_some(2048),
+            true,
+            control_samples,
+        );
+        control_samples = samples;
+        assert!(
+            world.snaps[1]
+                .app_tx
+                .iter()
+                .any(|tx| tx.reason == "NO_ROUTE"),
+            "route wait exercised"
+        );
+        eprintln!("M10 blocked foreground: objects={delivered} control p99={latency} ms");
+        p99.push(latency);
+    }
+    assert!(
+        p99[0] * 100 <= p99[1] * 120,
+        "control p99 increase exceeds 20%: {p99:?}"
+    );
 }
