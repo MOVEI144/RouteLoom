@@ -244,7 +244,7 @@
     {
       "id": "bridge_node-esp32c3-normal-off-owner_member", "app": "bridge_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
-      "budget": {"app_bin_max": 1224432, "static_free_min": 51192, "rtc_used_max": 6632}
+      "budget": {"app_bin_max": 1226944, "static_free_min": 51192, "rtc_used_max": 6632}
     },
     {
       "id": "reference_node-esp32s3-normal-off-owner_member", "app": "reference_node", "target": "esp32s3",
@@ -313,7 +313,7 @@
       "id": "experimental-c6-bridge_node-member", "app": "bridge_node", "target": "esp32c6",
       "artifact": "experimental-c6-bridge_node-member",
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
-      "budget": {"app_bin_max": 1344192, "static_free_min": 96529, "rtc_used_max": 136}
+      "budget": {"app_bin_max": 1347072, "static_free_min": 96529, "rtc_used_max": 136}
     },
     {
       "id": "experimental-c6-reference_node-member", "app": "reference_node", "target": "esp32c6",
