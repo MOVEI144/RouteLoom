@@ -607,6 +607,8 @@ pub(super) struct MeshWorld {
     /// contender must wait for another peer's channel, not just a
     /// wall-clock offset.
     pub(super) gate: Vec<bool>,
+    /// Owner CPU fault: radio callbacks still enqueue while its pump is occupied.
+    pub(super) owner_blocked_until: Vec<u64>,
     /// The bound join-relay adapter (ZT recovery road, D04 §5.1):
     /// Phase 0's in-process transport is retired once the mesh boots.
     pub(super) join_adapter: Arc<UsbSiteAdapter>,
@@ -809,6 +811,7 @@ impl MeshWorld {
             wall_time: None,
             snaps: vec![MeshSnap::default(); nodes],
             gate: vec![false; nodes],
+            owner_blocked_until: vec![0; nodes],
             join_adapter,
             usb_incarnation: 7,
             usb_auth_total: 0,
@@ -946,17 +949,21 @@ impl MeshWorld {
             if !peer.booted && self.now >= peer.t0 && !self.gate[index] {
                 peer.booted = true;
             }
-            if peer.booted && !peer.asleep {
+            if peer.booted && !peer.asleep && self.now >= self.owner_blocked_until[index] {
                 peer.begin_tick(self.now);
+            } else if peer.booted && !peer.asleep {
+                assert_eq!(peer.sleep(4, self.now, 0).0, 0, "advance RX callback clock");
             }
         }
         let mut ticks = Vec::with_capacity(nodes);
         for (index, peer) in self.peers.iter_mut().enumerate() {
-            ticks.push(if peer.booted && !peer.asleep {
-                Some(peer.finish_tick(self.now))
-            } else {
-                None
-            });
+            ticks.push(
+                if peer.booted && !peer.asleep && self.now >= self.owner_blocked_until[index] {
+                    Some(peer.finish_tick(self.now))
+                } else {
+                    None
+                },
+            );
             if ticks[index].as_ref().is_some_and(|tick| tick.rebooted) {
                 self.callbacks[index].clear();
             }
@@ -969,10 +976,19 @@ impl MeshWorld {
         }
         // Switch: deliver per audibility + same channel, then report
         // MAC ACKs (unicast succeeds iff delivered).
-        let booted: Vec<bool> = ticks.iter().map(Option::is_some).collect();
+        let booted: Vec<bool> = self
+            .peers
+            .iter()
+            .map(|peer| peer.booted && !peer.asleep)
+            .collect();
         let channels: Vec<u8> = ticks
             .iter()
-            .map(|t| t.as_ref().map(|t| t.snap.channel).unwrap_or(0))
+            .enumerate()
+            .map(|(i, t)| {
+                t.as_ref()
+                    .map(|t| t.snap.channel)
+                    .unwrap_or(self.snaps[i].channel)
+            })
             .collect();
         let b_mac = self.macs.get(2).copied().unwrap_or(BROADCAST_MAC);
         let mut deliveries: Vec<SwitchDelivery> = Vec::new();

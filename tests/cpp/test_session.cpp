@@ -800,6 +800,8 @@ void test_node_reports_unknown_end_context() {
   pair.run(300);
   CHECK(!pair.air.empty());
   CHECK(!received(pair.obs_b, "end-context-lost-at-b"));
+  CHECK(pair.b->dedup_stats().admitted_terminal == 0);
+  CHECK(pair.b->txn_in_flight() == 0);
   CHECK(pair.b->session_stats().rx_auth_required >= 1);
   CHECK(pair.sec_b.rx_unknown.size() == pair.b->session_stats().rx_auth_required);
   CHECK(!pair.sec_b.rx_unknown.empty());

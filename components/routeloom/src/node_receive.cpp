@@ -259,6 +259,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     }
     // Probe reply capacity before opening End: a full queue must not
     // consume its replay counter and poison the sender's same-round retry.
+    // Verify End before acquiring reply work or reclaiming a terminal pin.
     wire::PlainFrame plain{};
     const auto status = wire::open_end(frame, config_.node, security_, plain);
     if (!status) {
