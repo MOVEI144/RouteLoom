@@ -5,6 +5,10 @@ use super::*;
 
 #[test]
 fn mesh_m08_repeated_bursts_account_for_every_send() {
+    repeated_bursts(0);
+}
+
+pub(super) fn repeated_bursts(delay_ms: u64) {
     {
         let Some(mut boundary) = route_loss_world("m08-boundary", Switch::direct(), false) else {
             return;
@@ -62,6 +66,11 @@ fn mesh_m08_repeated_bursts_account_for_every_send() {
         routes.iter().all(|&hop| hop == testkit::GATEWAY),
         "full mesh direct gateway routes settled"
     );
+    for from in 0..nodes {
+        for to in 0..nodes {
+            world.switch.delay_ms[from][to] = delay_ms;
+        }
+    }
     let mut expected = std::collections::BTreeMap::new();
     let mut received = std::collections::BTreeSet::new();
     let mut terminal = std::collections::BTreeMap::new();
@@ -134,6 +143,14 @@ fn mesh_m08_repeated_bursts_account_for_every_send() {
         received.len(),
         terminal.len()
     );
+    for &(source, session, sequence) in expected.keys() {
+        let peer = world.index_of(source);
+        assert_eq!(
+            world.peers[peer].terminal_count(session, sequence),
+            1,
+            "one terminal callback per admitted key"
+        );
+    }
     assert_eq!(expected.len() + refused, 30 * (nodes - 1) * 16);
     assert!(refused > 0, "admission bound reached");
     for snapshot in &world.snaps {
@@ -151,6 +168,20 @@ fn mesh_m08_repeated_bursts_account_for_every_send() {
             .all(|(key, _)| received.contains(key)),
         "every Delivered has one verified receive"
     );
+    let mut every_sender_passed = true;
+    for source in 1..nodes {
+        let admitted = expected
+            .keys()
+            .filter(|key| key.0 == world.nodes[source])
+            .count();
+        let source_delivered = terminal
+            .iter()
+            .filter(|(key, state)| key.0 == world.nodes[source] && **state == DELIVERY_DELIVERED)
+            .count();
+        eprintln!("M08 source={source}: admitted={admitted} delivered={source_delivered}");
+        every_sender_passed &= source_delivered * 100 >= admitted * 99;
+    }
+    assert!(every_sender_passed, "each sender Reliable >=99%");
     assert!(
         delivered * 100 >= expected.len() * 99,
         "accepted Reliable >=99%"

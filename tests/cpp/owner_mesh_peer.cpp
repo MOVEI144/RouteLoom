@@ -22,6 +22,7 @@
 //
 //   T <now u64le>              advance virtual time, run one pump turn,
 //                              report X/B/G/D (see below)
+//   t <session u32le><sequence u64le>  count terminal observer events for this boot
 //   R <src_mac 6><dst_mac 6><frame>
 //                              inject one radio RX frame now (the observed
 //                              destination: broadcast for broadcasts —
@@ -1902,6 +1903,24 @@ int main(int argc, char** argv) {
         }
         observer.receipts_size_ = 0;
         observer.receipts_overflow_ = 0;
+        write_frame(reply);
+        break;
+      }
+      case 't': {
+        if (length != 13) fatal("bad t");
+        std::uint32_t session = 0;
+        std::uint64_t sequence = 0;
+        for (unsigned i = 0; i < 4; ++i) session |= std::uint32_t{payload[1 + i]} << (8 * i);
+        for (unsigned i = 0; i < 8; ++i) sequence |= std::uint64_t{payload[5 + i]} << (8 * i);
+        std::uint32_t count = 0;
+        for (const auto& event : observer.delivery_events_) {
+          if (event.id.session != session || event.id.sequence != sequence) continue;
+          if (event.state == DeliveryState::Delivered || event.state == DeliveryState::Failed ||
+              event.state == DeliveryState::Expired || event.state == DeliveryState::CancelledBeforeTx ||
+              event.state == DeliveryState::Indeterminate) ++count;
+        }
+        Bytes reply{'t'};
+        put_u32(reply, count);
         write_frame(reply);
         break;
       }

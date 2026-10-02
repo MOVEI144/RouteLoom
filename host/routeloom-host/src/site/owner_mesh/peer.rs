@@ -1076,6 +1076,17 @@ impl MeshPeer {
         Some(tick)
     }
 
+    pub(super) fn terminal_count(&mut self, session: u32, sequence: u64) -> u32 {
+        let mut command = vec![b't'];
+        command.extend_from_slice(&session.to_le_bytes());
+        command.extend_from_slice(&sequence.to_le_bytes());
+        self.send(&command);
+        let reply = self.recv().expect("terminal count reply");
+        assert_eq!(reply.len(), 5);
+        assert_eq!(reply[0], b't');
+        get_u32(&reply, &mut 1)
+    }
+
     pub(super) fn send_rx(&mut self, src_mac: &[u8; 6], dst_mac: &[u8; 6], frame: &[u8]) {
         let mut command = vec![b'R'];
         command.extend_from_slice(src_mac);
