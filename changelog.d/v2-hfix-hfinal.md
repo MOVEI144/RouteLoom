@@ -1,0 +1,2 @@
+- Reclaim terminal dedup pins whose existing retention has elapsed before rejecting fresh RX at the terminal quota, including when RX drains before the periodic sweep.
+- Add real-Owner HFINAL coverage for delayed/lost acknowledgements, relay reset timing, a 710 ms Owner occupancy control, and same-key rejoin during 1000 sends. Keep the M08 per-sender 99% threshold; the C3 small-profile load remains an open acceptance failure.
