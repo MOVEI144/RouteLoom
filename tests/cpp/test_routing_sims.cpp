@@ -351,6 +351,21 @@ void test_stale_advertisement_rejected() {
         RouteUpdateResult::Accepted);  // FD gone with the tombstone
 }
 
+void test_restart_clears_orphaned_hold() {
+  RouteTable table;
+  const RouteAdvertisement fresh{9, 1, 7, 0};
+  CHECK(table.consider(fresh, 2, 1, 0, 5000) == RouteUpdateResult::Accepted);
+  CHECK(table.mark_advertised(9));
+  table.invalidate_next_hop(2, 10);
+  CHECK(table.consider(fresh, 2, 1, 11, 5000) == RouteUpdateResult::HeldDown);
+  // The authenticated higher relay generation arrives after link loss
+  // already removed the candidate. Origin feasibility remains intact.
+  table.invalidate_next_hop(2, 12, false);
+  CHECK(table.consider(fresh, 2, 1, 13, 5000) == RouteUpdateResult::Accepted);
+  CHECK(table.consider(RouteAdvertisement{9, 0, 8, 0}, 2, 1, 14, 5000) ==
+        RouteUpdateResult::StaleGeneration);
+}
+
 void test_stale_feasible_candidate_not_selected() {
   // FD tightening after a candidate latched feasible (A->B->A loop review):
   // A hears B->G metric 3 (via B, total 4), then learns a direct G link at
@@ -803,6 +818,7 @@ int main() {
   test_stale_advertisement_rejected();
   test_route_generation_past_u16_budget();
   test_delivery_with_large_epochs();
+  test_restart_clears_orphaned_hold();
   test_stale_feasible_candidate_not_selected();
   test_sequence_wrap();
   test_origin_restart();

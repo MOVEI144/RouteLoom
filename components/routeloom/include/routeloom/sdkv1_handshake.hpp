@@ -336,8 +336,8 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
                      std::uint8_t step) noexcept;
   Status cancel(NodeId peer, HandshakeCancelReason reason) noexcept;
   Status cancel_all() noexcept;
-  // An RLRES1 initiator keeps its R3 for quiet retransmission after its
-  // local session has installed. The RLD1 owner must retain that send leg.
+  // After local install, retain the RLD1 send leg for quiet R3 retries
+  // and bounded M4 retries until the engine retires the record.
   bool has_quiet_link_retry(std::uint32_t token) const noexcept;
   // True while an exchange with `peer` has moved past its opening message
   // (an answer was sent or received): a new start must not displace it.
