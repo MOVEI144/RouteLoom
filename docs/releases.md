@@ -1,7 +1,7 @@
 # Release artifacts and promotion
 
 The release workflow checks the tag against `protocol/manifest.json` before
-building. Set the SDK version in that manifest, run `tools/gen_manifest.py`,
+building. Every build job checks out the same prepared commit SHA. Set the SDK version in that manifest, run `tools/gen_manifest.py`,
 and commit all generated versions before tagging a candidate. SDK defaults
 and qualification gates remain owned by their implementation PRs.
 
@@ -25,21 +25,27 @@ provisioned device use an **app-only** update as described in [HIL](hil.md);
 writing all flash files again is a factory installation, not an NVS-preserving
 update. Follow the chip/MAC preflight and eFuse safety rules there.
 
-Every candidate includes `NOTICE`, `LICENSE`, a CycloneDX 1.5 SBOM,
-`cargo-metadata.json`, `SHA256SUMS.txt` and an in-toto/SLSA v1 provenance
+Every candidate includes `NOTICE`, `LICENSE`, `THIRD_PARTY_LICENSES.txt`,
+a CycloneDX 1.5 SBOM, `cargo-metadata.json`, `SHA256SUMS.txt` and an in-toto/SLSA v1 provenance
 statement. The SBOM checks all target-specific locked Rust crates against
 reviewed name/version/license credits in NOTICE and the vendored source
 inventory. It includes the pinned ESP-IDF framework and bundled SQLite;
 it is an SDK dependency inventory, not an exhaustive SBOM of ESP-IDF's
 internal toolchain and submodules. Vendored blob integrity is checked before
 packaging. Unknown dependencies, stale credits and modified SBOM components
-fail assembly. All artifacts are hashed; firmware provenance includes the
-commit, IDF/Rust pins, sdkconfig/app/partition hashes, `PT-4M-v2` and static
+fail assembly. Upstream Cargo/vendor license and notice texts are collected
+from the locked sources; missing texts fail inventory generation. Host and
+firmware archives also carry these license files. All artifacts are hashed;
+firmware provenance includes the
+commit, IDF/Rust pins, sdkconfig/flash-argument hashes, hashes of every flashed
+image (bootloader, partition table, initial OTA data and app), `PT-4M-v2` and static
 RAM free bytes. Checksums establish integrity, not publisher identity.
 
 Product packaging checks the effective security selection, development
 identity, development master-key bytes/hex and linked development provider
-symbols before staging. A failure must be fixed in the owning firmware PR;
+symbols before staging. Flash offsets, app filenames and the flasher chip must
+match the inspected image and matrix. A failure must be fixed in the owning
+firmware PR;
 do not bypass the check to obtain a candidate. The same static RAM floors
 apply as in CI, with the bridge/relay base-cell size ratchets retained.
 
@@ -51,7 +57,10 @@ arguments: private-key path (or `-` for keyless), SHA256SUMS input, signature
 output and public-key output. A keyless hook must export its signer's public
 key as PEM; a maintainer key's public output is populated before invocation.
 The hook owns its signing method and verification and must exit nonzero on
-failure. The private file is removed on exit; only
+failure. Signing must preserve every candidate artifact, provenance and checksum
+file; the checker rejects changes even if the hook recomputes their hashes.
+Signing outputs must be nonempty regular files, with no symbolic links. The
+private file is removed on exit; only
 `SHA256SUMS.sig` and `signing-public.pem` are published. The checker compares
 the derived public-key identity with meshviz's public development key and
 rejects that key, including a differently encoded copy. Consumers must verify

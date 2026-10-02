@@ -91,6 +91,20 @@ def firmware_errors(image: bytes, symbols: list[str], settings: list[str], mode:
     return errors
 
 
+def release_flash_files(args: dict, entry: dict) -> dict[str, str]:
+    files = args['flash_files']
+    offsets = {int(offset, 0): name for offset, name in files.items()}
+    boot_offset = 0x2000 if entry['target'] == 'esp32c5' else 0
+    expected = {boot_offset: 'bootloader/bootloader.bin',
+                0x8000: 'partition_table/partition-table.bin',
+                0x10000: 'ota_data_initial.bin', 0x40000: f'routeloom_{entry["app"]}.bin'}
+    if len(files) != 4 or offsets != expected:
+        raise ValueError('release flash files disagree with the inspected app / PT-4M-v2')
+    if args['extra_esptool_args']['chip'] != entry['target']:
+        raise ValueError('release flash target disagrees with the matrix')
+    return files
+
+
 def inventory(metadata: dict, lock: dict, notice: str, vendors: dict) -> list[dict]:
     external = [p for p in metadata['packages'] if p['id'] not in metadata['workspace_members']]
     resolved = {(p['name'], p['version'], p.get('source')) for p in external}
@@ -142,13 +156,40 @@ def inventory(metadata: dict, lock: dict, notice: str, vendors: dict) -> list[di
     return components
 
 
+def license_bundle(metadata: dict) -> str:
+    packages = [p for p in metadata['packages'] if p['id'] not in metadata['workspace_members']]
+    # The two Windows import-library crates inherit the license files of winapi.
+    inherited = {'winapi-i686-pc-windows-gnu', 'winapi-x86_64-pc-windows-gnu'}
+    groups = []
+    for package in sorted(packages, key=lambda p: (p['name'], p['version'])):
+        source = package
+        if package['name'] in inherited:
+            source = next(p for p in packages if p['name'] == 'winapi')
+        groups.append((f'Cargo: {package["name"]} {package["version"]}',
+                       Path(source['manifest_path']).parent))
+    vendors = json.loads((ROOT / 'components/routeloom/third_party/VENDORED.json').read_text())
+    for directory in ['micro-ecc'] + [v['directory'] for v in vendors['components']]:
+        groups.append(('Vendor: ' + directory, ROOT / 'components/routeloom/third_party' / directory))
+    texts = {}
+    for credit, directory in groups:
+        files = sorted(p for p in directory.iterdir() if p.is_file() and
+                       p.name.upper().startswith(('LICENSE', 'LICENCE', 'COPYING', 'NOTICE', 'UNLICENSE')))
+        if not files:
+            raise ValueError('missing upstream license text: ' + credit)
+        for path in files:
+            texts.setdefault(path.read_text(), []).append(f'===== {credit} / {path.name} =====')
+    return '\n'.join('\n'.join(credits) + '\n' + raw + '\n'
+                     for raw, credits in texts.items())
+
+
 def write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
 
 
 def make_inventory(tag: str, metadata_path: Path, out: Path) -> None:
     check_tag(tag)
-    components = inventory(json.loads(metadata_path.read_text()),
+    metadata = json.loads(metadata_path.read_text())
+    components = inventory(metadata,
                            tomllib.loads((ROOT / 'host/Cargo.lock').read_text()),
                            (ROOT / 'NOTICE').read_text(),
                            json.loads((ROOT / 'components/routeloom/third_party/VENDORED.json').read_text()))
@@ -157,6 +198,7 @@ def make_inventory(tag: str, metadata_path: Path, out: Path) -> None:
         'bomFormat': 'CycloneDX', 'specVersion': '1.5', 'version': 1,
         'metadata': {'component': {'type': 'application', 'name': 'RouteLoom', 'version': tag}},
         'components': components})
+    (out / 'THIRD_PARTY_LICENSES.txt').write_text(license_bundle(metadata))
     shutil.copyfile(metadata_path, out / 'cargo-metadata.json')
     for name in ('NOTICE', 'LICENSE'):
         shutil.copyfile(ROOT / name, out / name)
@@ -174,7 +216,8 @@ def source_archive(tag: str, out: Path) -> None:
 def required_names(tag: str) -> set[str]:
     return {archive_name(tag, entry) for entry in firmware_matrix()} | {
         f'routeloom-{tag}-src.tar.gz', f'routeloom-{tag}-linux-x86_64.tar.gz',
-        f'routeloom-{tag}-sbom.json', 'cargo-metadata.json', 'NOTICE', 'LICENSE'}
+        f'routeloom-{tag}-sbom.json', 'cargo-metadata.json', 'NOTICE', 'LICENSE',
+        'THIRD_PARTY_LICENSES.txt'}
 
 
 def finalize(tag: str, out: Path) -> None:
@@ -189,11 +232,26 @@ def finalize(tag: str, out: Path) -> None:
                          json.loads((ROOT / 'components/routeloom/third_party/VENDORED.json').read_text()))
     if bom['components'] != expected or bom['metadata']['component']['version'] != tag:
         raise ValueError('SBOM differs from dependency inventory')
+    licenses = {name: (out / name).read_bytes()
+                for name in ('LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES.txt')}
+    with tarfile.open(out / f'routeloom-{tag}-linux-x86_64.tar.gz') as tar:
+        for name, raw in licenses.items():
+            if tar.extractfile(f'routeloom-{tag}-linux-x86_64/{name}').read() != raw:
+                raise ValueError('host archive license texts differ from release inventory')
     firmware = []
     for entry in firmware_matrix():
         with tarfile.open(out / archive_name(tag, entry)) as tar:
+            for name, raw in licenses.items():
+                if tar.extractfile(name).read() != raw:
+                    raise ValueError('firmware archive license texts differ from release inventory')
             record = json.load(tar.extractfile('release.json'))
-            for name, field in (('sdkconfig', 'sdkconfig_sha256'),
+            flash_files = release_flash_files(json.load(tar.extractfile('flasher_args.json')), entry)
+            flash_hashes = {name: hashlib.sha256(tar.extractfile(name).read()).hexdigest()
+                            for name in flash_files.values()}
+            if flash_hashes != record['flash_sha256']:
+                raise ValueError('firmware flash image hash differs from archive content')
+            for name, field in (('flasher_args.json', 'flasher_args_sha256'),
+                                ('sdkconfig', 'sdkconfig_sha256'),
                                 (f'routeloom_{entry["app"]}.bin', 'app_sha256'),
                                 ('partition_table/partition-table.bin', 'partition_sha256')):
                 if hashlib.sha256(tar.extractfile(name).read()).hexdigest() != record[field]:
@@ -250,6 +308,10 @@ def verify(out: Path) -> dict:
     signing = actual & {'SHA256SUMS.sig', 'signing-public.pem'}
     if signing and len(signing) != 2:
         raise ValueError('incomplete signing outputs')
+    for name in signing:
+        path = out / name
+        if path.is_symlink() or not path.is_file() or not path.stat().st_size:
+            raise ValueError('invalid signing output')
     if 'signing-public.pem' in actual:
         check_signing_key(out / 'signing-public.pem', public=True)
     return provenance
@@ -269,6 +331,8 @@ def check_signing_key(key: Path, public: bool = False) -> bytes:
 
 def sign(out: Path, key: Path | None, hook: Path) -> None:
     verify(out)
+    original = {p.name: digest(p) for p in out.iterdir()
+                if p.name not in {'SHA256SUMS.sig', 'signing-public.pem'}}
     public = out / 'signing-public.pem'
     if key is not None:
         check_signing_key(key)
@@ -279,9 +343,9 @@ def sign(out: Path, key: Path | None, hook: Path) -> None:
                     str((out / 'SHA256SUMS.txt').resolve()),
                     str((out / 'SHA256SUMS.sig').resolve()), str(public.resolve())],
                    check=True, timeout=120)
-    if not (out / 'SHA256SUMS.sig').stat().st_size:
-        raise ValueError('signing hook produced an empty signature')
-    check_signing_key(public, public=True)
+    if any(not (out / name).is_file() or (out / name).is_symlink() or
+           digest(out / name) != value for name, value in original.items()):
+        raise ValueError('signing hook changed release artifacts')
     verify(out)
 
 

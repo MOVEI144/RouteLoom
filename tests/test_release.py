@@ -27,6 +27,14 @@ def metadata_fixture():
         for p in lock['package'] if 'source' in p]}
 
 
+def write_archive(path, files):
+    with tarfile.open(path, 'w:gz') as tar:
+        for name, raw in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(raw)
+            tar.addfile(info, io.BytesIO(raw))
+
+
 class ReleaseTests(unittest.TestCase):
     def check_signing_hooks(self, out, root):
         key = root / 'key.pem'
@@ -45,6 +53,29 @@ class ReleaseTests(unittest.TestCase):
                         'subprocess.run(["openssl", "pkey", "-in", key, "-pubout", "-out", sys.argv[4]], check=True)\n'
                         'subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", key, "-in", sys.argv[2], "-out", sys.argv[3]], check=True)\n')
         release.sign(out, None, hook)
+        signature = out / 'SHA256SUMS.sig'
+        raw = signature.read_bytes()
+        signature.unlink()
+        signature.symlink_to(key)
+        with self.assertRaisesRegex(ValueError, 'invalid signing output'):
+            release.verify(out)
+        signature.unlink()
+        signature.write_bytes(raw)
+        original = {p.name: p.read_bytes() for p in out.iterdir()}
+        hook.write_text('#!/usr/bin/env python3\n'
+                        'import hashlib, json, sys\nfrom pathlib import Path\n'
+                        'out = Path(sys.argv[2]).parent\n'
+                        '(out / "NOTICE").write_text("replaced by hook")\n'
+                        'provenance = json.loads((out / "provenance.json").read_text())\n'
+                        'for subject in provenance["subject"]:\n'
+                        '    subject["digest"]["sha256"] = hashlib.sha256((out / subject["name"]).read_bytes()).hexdigest()\n'
+                        '(out / "provenance.json").write_text(json.dumps(provenance))\n'
+                        'names = [line.split("  ")[1] for line in Path(sys.argv[2]).read_text().splitlines()]\n'
+                        'Path(sys.argv[2]).write_text("".join(hashlib.sha256((out / name).read_bytes()).hexdigest() + "  " + name + "\\n" for name in names))\n')
+        with self.assertRaisesRegex(ValueError, 'changed release artifacts'):
+            release.sign(out, None, hook)
+        for name, raw in original.items():
+            (out / name).write_bytes(raw)
         dev = ROOT / 'tools/meshviz/src/routeloom_meshviz/dev-signing-public.pem'
         hook.write_text('#!/usr/bin/env python3\nfrom pathlib import Path\nimport sys\n'
                         f'Path(sys.argv[4]).write_bytes(Path({str(dev)!r}).read_bytes())\n'
@@ -93,6 +124,14 @@ class ReleaseTests(unittest.TestCase):
             release.check_signing_key(ROOT / 'tools/meshviz/src/routeloom_meshviz/dev-signing-public.pem',
                                       public=True)
 
+    def test_candidate_jobs_use_the_prepared_source_commit(self):
+        workflow = (ROOT / '.github/workflows/release.yml').read_text()
+        for job in ('source', 'host', 'firmware', 'assemble'):
+            block = workflow.split(f'\n  {job}:', 1)[1].split('\n  promote:', 1)[0]
+            checkout = block.split('ref:', 1)[1].splitlines()[0].strip()
+            with self.subTest(job=job):
+                self.assertEqual(checkout, '${{ needs.prepare.outputs.commit }}')
+
     def test_tag_mismatch_is_rejected_before_building(self):
         release.check_tag('v' + release.manifest()['sdk_version'])
         with self.assertRaisesRegex(ValueError, 'manifest'):
@@ -109,26 +148,61 @@ class ReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(release, 'manifest', return_value=data):
             root = Path(directory)
             metadata = root / 'metadata.json'
-            release.write_json(metadata, metadata_fixture())
+            packages = metadata_fixture()
+            for package in packages['packages']:
+                source = root / 'crates' / (package['name'] + '-' + package['version'])
+                source.mkdir(parents=True)
+                (source / 'LICENSE').write_text('synthetic upstream license: ' + package['name'])
+                package['manifest_path'] = str(source / 'Cargo.toml')
+            release.write_json(metadata, packages)
             out = root / 'dist'
             release.make_inventory(tag, metadata, out)
+            self.assertIn('synthetic upstream license: crossterm',
+                          (out / 'THIRD_PARTY_LICENSES.txt').read_text())
+            license_path = root / 'crates/crossterm-0.28.1/LICENSE'
+            raw = license_path.read_bytes()
+            license_path.unlink()
+            with self.assertRaisesRegex(ValueError, 'missing upstream license text'):
+                release.make_inventory(tag, metadata, out)
+            license_path.write_bytes(raw)
             for name in release.required_names(tag) - {p.name for p in out.iterdir()}:
                 (out / name).write_bytes(b'synthetic artifact')
+            licenses = {name: (out / name).read_bytes() for name in
+                        ('LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES.txt')}
+            write_archive(out / f'routeloom-{tag}-linux-x86_64.tar.gz', {
+                f'routeloom-{tag}-linux-x86_64/{name}': raw for name, raw in licenses.items()})
             for entry in release.firmware_matrix():
                 files = {'sdkconfig': b'synthetic config',
                          f'routeloom_{entry["app"]}.bin': b'synthetic image',
-                         'partition_table/partition-table.bin': b'synthetic partition'}
+                         'partition_table/partition-table.bin': b'synthetic partition',
+                         'bootloader/bootloader.bin': b'synthetic bootloader',
+                         'ota_data_initial.bin': b'synthetic OTA data'}
+                flash_files = {'0x2000' if entry['target'] == 'esp32c5' else '0x0':
+                               'bootloader/bootloader.bin',
+                               '0x8000': 'partition_table/partition-table.bin',
+                               '0x10000': 'ota_data_initial.bin',
+                               '0x40000': f'routeloom_{entry["app"]}.bin'}
+                files['flasher_args.json'] = json.dumps({
+                    'flash_files': flash_files,
+                    'extra_esptool_args': {'chip': entry['target']}}).encode()
                 record = {'entry': entry, 'toolchain': data['toolchain'], 'commit': commit,
                           'tag': tag, 'partition_id': 'PT-4M-v2',
+                          'flasher_args_sha256': hashlib.sha256(files['flasher_args.json']).hexdigest(),
+                          'flash_sha256': {name: hashlib.sha256(files[name]).hexdigest()
+                                           for name in flash_files.values()},
                           'sdkconfig_sha256': hashlib.sha256(files['sdkconfig']).hexdigest(),
                           'app_sha256': hashlib.sha256(files[f'routeloom_{entry["app"]}.bin']).hexdigest(),
                           'partition_sha256': hashlib.sha256(files['partition_table/partition-table.bin']).hexdigest()}
                 files['release.json'] = json.dumps(record).encode()
-                with tarfile.open(out / release.archive_name(tag, entry), 'w:gz') as tar:
-                    for name, raw in files.items():
-                        info = tarfile.TarInfo(name)
-                        info.size = len(raw)
-                        tar.addfile(info, io.BytesIO(raw))
+                files.update(licenses)
+                write_archive(out / release.archive_name(tag, entry), files)
+            archive = out / release.archive_name(tag, entry)
+            original_archive = archive.read_bytes()
+            files['bootloader/bootloader.bin'] = b'changed bootloader'
+            write_archive(archive, files)
+            with self.assertRaisesRegex(ValueError, 'flash image hash'):
+                release.finalize(tag, out)
+            archive.write_bytes(original_archive)
             sbom = out / f'routeloom-{tag}-sbom.json'
             original = sbom.read_bytes()
             bom = json.loads(original)

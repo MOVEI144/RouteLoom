@@ -28,6 +28,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       tag: ${{ steps.plan.outputs.tag }}
+      commit: ${{ steps.plan.outputs.commit }}
       idf_image: ${{ steps.plan.outputs.idf_image }}
       idf_commit: ${{ steps.plan.outputs.idf_commit }}
       rust: ${{ steps.plan.outputs.rust }}
@@ -42,6 +43,7 @@ jobs:
         run: |
           python3 tools/gen_manifest.py --check
           python3 tools/release.py matrix --tag "$TAG" > plan.json
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           python3 - <<'PY'
           import json, os
           plan = json.load(open('plan.json'))
@@ -60,7 +62,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.commit }}
       - env:
           TAG: ${{ needs.prepare.outputs.tag }}
           RUST: ${{ needs.prepare.outputs.rust }}
@@ -78,14 +80,18 @@ jobs:
           path: dist/*
           retention-days: 90
   host:
-    needs: prepare
+    needs: [prepare, source]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.commit }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-source-inventory
+          path: license-inventory
       - env:
           TAG: ${{ needs.prepare.outputs.tag }}
           RUST: ${{ needs.prepare.outputs.rust }}
@@ -95,7 +101,8 @@ jobs:
           stage="routeloom-${TAG}-linux-x86_64"
           mkdir -p "dist/$stage"
           cp host/target/release/routeloom-host host/target/release/routeloomctl \
-             host/target/release/routeloom-tui host/Cargo.lock LICENSE NOTICE "dist/$stage/"
+             host/target/release/routeloom-tui host/Cargo.lock license-inventory/LICENSE \
+             license-inventory/NOTICE license-inventory/THIRD_PARTY_LICENSES.txt "dist/$stage/"
           tar -C dist -czf "dist/${stage}.tar.gz" "$stage"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -103,7 +110,7 @@ jobs:
           path: dist/*.tar.gz
           retention-days: 90
   firmware:
-    needs: prepare
+    needs: [prepare, source]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -115,7 +122,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.commit }}
       - name: Build and RAM-gate firmware
         shell: bash
         env:
@@ -147,6 +154,10 @@ jobs:
               (project / 'build/ram-report.json').write_text(json.dumps(report))
               subprocess.run(['python3', 'tools/check.py', 'size', '--cell', entry['cell']], check=True)
           PY
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-source-inventory
+          path: license-inventory
       - name: Inspect and package firmware
         shell: bash
         env:
@@ -158,6 +169,8 @@ jobs:
           stage="dist/firmware-stage"
           python3 tools/release_firmware.py "firmware/$APP/build" "firmware/$APP/sdkconfig" \
             "$stage" --release-id "$RELEASE_ID" --tag "$TAG"
+          cp license-inventory/LICENSE license-inventory/NOTICE \
+             license-inventory/THIRD_PARTY_LICENSES.txt "$stage/"
           find "$stage" -mindepth 1 -maxdepth 1 -printf '%f\0' | sort -z > dist/files.list
           tar -C "$stage" -czf "dist/routeloom-${TAG}-firmware-${RELEASE_ID}.tar.gz" \
             --null -T dist/files.list
@@ -177,7 +190,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.commit }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: release-*

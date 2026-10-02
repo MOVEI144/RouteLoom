@@ -11,11 +11,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.check import elf_symbols  # noqa: E402
 from tools.release import (ROOT, check_tag, digest, firmware_errors,
-                           firmware_matrix, write_json)  # noqa: E402
+                           firmware_matrix, release_flash_files, write_json)  # noqa: E402
 
 
 def check_release_firmware(build: Path, sdkconfig: Path, entry: dict, tag: str) -> dict:
     data = check_tag(tag)
+    flash_files = release_flash_files(json.loads((build / 'flasher_args.json').read_text()), entry)
     settings = sdkconfig.read_text().splitlines()
     image = build / f'routeloom_{entry["app"]}.bin'
     elf = image.with_suffix('.elf')
@@ -36,6 +37,8 @@ def check_release_firmware(build: Path, sdkconfig: Path, entry: dict, tag: str) 
             'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
                                               text=True, timeout=15).strip(),
             'sdkconfig_sha256': digest(sdkconfig), 'app_sha256': digest(image),
+            'flasher_args_sha256': digest(build / 'flasher_args.json'),
+            'flash_sha256': {name: digest(build / name) for name in flash_files.values()},
             'partition_id': 'PT-4M-v2',
             'partition_sha256': digest(build / 'partition_table/partition-table.bin'),
             'static_free_bytes': report['guard']['free']}

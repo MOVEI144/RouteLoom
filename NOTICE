@@ -124,8 +124,10 @@ The bundled SQLite amalgamation (public domain, https://sqlite.org) is
 compiled by libsqlite3-sys. No system SQLite is required. The following
 reviewed inventory includes target-specific dependencies. Release checks
 require an exact match with Cargo.lock and cargo metadata; update these
-credits when changing dependencies. License texts are distributed by the
-upstream crates under the listed SPDX expressions.
+credits when changing dependencies. Release assets and binary archives include
+THIRD_PARTY_LICENSES.txt with upstream license and notice texts from these
+locked crates and vendored components. The two winapi import-library crates
+inherit the license texts from winapi. The full Apache-2.0 text is in LICENSE.
 
 Cargo: aead 0.5.2 | MIT OR Apache-2.0
 Cargo: aes 0.8.4 | MIT OR Apache-2.0
