@@ -68,9 +68,6 @@ class CallbackScope {
   bool prior_;
 };
 
-// A request_join ends here at the latest (a join attempt and its retries).
-constexpr std::uint32_t kJoinOperationMs = 60000;
-
 std::uint16_t membership_cause(const MembershipStage stage) noexcept {
   switch (stage) {
     case MembershipStage::Member: return ROUTELOOM_REASON_JOINED;
@@ -140,6 +137,20 @@ void Device::Observer::on_verified_contact(const NodeId source,
                                            const MonotonicMs now_ms) noexcept {
   device_->note_gateway_contact(source, now_ms);
 }
+
+#if ROUTELOOM_DEVICE_SLEEP
+void Device::Observer::on_pending_result(const PendingDeliveryRecord& record,
+                                         const StatusCode result) noexcept {
+  ESP_LOGI(device_->tag_, "sleep pending session=%lu sequence=%llu status=%u",
+           static_cast<unsigned long>(record.original_id.session),
+           static_cast<unsigned long long>(record.original_id.sequence),
+           static_cast<unsigned>(result));
+  if (device_->device_observer_ != nullptr) {
+    CallbackScope scope(device_->in_callback_);
+    device_->device_observer_->on_sleep_pending_result(record, result);
+  }
+}
+#endif
 
 void Device::Observer::on_delivery(const DeliveryResult& result) noexcept {
   if (device_->bridge_ == nullptr) {
@@ -357,16 +368,17 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   }
 #endif
 
-  static Observer observer;
-  observer.bind(*this);
-  static espnow::EspNowRuntime runtime(config.radio, provider, observer);
+  Observer& node_observer = observer();
+  node_observer.bind(*this);
+  static espnow::EspNowRuntime runtime(config.radio, provider, node_observer);
 #if CONFIG_IDF_TARGET_ESP32C6
   status = espnow::initialize_board_rf();
   if (!status) return status;
 #endif
   status = runtime.initialize();
   if (!status) return status;
-  runtime_ = &runtime;
+  bind_runtime(runtime);
+  runtime.bind_wake_task(xTaskGetCurrentTaskHandle());
 
   // Post-RF randomness first: boot() arms the cookie sealer from it.
   status = entropy.begin();
@@ -476,6 +488,18 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
 #endif
   }
 #endif
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  static AppObject object(runtime.node(), provider, node_observer);
+  object_ = &object;
+  status = object.attach();
+  if (!status) return status;
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
+  if (bridge_ != nullptr) {
+    status = bridge_->attach_object(object);
+    if (!status) return status;
+  }
+#endif
+#endif
   return Status::success();
 }
 
@@ -502,6 +526,17 @@ void Device::step(const MonotonicMs now_ms) noexcept {
 #endif
   runtime_->poll_once();
   if (owner_ != nullptr) owner_->poll(now_ms);
+#if ROUTELOOM_DEVICE_SLEEP
+  if (power_ != nullptr) {
+    CallbackScope scope(in_callback_);
+    if (runtime_->radio_generation() != sleep_radio_generation_) {
+      sleep_radio_generation_ = runtime_->radio_generation();
+      (void)power_->notify_radio_reset(now_ms);
+    }
+    if (posted_budget != 0) (void)power_->notify_app_event(now_ms);
+    power_->poll(now_ms);
+  }
+#endif
 #if ROUTELOOM_DEVICE_REMOTE_CONFIG
   if (remote_config_ != nullptr) poll_remote_config(now_ms);
 #endif
@@ -516,19 +551,58 @@ void Device::step(const MonotonicMs now_ms) noexcept {
 }
 
 MonotonicMs Device::next_deadline(const MonotonicMs now_ms) const noexcept {
-  return now_ms + kOwnerPollPeriodMs;
+  const MonotonicMs ceiling = role_ == profile::Role::Endpoint ? 1000
+                              : role_ == profile::Role::Relay  ? 100
+                                                               : 20;
+  MonotonicMs due = now_ms > UINT64_MAX - ceiling ? UINT64_MAX : now_ms + ceiling;
+  const auto sooner = [&](const MonotonicMs at) {
+    if (at < due) due = at;
+  };
+  if (runtime_ != nullptr) sooner(runtime_->next_deadline(now_ms));
+  if (owner_ != nullptr) sooner(owner_->next_deadline(now_ms));
+#if ROUTELOOM_DEVICE_SLEEP
+  if (power_ != nullptr) sooner(power_->next_deadline(now_ms));
+#endif
+  // Application hooks, USB and optional configuration ports have no
+  // deadline callback yet, so preserve their documented cadence.
+  if (bridge_ != nullptr || poll_hook_ != nullptr || operation_ != Operation::None) {
+    sooner(now_ms > UINT64_MAX - kOwnerPollPeriodMs ? UINT64_MAX : now_ms + kOwnerPollPeriodMs);
+  }
+#if ROUTELOOM_DEVICE_REMOTE_CONFIG
+  if (remote_config_ != nullptr) sooner(now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2);
+#endif
+#if ROUTELOOM_DEVICE_MIGRATION
+  if (channel_plan_ != nullptr) sooner(now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2);
+#endif
+  return due < now_ms ? now_ms : due;
+}
+
+void Device::bind_runtime(espnow::EspNowRuntime& runtime) noexcept {
+  // post() may run before Owner startup finishes. Publish the runtime
+  // under the same lock that protects the producer's notification target.
+  portENTER_CRITICAL(&posted_lock_);
+  runtime_ = &runtime;
+  portEXIT_CRITICAL(&posted_lock_);
 }
 
 Status Device::post(const Job job, void* ctx) noexcept {
   if (job == nullptr) return Status::error(StatusCode::InvalidArgument, "post job missing");
   portENTER_CRITICAL(&posted_lock_);
+#if ROUTELOOM_DEVICE_SLEEP
+  if (sleep_post_blocked_) {
+    portEXIT_CRITICAL(&posted_lock_);
+    return Status::error(StatusCode::Busy, "sleep handoff in progress");
+  }
+#endif
   const bool full = posted_count_ == kPostCapacity;
   if (!full) {
     posted_[static_cast<std::size_t>((posted_head_ + posted_count_) % kPostCapacity)] =
         Posted{job, ctx};
     ++posted_count_;
   }
+  espnow::EspNowRuntime* const target = runtime_;
   portEXIT_CRITICAL(&posted_lock_);
+  if (!full && target != nullptr) target->notify_owner();
   return full ? Status::error(StatusCode::Busy, "post queue full") : Status::success();
 }
 
@@ -561,6 +635,99 @@ void Device::update_observation_remote() noexcept {
 #endif
 }
 
+#if ROUTELOOM_DEVICE_SLEEP
+Status Device::bind_sleep(PowerCoordinator& power, const ResetCause cause,
+                          const ElapsedInterval elapsed, const MonotonicMs now_ms) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (runtime_ == nullptr || !runtime_->node().started() || power_ != nullptr ||
+      !power.owns_node(runtime_->node())) {
+    return Status::error(StatusCode::InvalidState, "sleep coordinator binding");
+  }
+  power_ = &power;
+  sleep_radio_generation_ = runtime_->radio_generation();
+  CallbackScope scope(in_callback_);
+  return power.begin(cause, elapsed, now_ms);
+}
+
+Status Device::prepare_sleep(const SleepRequest& request) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (power_ == nullptr) return Status::error(StatusCode::Unsupported, "sleep not bound");
+  CallbackScope scope(in_callback_);
+  return power_->sleep_prepare(request, runtime_->now_ms());
+}
+
+Status Device::enter_sleep(const SleepTicket& ticket) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (power_ == nullptr) return Status::error(StatusCode::Unsupported, "sleep not bound");
+  CallbackScope scope(in_callback_);
+  portENTER_CRITICAL(&posted_lock_);
+  const bool posted = posted_count_ != 0;
+  // Freeze acceptance before the final gate; no producer can leave a
+  // newly accepted job behind while the platform enters sleep.
+  if (!posted) sleep_post_blocked_ = true;
+  portEXIT_CRITICAL(&posted_lock_);
+  const MonotonicMs now = runtime_->now_ms();
+  if (posted || !runtime_->sleep_quiescent()) (void)power_->notify_app_event(now);
+  if (runtime_->radio_generation() != sleep_radio_generation_) {
+    (void)power_->notify_radio_reset(now);
+  }
+  const Status status = power_->sleep_enter(ticket, now);
+  if (power_->state() != PowerState::Sleeping) {
+    portENTER_CRITICAL(&posted_lock_);
+    sleep_post_blocked_ = false;
+    portEXIT_CRITICAL(&posted_lock_);
+  }
+  return status;
+}
+
+Status Device::abort_sleep() noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (power_ == nullptr) return Status::error(StatusCode::Unsupported, "sleep not bound");
+  CallbackScope scope(in_callback_);
+  return power_->sleep_abort(nullptr, runtime_->now_ms());
+}
+
+Status Device::wake(const ResetCause cause, const ElapsedInterval elapsed,
+                    const MonotonicMs now_ms) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (power_ == nullptr) return Status::error(StatusCode::Unsupported, "sleep not bound");
+  CallbackScope scope(in_callback_);
+  portENTER_CRITICAL(&posted_lock_);
+  sleep_post_blocked_ = false;
+  portEXIT_CRITICAL(&posted_lock_);
+  const Status status = power_->wake(cause, elapsed, now_ms);
+  sleep_radio_generation_ = runtime_->radio_generation();
+  return status;
+}
+
+SleepTicket Device::sleep_ticket() const noexcept {
+  return power_ == nullptr ? SleepTicket{} : power_->ticket();
+}
+
+ResumeOutcome Device::wake_info() const noexcept {
+  return power_ == nullptr ? ResumeOutcome::None : power_->resume_outcome();
+}
+
+#else
+Status Device::bind_sleep(PowerCoordinator&, ResetCause, ElapsedInterval, MonotonicMs) noexcept {
+  return Status::error(StatusCode::Unsupported, "sleep not compiled");
+}
+Status Device::prepare_sleep(const SleepRequest&) noexcept {
+  return Status::error(StatusCode::Unsupported, "sleep not compiled");
+}
+Status Device::enter_sleep(const SleepTicket&) noexcept {
+  return Status::error(StatusCode::Unsupported, "sleep not compiled");
+}
+Status Device::abort_sleep() noexcept {
+  return Status::error(StatusCode::Unsupported, "sleep not compiled");
+}
+Status Device::wake(ResetCause, ElapsedInterval, MonotonicMs) noexcept {
+  return Status::error(StatusCode::Unsupported, "sleep not compiled");
+}
+SleepTicket Device::sleep_ticket() const noexcept { return {}; }
+ResumeOutcome Device::wake_info() const noexcept { return ResumeOutcome::None; }
+#endif
+
 // --- Facade ---------------------------------------------------------------------
 
 bool Device::callback_active() const noexcept {
@@ -573,6 +740,68 @@ Status Device::send(const NodeId destination, const ByteView payload,
   if (runtime_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
   return runtime_->send_application(destination, payload, options, id);
 }
+
+Status Device::send_object(NodeId destination, ByteView data, const ObjectOptions& options,
+                           ObjectId& id) noexcept {
+  id = 0;
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  if (object_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
+  return object_->send(destination, data, options, runtime_->now_ms(), id);
+#else
+  (void)destination; (void)data; (void)options;
+  return Status::error(StatusCode::Unsupported, "object transfer disabled");
+#endif
+}
+Status Device::cancel_object(ObjectId id) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  if (object_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
+  return object_->cancel(id);
+#else
+  (void)id;
+  return Status::error(StatusCode::Unsupported, "object transfer disabled");
+#endif
+}
+Status Device::register_object_buffer(MutableByteView storage) noexcept {
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  if (object_ == nullptr) return Status::error(StatusCode::InvalidState, "device not started");
+  return object_->register_buffer(storage);
+#else
+  (void)storage;
+  return Status::error(StatusCode::Unsupported, "object transfer disabled");
+#endif
+}
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+bool Device::Observer::object_receive_ready() const noexcept {
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
+  if (device_ != nullptr && device_->bridge_ != nullptr) return device_->bridge_->object_receive_ready();
+#endif
+  return true;
+}
+std::size_t Device::Observer::object_receive_slots() const noexcept {
+  return ROUTELOOM_APP_OBJECT_RX_SLOTS;
+}
+void Device::Observer::on_object(const ObjectRxInfo& info, ByteView data) noexcept {
+  if (device_ == nullptr) return;
+  device_->in_callback_ = true;
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
+  if (device_->bridge_ != nullptr) device_->bridge_->on_object(info, data);
+#endif
+  if (device_->object_observer_ != nullptr) device_->object_observer_->on_object(info, data);
+  device_->in_callback_ = false;
+}
+void Device::Observer::on_object_result(const ObjectResult& result) noexcept {
+  if (device_ == nullptr) return;
+  device_->in_callback_ = true;
+#if ROUTELOOM_PROFILE_HAS_GATEWAY
+  if (device_->bridge_ != nullptr) device_->bridge_->on_object_result(result);
+#endif
+  if (device_->object_observer_ != nullptr) device_->object_observer_->on_object_result(result);
+  device_->in_callback_ = false;
+}
+#endif
 
 Status Device::send_group(const GroupId group, const ByteView payload,
                           const GroupSendOptions& options, MessageId& id) noexcept {
@@ -599,6 +828,11 @@ DeviceCapabilities Device::capabilities() const noexcept {
   caps.security_profile =
       caps.member ? SecurityProfile::Candidate : SecurityProfile::Development;
   caps.usb_gateway = bridge_ != nullptr;
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  caps.object_transfer = object_ != nullptr;
+  caps.max_object_bytes = object_wire::kMaxBytes;
+  caps.object_rx_slots = ROUTELOOM_APP_OBJECT_RX_SLOTS;
+#endif
   caps.max_payload = static_cast<std::uint16_t>(kMaxApplicationPayload);
   caps.max_group_payload = static_cast<std::uint16_t>(kGroupPayloadMax);
   if (runtime_ != nullptr) {
@@ -739,7 +973,14 @@ void Device::update_membership(const MonotonicMs now_ms) noexcept {
   }
   if (operation_ == Operation::Join) {
     if (stage != MembershipStage::Member) operation_left_member_ = true;
-    if (stage == MembershipStage::Member && operation_left_member_) {
+    const StatusCode result = owner_->coordinator().join_search_result();
+    if (result == StatusCode::AuthorizationFailed) {
+      finish_operation(ROUTELOOM_REASON_JOIN_DENIED);
+    } else if (result == StatusCode::ApprovalRequired) {
+      finish_operation(ROUTELOOM_REASON_JOIN_PENDING);
+    } else if (result == StatusCode::Expired) {
+      finish_operation(ROUTELOOM_REASON_JOIN_TIMEOUT);
+    } else if (stage == MembershipStage::Member && operation_left_member_) {
       finish_operation(ROUTELOOM_REASON_JOINED);
     } else if (stage == MembershipStage::Removed || joiner.counters.denies > operation_denies_) {
       finish_operation(ROUTELOOM_REASON_JOIN_DENIED);
@@ -747,7 +988,8 @@ void Device::update_membership(const MonotonicMs now_ms) noexcept {
       finish_operation(ROUTELOOM_REASON_RECOVERY_REQUIRED);
     } else if (joiner.counters.pendings > operation_pendings_) {
       finish_operation(ROUTELOOM_REASON_JOIN_PENDING);
-    } else if (now_ms >= operation_deadline_ms_) {
+    } else if (now_ms >= operation_deadline_ms_ ||
+               (smart_join_ && joiner.state == sdkv1::JoinState::Stopped)) {
       finish_operation(ROUTELOOM_REASON_JOIN_TIMEOUT);
     }
   } else if (operation_ == Operation::Leave && stage == MembershipStage::Recovery) {
@@ -780,6 +1022,15 @@ void Device::on_restart(void* self, const bool leave) noexcept {
   if (device.operation_ == Operation::Leave) device.finish_operation(ROUTELOOM_REASON_LEFT);
 }
 
+Status Device::join_mark(sdkv1::JoinMark& out) noexcept {
+  out = {};
+  if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
+  if (stores_ == nullptr || !stores_->identity().has_identity()) {
+    return Status::error(StatusCode::InvalidState, "identity unavailable");
+  }
+  return sdkv1::identity_join_mark(stores_->identity().identity(), out);
+}
+
 Status Device::request_join(OperationId& operation) noexcept {
   operation = 0;
   if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
@@ -799,7 +1050,7 @@ Status Device::request_join(OperationId& operation) noexcept {
   operation_denies_ = joiner.counters.denies;
   operation_pendings_ = joiner.counters.pendings;
   operation_left_member_ = owner_->coordinator().mode() != sdkv1::CoordinatorMode::Member;
-  operation_deadline_ms_ = now_ms + kJoinOperationMs;
+  operation_deadline_ms_ = now_ms + search_ms_;
   if (++operation_id_ == 0) ++operation_id_;
   operation_ = Operation::Join;
   operation = operation_id_;
@@ -834,8 +1085,17 @@ Status Device::apply_join_policy(const JoinPolicy& policy) noexcept {
   timing.avoid_blocked_ms = policy.avoid_blocked_s * 1000U;
   timing.retry_max_ms = policy.retry_max_s * 1000U;
   timing.start_jitter_ms = policy.start_jitter_ms;
+  timing.smart_join = policy.smart_join;
+  timing.boot_join = policy.boot_join;
+  timing.same_site_only = policy.same_site_only;
+  timing.listen_ms = policy.listen_ms;
+  timing.search_ms = policy.search_ms;
   const Status status = owner_->apply_join_policy(timing, policy.removal_holdoff_s * 1000U);
-  if (status) isolation_notice_ms_ = policy.isolation_notice_s * 1000U;
+  if (status) {
+    isolation_notice_ms_ = policy.isolation_notice_s * 1000U;
+    smart_join_ = policy.smart_join;
+    search_ms_ = policy.search_ms;
+  }
   return status;
 }
 
@@ -911,7 +1171,13 @@ void Device::update_connectivity(const MonotonicMs now_ms) noexcept {
                       ((stage_ == MembershipStage::Joining ||
                         stage_ == MembershipStage::PendingAuthority) &&
                        stores_->site().has_site());
-  if (!member) {
+#if ROUTELOOM_DEVICE_SLEEP
+  if (power_ != nullptr && power_->state() == PowerState::Sleeping) {
+    state = Connectivity::Sleeping;
+    reason = 0;
+  } else
+#endif
+      if (!member) {
     contact_valid_ = false;
   } else if (security_ == DeviceSecurity::DevRam
                  ? role_ == profile::Role::Gateway
@@ -980,7 +1246,12 @@ void Device::update_connectivity(const MonotonicMs now_ms) noexcept {
     }
   } else if (state == Connectivity::Isolated && isolation_notice_ms_ != 0 && !isolation_noticed_ &&
              now_ms - connectivity_since_ms_ >= isolation_notice_ms_) {
-    // JoinPolicy: a long isolation is reported once; it never leaves.
+    // An isolation trigger only verifies the retained site; automatic
+    // switching while retaining membership requires A2 (#196b).
+    if (smart_join_ && operation_ == Operation::None) {
+      OperationId operation = 0;
+      (void)request_join(operation);
+    }
     isolation_noticed_ = true;
     if (device_observer_ != nullptr) {
       ConnectivitySnapshot snapshot = connectivity();

@@ -27,19 +27,22 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 |---|---|---|---|---|
 | Core C ABI | 3 | `ROUTELOOM_CORE_C_ABI` / `CORE_C_ABI` | `components/routeloom/include/routeloom/routeloom.h` | exact major in every struct header; 3.x adds tail fields and functions only; layouts in protocol/abi-golden |
 | Device C API | 1 | `ROUTELOOM_DEVICE_C_API` / `DEVICE_C_API` | `components/routeloom_device/include/routeloom/device.h` | exact major in every struct header; 1.x adds tail fields and functions only; layouts in protocol/abi-golden |
+| AppObject payload | 1 | `ROUTELOOM_APP_OBJECT_SCHEMA` / `APP_OBJECT_SCHEMA` | `components/routeloom/include/routeloom/app_object_wire.hpp` | optional authenticated unicast; extension types 64-66; 121-byte chunks; 4096-byte limit |
 | Mesh wire major | 2 | `ROUTELOOM_WIRE_MAJOR` / `WIRE_MAJOR` | `components/routeloom/include/routeloom/wire.hpp` | never changes within SDK 2.x; other majors are rejected |
 | Mesh wire minor | 0 | `ROUTELOOM_WIRE_MINOR` / `WIRE_MINOR` | `components/routeloom/include/routeloom/wire.hpp` | emitted by this build; decode accepts any minor of major 2 (forward-compatible additions only) |
 | RLD1 carrier | 1 | `ROUTELOOM_RLD1_VERSION` / `RLD1_VERSION` | `components/routeloom/include/routeloom/autonomy_wire.hpp` | classified once by magic+version |
-| RLD1 ZeroTouch body | 3 | `ROUTELOOM_RLD1_ZT_BODY` / `RLD1_ZT_BODY` | `components/routeloom/include/routeloom/sdkv1_join_transport.hpp` | unknown body versions are dropped |
+| RLD1 ZeroTouch body | 4 | `ROUTELOOM_RLD1_ZT_BODY` / `RLD1_ZT_BODY` | `components/routeloom/include/routeloom/sdkv1_join_transport.hpp` | smart probes use 4; legacy 3 remains readable; other versions are dropped |
 | HostLink (RLU1) protocol | 2 | `ROUTELOOM_HOSTLINK_PROTOCOL` / `HOSTLINK_PROTOCOL` | `components/routeloom/include/routeloom/usb_codec.hpp` | strict equality; bound into the HELLO transcript |
 | HostOps schema | 1 | `ROUTELOOM_HOSTOPS_SCHEMA` / `HOSTOPS_SCHEMA` | `components/routeloom/include/routeloom/usb_host_ops.hpp` | subcommands and capability bits are additive |
 | HostOps join relay schema | 2 | `ROUTELOOM_HOSTOPS_JOIN_RELAY_SCHEMA` / `HOSTOPS_JOIN_RELAY_SCHEMA` | `components/routeloom/include/routeloom/usb_host_ops.hpp` | only subcommands 0x60-0x63 use it |
-| AuthorityEnvelope | 1 | `ROUTELOOM_AUTHORITY_ENVELOPE` / `AUTHORITY_ENVELOPE` | `components/routeloom/include/routeloom/key_schedule.hpp` | types 1-8 registered; new types are additive |
+| AuthorityEnvelope | 1 | `ROUTELOOM_AUTHORITY_ENVELOPE` / `AUTHORITY_ENVELOPE` | `components/routeloom/include/routeloom/key_schedule.hpp` | types 1-9 registered; new types are additive |
 | API1 envelope | 1 | `API1_ENVELOPE` | `host/routeloom-host/src/api1.rs` | methods, fields and error codes are additive |
 | API1 caps_version | 2 | `API1_CAPS` | `host/routeloom-host/src/api1.rs` | bumped when an existing capability's meaning changes |
 
 | Persisted format | Version | C / Rust name | Defined in | Unknown-version behavior |
 |---|---|---|---|---|
+| Proxy policy record | 2 | `ROUTELOOM_STORE_PROXY_POLICY_FORMAT` / `STORE_PROXY_POLICY_FORMAT` | `components/routeloom/src/sdkv1_records.cpp` | format 1 reads without an expected list; format 2 stores the bounded list; others refused |
+| Device join policy record | 2 | `ROUTELOOM_STORE_JOIN_POLICY_FORMAT` / `STORE_JOIN_POLICY_FORMAT` | `components/routeloom/src/sdkv1_records.cpp` | format 1 reads with legacy defaults; format 2 adds finite smart search; others refused |
 | Authority ledger format | 1 | `ROUTELOOM_STORE_AUTHORITY_LEDGER_FORMAT` / `STORE_AUTHORITY_LEDGER_FORMAT` | `components/routeloom/src/authority.cpp` | unknown format rejected |
 | Authority ledger (device) | 1 | `ROUTELOOM_STORE_AUTHORITY_LEDGER` / `STORE_AUTHORITY_LEDGER` | `components/routeloom/include/routeloom/authority.hpp` | unknown version reported Unsupported, never applied |
 | Config journal format (device) | 2 | `ROUTELOOM_STORE_CONFIG_JOURNAL_FORMAT` / `STORE_CONFIG_JOURNAL_FORMAT` | `components/routeloom/src/config.cpp` | format 1 is readable; writes use format 2 |
@@ -64,7 +67,7 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 | Host operation store (SQLite) | 4 | `STORE_HOST_OPS` | `host/routeloom-host/src/sqlite_store.rs` | accepts 1..=current and migrates forward |
 | Site Authority store (SQLite) | 3 | `STORE_SITE` | `host/routeloom-host/src/site/store.rs` | migrates 1 and 2 forward, keeping a copy of the old file; other versions refused |
 
-Toolchain: ESP-IDF v6.0.3 (`76f5dedd9950a3012fee8fb7d5586df21fc67802`), Rust 1.85.0. Partition layout ID: not registered yet.
+Toolchain: ESP-IDF v6.0.3 (`76f5dedd9950a3012fee8fb7d5586df21fc67802`), Rust 1.85.0. Partition layout ID: PT-4M-v2.
 
 Reason codes are u16 and are allocated by area:
 
@@ -104,9 +107,10 @@ with shared C++/Rust golden vectors under `protocol/golden`. Normative text:
   and the APPLIED execution lease carries a 32-bit end epoch. v1 frames are
   rejected. Persisted TX counter and replay floor records moved to layout 2;
   v1 records fail closed (`IntegrityError`), so a device flashed with v1
-  firmware needs an NVS erase before running v2. The C ABI bumped
-  `RL_ABI_VERSION` to 2 (`rl_node_config_t` / `rl_security_context_t` epoch
-  and generation fields are `uint32_t`). Rationale: issue #29/#48 — a 16-bit
+  firmware needs an NVS erase before running v2. At that earlier wire transition the C ABI bumped
+  to 2 (`rl_node_config_t` / `rl_security_context_t` epoch and generation fields
+  became `uint32_t`). The current core C ABI is 3; follow §4 and the
+  [v2 migration guide](../user/migrating-v2.md). Rationale: issue #29/#48 — a 16-bit
   epoch consumed per boot wrapped after 65,535 boots and permanently locked
   the node out.
 
@@ -187,7 +191,10 @@ tests: its security vtable holds static keys only, and production security
 - `rl_context` is opaque; storage is caller-provided via
   `rl_context_size()`/`rl_context_alignment()` + `rl_init`.
 - The Device C API (`routeloom/device.h`, `rl_dev_*`) follows the same
-  header rule with its own major, `RL_DEV_API_VERSION` (`1`); its layouts
+  header rule with its own major, `RL_DEV_API_VERSION` (`1`). Its additive
+  tails accept the original prefix: capabilities before `object_transfer`,
+  observer before `on_object`, and join policy before `smart_join`; fields
+  outside the caller's `struct_size` are not accessed. Its layouts
   are pinned in [`protocol/abi-golden/device-api1.json`](../../protocol/abi-golden/device-api1.json)
   by the same tool. Its value types shared with the core (`rl_message_id_t`,
   `rl_delivery_result_t`, `rl_applied_*_t`, `rl_group_send_options_t`) carry

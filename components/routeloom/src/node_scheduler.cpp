@@ -33,6 +33,8 @@ SchedClass MeshNode::TxScheduler::classify(const TxJob& job) noexcept {
     }
     return SchedClass::Normal;
   }
+  if (group_type == FrameType::AppObjectStart || group_type == FrameType::AppObjectChunk ||
+      group_type == FrameType::AppObjectAck) return SchedClass::Bulk;
   if (job.form == JobForm::Forwarded) {
     // Transit traffic keeps its lane across hops: receipts and application
     // results ride management; everything else follows the header's
@@ -52,6 +54,10 @@ SchedClass MeshNode::TxScheduler::classify(const TxJob& job) noexcept {
     }
   }
   switch (job.plain.header.type) {
+    case FrameType::AppObjectStart:
+    case FrameType::AppObjectChunk:
+    case FrameType::AppObjectAck:
+      return SchedClass::Bulk;
     case FrameType::Data:
     case FrameType::Service:
       // Service=21 payloads classify like application DATA by priority —
@@ -288,6 +294,8 @@ MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
   // DRR across the four classes, charged by estimated TX cost. Inside a
   // class the per-flow round-robin keeps a light sender from being pinned
   // behind one big continuous flow.
+  bool foreground_checked = false;
+  bool foreground_ready = false;
   for (std::size_t round = 0; round < kMaxSelectRounds; ++round) {
     bool any = false;
     for (std::size_t offset = 0; offset < kSchedClassCount; ++offset) {
@@ -312,7 +320,24 @@ MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
           if (!flow->overflow) flows_.release(flow);
           continue;
         }
-        if (head->not_before_ms > now_ms) {
+        const auto& header = head->form == JobForm::Plain ? head->plain.header : head->forwarded.header;
+        const bool object = header.type == FrameType::AppObjectStart ||
+                            header.type == FrameType::AppObjectChunk || header.type == FrameType::AppObjectAck;
+        if (object && !foreground_checked) {
+          // AppObject uses spare airtime: a ready foreground flow gets the
+          // next physical frame even when the DRR cursor points at Bulk.
+          // A blocked peer must not hold up unrelated object transfers.
+          const auto ready = [&](const FlowDesc& candidate) noexcept {
+            const auto* job = candidate.jobs.head;
+            return candidate.sched_class != SchedClass::Bulk && job != nullptr &&
+                   job->not_before_ms <= now_ms && node.tx_admitted_now(*job);
+          };
+          foreground_ready = flows_.find(ready) != nullptr;
+          for (const auto& candidate : overflow_) foreground_ready |= ready(candidate);
+          foreground_checked = true;
+        }
+        if (head->not_before_ms > now_ms ||
+            (object && (now_ms < node.object_send_after_ms_ || foreground_ready))) {
           // Link-retry jitter hold (radio.md §8): the job waits for its
           // decorrelation delay — skipped like a window-blocked head and
           // revisited on a later pass.

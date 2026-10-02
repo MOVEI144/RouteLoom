@@ -1,6 +1,6 @@
 # 入門：最初の疎通からアプリへ
 
-SDK は `2.0.0-dev`。この手順の host smoke は実 Owner・MeshNode を通すが、RF の到達距離や実機認定を証明しない。[文書案内](../README.md)で pending と[実機記録](../hil/2026-10-01-stab-fix.md)を確認する。
+SDK は `2.0.0-dev`。この手順の host smoke は実 Owner・MeshNode を通すが、RF の到達距離や実機認定を証明しない。[文書案内](../README.md)で提供機能と [STATUS](../STATUS.md)の実機資格を確認する。
 
 ## 1. 開発環境を固定する
 
@@ -56,13 +56,13 @@ DevRam は `Development`。PSK を共有した RAM session の開発用で、製
 
 ## 4. 配布 image で始める場合
 
-現在は正式な v2 release artifact の受入待ち（V2-22／H4）。公開済みの image があるとは扱わない。release が用意されたら chip と app の archive、SHA-256、commit、IDF、partition、security profile を照合する。release firmware は `flasher_args.json`／`flash_args` を含む。固定 offset を手入力せず、その image の flash 引数を使う。USB 親機は BoardConfig と HostLink secret が必要なので、DevRam endpoint の Kconfig 手順だけでは起動しない。
+配布基盤（V2-22）は実装済み。正確な RC archive を使う H4 の受入は実施予定。公開済みの正式 image があるとは扱わない。release が用意されたら chip と app の archive、SHA-256、commit、IDF、partition、security profile を照合する。release firmware は `flasher_args.json`／`flash_args` を含む。固定 offset を手入力せず、その image の flash 引数を使う。USB 親機は BoardConfig と HostLink secret が必要なので、DevRam endpoint の Kconfig 手順だけでは起動しない。
 
 2 台の確認は setup image で各 board の identity と設定を書き、対応する field image に app-only 更新し、daemon の接続と node 観測を確認してから送受信する。[書込み・provisioning runbook](../hil.md)の chip/MAC 確認、NVS 保持、readback を守る。全消去は利用者が再 provision の対象を確定したときだけ行う。
 
 ## 5. MemberEdhoc と host daemon
 
-現 main の reference／bridge／examples と component の既定は DevRam。bench は MemberEdhoc。製品既定の MemberEdhoc 切替は H2 合格後の V2-17b に pending。Member の構成は build 時に `CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y` を明示し、対応する BoardConfig を provision する。Member は `Candidate` であり、`Production` 認定ではない。
+reference／bridge／bench の既定は MemberEdhoc。component と quick start／examples は DevRam。独自 project で Member を選ぶときは `CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y` を設定し、対応する BoardConfig を provision する。既定切替は実装済み、H2 は実施予定。Member は `Candidate` であり、`Production` 認定ではない。
 
 1. 事務所で on-device keygen、PoP、Device CA が発行する DevCert、identity の seal/lock を行う。現場非依存の identity を作る。[provisioning 契約](../design/sdk-v1/07-host-api-tooling.md)と[実機手順](../hil.md)を参照する。
 2. Site Authority の private directory と inventory、承認方針を用意する。開発 site のみ `routeloomctl lab-site-init` を使う。[host §11](../spec/host.md)の spec と receipt 検査に従う。
@@ -80,4 +80,4 @@ cargo +1.85.0 build --release --locked
 
 paths と UID は実環境に合わせる。socket の親 directory は先に作る。ACL は[運用](operations.md)を参照。`capabilities.get`、`link.get`、`nodes.list` で実際の接続と capability を確認する。Member の鍵・署名・epoch は daemon が判断し、アプリで複製しない。
 
-Member の API1 payload read は epoch を含む full network と対応する ACL を使う（[network の scope](../api/api1.md)）。上の consumer smoke は DevRam と Member の両方を使う。5 台／3-hop は Member の参加収束に失敗し、DevRam でも負荷前の warm-up 配送が期限切れになる未合格項目（K01-D）。直接構成の表示板負荷の成功を Member の資格へ流用しない。
+Member の API1 payload read は epoch を含む full network と対応する ACL を使う（[network の scope](../api/api1.md)）。上の consumer smoke は DevRam と Member の両方を使う。5 台／3-hop の周期負荷 K01 と Member full network の K05 は実 Owner harness に登録されている。host の合格を実機の資格へ流用しない。H2／H3／H4 は実施予定、C5 は実機確認待ち。group と sleep の導入は [利用ガイド](guide.md)と [Kconfig](configuration.md)を参照する。

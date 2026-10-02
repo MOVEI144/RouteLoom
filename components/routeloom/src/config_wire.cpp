@@ -321,11 +321,11 @@ void ConfigTarget::handle_manifest(const NodeId peer, const wire::PlainFrame& fr
     if (slot.origin != origin || slot.kind != manifest.kind ||
         slot.hash != manifest.object_hash ||
         slot.total_len != manifest.total_len) {
-      send_ack(origin, manifest.object_hash, slot.received,
+      send_ack(origin, manifest.object_hash, slot.assembler.received(),
                autonomy::ObjectAckStatus::Failed, now_ms);
       return;
     }
-    send_ack(origin, manifest.object_hash, slot.received,
+    send_ack(origin, manifest.object_hash, slot.assembler.received(),
              autonomy::ObjectAckStatus::Incomplete, now_ms);
     return;
   }
@@ -366,9 +366,10 @@ void ConfigTarget::handle_manifest(const NodeId peer, const wire::PlainFrame& fr
   slot.journal = journal;  // null for kind 5 — the trust store owns it
   slot.hash = manifest.object_hash;
   slot.total_len = manifest.total_len;
-  slot.received = 0;
   slot.started_ms = now_ms;
-  std::memset(slot.bitmap.data(), 0, slot.bitmap.size());
+  (void)slot.assembler.begin({slot.buffer.data(), slot.buffer.size()},
+                             {slot.bitmap.data(), slot.bitmap.size()},
+                             slot.total_len, 1, 0);
   send_ack(origin, manifest.object_hash, 0,
            autonomy::ObjectAckStatus::Incomplete, now_ms);
 }
@@ -393,7 +394,7 @@ void ConfigTarget::handle_chunk(const NodeId peer, const wire::PlainFrame& frame
   }
   if (slot.cancelled) return;
   if (now_ms - slot.started_ms > kConfigReassemblyTimeoutMs) {
-    const std::uint16_t progress = slot.received;
+    const std::uint16_t progress = slot.assembler.received();
     drop_assembly();
     send_ack(origin, chunk.object_hash, progress,
              autonomy::ObjectAckStatus::Failed, now_ms);
@@ -403,36 +404,23 @@ void ConfigTarget::handle_chunk(const NodeId peer, const wire::PlainFrame& frame
       static_cast<std::uint32_t>(chunk.offset) + chunk.data_size >
           slot.total_len) {
     // Out-of-window bytes poison the assembly (05 §5.5).
-    const std::uint16_t progress = slot.received;
+    const std::uint16_t progress = slot.assembler.received();
     drop_assembly();
     send_ack(origin, chunk.object_hash, progress,
              autonomy::ObjectAckStatus::Failed, now_ms);
     return;
   }
-  for (std::uint16_t i = 0; i < chunk.data_size; ++i) {
-    const std::uint16_t at = static_cast<std::uint16_t>(chunk.offset + i);
-    const std::uint8_t mask = static_cast<std::uint8_t>(1U << (at & 7U));
-    if ((slot.bitmap[at >> 3U] & mask) != 0) {
-      if (slot.buffer[at] != chunk.data[i]) {
-        // Same offset, different bytes — reject the whole assembly.
-        const std::uint16_t progress = slot.received;
-        drop_assembly();
-        send_ack(origin, chunk.object_hash, progress,
-                 autonomy::ObjectAckStatus::Failed, now_ms);
-        return;
-      }
-      continue;
-    }
-    slot.bitmap[at >> 3U] =
-        static_cast<std::uint8_t>(slot.bitmap[at >> 3U] | mask);
-    slot.buffer[at] = chunk.data[i];
-    ++slot.received;
+  if (!slot.assembler.insert(chunk.offset, {chunk.data.data(), chunk.data_size}, now_ms)) {
+    const std::uint16_t progress = slot.assembler.received();
+    drop_assembly();
+    send_ack(origin, chunk.object_hash, progress, autonomy::ObjectAckStatus::Failed, now_ms);
+    return;
   }
-  if (slot.received >= slot.total_len && !slot.computing) {
+  if (slot.assembler.received() >= slot.total_len && !slot.computing) {
     dispatch_complete(now_ms);
     return;
   }
-  send_ack(origin, chunk.object_hash, slot.received,
+  send_ack(origin, chunk.object_hash, slot.assembler.received(),
            autonomy::ObjectAckStatus::Incomplete, now_ms);
 }
 
@@ -502,6 +490,7 @@ void ConfigTarget::drop_assembly() noexcept {
     return;
   }
   if (assembly_.journal != nullptr) assembly_.journal->cancel_verification();
+  assembly_.assembler.reset();
   assembly_.active = false;
   assembly_.computing = false;
   assembly_.cancelled = false;

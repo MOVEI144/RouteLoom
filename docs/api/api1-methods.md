@@ -47,6 +47,9 @@ capability の `methods` を毎接続で確認する。受付と最終成功は�
 | `messages.unsubscribe` | [host](../spec/host.md) |
 | `nodes.get` | [host](../spec/host.md) |
 | `nodes.list` | [host](../spec/host.md) |
+| `objects.cancel` | [host](../spec/host.md) |
+| `objects.get` | [host](../spec/host.md) |
+| `objects.submit` | [host](../spec/host.md) |
 | `operations.cancel` | [host](../spec/host.md) |
 | `operations.get` | [host](../spec/host.md) |
 | `operations.get_by_key` | [host](../spec/host.md) |

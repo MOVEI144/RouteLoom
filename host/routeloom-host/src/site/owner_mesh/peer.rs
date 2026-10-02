@@ -744,6 +744,7 @@ pub(super) struct MeshPeer {
     pub(super) nvs_save: std::path::PathBuf,
     pub(super) t0: u64,
     pub(super) booted: bool,
+    pub(super) asleep: bool,
     /// Clean lifecycle reboots (exit 42) respawned so far.
     pub(super) reboots: u32,
     pub(super) switching_cuts: u32,
@@ -808,6 +809,7 @@ impl MeshPeer {
             nvs_save: nvs_save.to_path_buf(),
             t0,
             booted: false,
+            asleep: false,
             reboots: 0,
             switching_cuts: 0,
             nvs_fail_next: None,
@@ -968,6 +970,51 @@ impl MeshPeer {
         Some(payload)
     }
 
+    pub(super) fn deadline(&mut self) -> u64 {
+        self.send(b"d");
+        let reply = self.recv().expect("deadline reply");
+        assert_eq!(reply.len(), 9);
+        assert_eq!(reply[0], b'd');
+        get_u64(&reply, &mut 1)
+    }
+
+    // (status, power state, ticket, security parked, sleeps, wakes, RTC saved).
+    pub(super) fn sleep(
+        &mut self,
+        op: u8,
+        now: u64,
+        duration: u64,
+    ) -> (u8, u8, bool, bool, u64, u64, bool, u32) {
+        let mut command = vec![b's', op];
+        command.extend_from_slice(&now.to_le_bytes());
+        command.extend_from_slice(&duration.to_le_bytes());
+        self.send(&command);
+        let reply = self.recv().expect("sleep reply");
+        assert_eq!(reply.len(), 26);
+        assert_eq!(reply[0], b's');
+        if reply[1] == 0 && op == 1 {
+            self.asleep = true;
+        }
+        if reply[1] == 0 && op == 2 {
+            self.asleep = false;
+        }
+        let mut pos = 5;
+        (
+            reply[1],
+            reply[2],
+            reply[3] != 0,
+            reply[4] != 0,
+            get_u64(&reply, &mut pos),
+            get_u64(&reply, &mut pos),
+            {
+                let saved = reply[pos] != 0;
+                pos += 1;
+                saved
+            },
+            get_u32(&reply, &mut pos),
+        )
+    }
+
     /// Sends the tick command; `finish_tick` reads its reply.
     pub(super) fn begin_tick(&mut self, now: u64) {
         let mut command = vec![b'T'];
@@ -1075,12 +1122,68 @@ impl MeshPeer {
         self.send(&command);
     }
 
+    pub(super) fn object_buffer(&mut self) -> u8 {
+        self.send(&[b'o', 0]);
+        let reply = self.recv().expect("object buffer reply");
+        assert_eq!(reply[0], b'o');
+        reply[1]
+    }
+
+    pub(super) fn object_send(&mut self, dst: u64, bytes: &[u8], deadline: u32) -> u8 {
+        let mut command = vec![b'o', 1];
+        command.extend_from_slice(&dst.to_le_bytes());
+        command.extend_from_slice(&deadline.to_le_bytes());
+        command.extend_from_slice(bytes);
+        self.send(&command);
+        let reply = self.recv().expect("object send reply");
+        assert_eq!(reply[0], b'o');
+        reply[1]
+    }
+
+    pub(super) fn object_fill_queue(&mut self, destination: u64) -> (u8, u8) {
+        let mut command = vec![b'o', 4];
+        command.extend_from_slice(&destination.to_le_bytes());
+        self.send(&command);
+        let reply = self.recv().expect("object queue reply");
+        assert_eq!(reply[0], b'o');
+        (reply[1], reply[2])
+    }
+
+    pub(super) fn object_cancel(&mut self) -> u8 {
+        self.send(&[b'o', 3]);
+        let reply = self.recv().expect("object cancel reply");
+        assert_eq!(reply[0], b'o');
+        reply[1]
+    }
+
+    pub(super) fn object_snapshot(&mut self) -> (u32, u32, u8, Vec<u8>) {
+        self.send(&[b'o', 2]);
+        let reply = self.recv().expect("object snapshot");
+        assert_eq!(reply[0], b'o');
+        (
+            u32::from_le_bytes(reply[1..5].try_into().unwrap()),
+            u32::from_le_bytes(reply[5..9].try_into().unwrap()),
+            reply[9],
+            reply[10..].to_vec(),
+        )
+    }
+
     pub(super) fn app_send(&mut self, dst: u64, payload: &[u8]) {
         assert!((1..=128).contains(&payload.len()), "app payload bound");
         let mut command = vec![b'S'];
         command.extend_from_slice(&dst.to_le_bytes());
         command.extend_from_slice(payload);
         self.send(&command);
+    }
+
+    pub(super) fn next_hop(&mut self, destination: u64) -> u64 {
+        let mut command = vec![b'v'];
+        command.extend_from_slice(&destination.to_le_bytes());
+        self.send(&command);
+        let reply = self.recv().expect("route selection");
+        assert_eq!(reply[0], b'v');
+        assert_eq!(reply.len(), 9);
+        get_u64(&reply, &mut 1)
     }
 
     /// G3: bounded application evidence; overflow is a failed observation.
@@ -1262,6 +1365,37 @@ impl MeshPeer {
     /// F05: try send and leave from inside Device callbacks.
     pub(super) fn probe_reentry(&mut self, on: bool) {
         self.send(&[b'G', u8::from(on)]);
+    }
+
+    pub(super) fn join_mark(&mut self) -> [u8; 16] {
+        self.send(b"a");
+        let reply = self.recv().expect("private mark reply");
+        assert_eq!(reply.len(), 18);
+        assert_eq!(&reply[..2], &[b'a', 0]);
+        reply[2..].try_into().expect("16-byte mark")
+    }
+
+    pub(super) fn smart_join_policy(&mut self, boot: bool, same_site: bool, search_ms: u32) {
+        self.join_policy_mode(true, boot, same_site, search_ms);
+    }
+
+    pub(super) fn join_policy_mode(
+        &mut self,
+        smart: bool,
+        boot: bool,
+        same_site: bool,
+        search_ms: u32,
+    ) {
+        let mut command = vec![b'X'];
+        command.extend_from_slice(&600u32.to_le_bytes());
+        command.extend_from_slice(&0u32.to_le_bytes());
+        command.extend_from_slice(&0u32.to_le_bytes());
+        command.extend_from_slice(&[u8::from(smart), u8::from(boot), u8::from(same_site), 0]);
+        command.extend_from_slice(&1000u32.to_le_bytes());
+        command.extend_from_slice(&search_ms.to_le_bytes());
+        self.send(&command);
+        let reply = self.recv().expect("smart policy reply");
+        assert_eq!(&reply[..2], &[b'x', 0]);
     }
 
     /// Device::set_join_policy with `holdoff_s` as the removal holdoff:

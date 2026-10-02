@@ -11,8 +11,8 @@ pub(super) struct Persona {
     pub(super) gateway: bool,
 }
 
-/// World size caps (G1): PR worlds up to 6 nodes, nightly up to 32
-/// (`ROUTELOOM_E2E_NIGHTLY` set).
+/// Default scalable scenario budgets: PR up to 6 nodes, nightly up to 32.
+/// K02 uses its fixed 31-node product topology within the 32-node harness.
 pub(super) fn max_nodes() -> usize {
     if std::env::var_os("ROUTELOOM_E2E_NIGHTLY").is_some() {
         32
@@ -600,6 +600,7 @@ pub(super) struct MeshWorld {
     pub(super) switch: Switch,
     pub(super) now: u64,
     pub(super) rng_state: u64,
+    pub(super) wall_time: Option<u64>,
     pub(super) snaps: Vec<MeshSnap>,
     /// Test-held boots: a gated peer's process is spawned but never
     /// ticked (off the air) until the test releases it. Used where a
@@ -707,9 +708,8 @@ impl MeshWorld {
     ) -> Option<Self> {
         let nodes = switch.nodes();
         assert!(
-            (2..=max_nodes()).contains(&nodes),
-            "{nodes} nodes exceed the world cap {}",
-            max_nodes()
+            (2..=32).contains(&nodes),
+            "{nodes} nodes exceed the 32-node harness capacity"
         );
         assert_eq!(boot_ms.len(), nodes, "one boot time per node");
         if !peers_present() {
@@ -806,6 +806,7 @@ impl MeshWorld {
             switch,
             now,
             rng_state: 0x5EED_1234_5678_9ABC,
+            wall_time: None,
             snaps: vec![MeshSnap::default(); nodes],
             gate: vec![false; nodes],
             join_adapter,
@@ -921,7 +922,10 @@ impl MeshWorld {
             device,
             kind,
             bytes,
-            HostTime::sync(at),
+            HostTime {
+                mono_ms: at,
+                unix_ms: self.wall_time.unwrap_or(at),
+            },
             &mut rng,
         );
         self.rng_state = state;
@@ -942,13 +946,13 @@ impl MeshWorld {
             if !peer.booted && self.now >= peer.t0 && !self.gate[index] {
                 peer.booted = true;
             }
-            if peer.booted {
+            if peer.booted && !peer.asleep {
                 peer.begin_tick(self.now);
             }
         }
         let mut ticks = Vec::with_capacity(nodes);
         for (index, peer) in self.peers.iter_mut().enumerate() {
-            ticks.push(if peer.booted {
+            ticks.push(if peer.booted && !peer.asleep {
                 Some(peer.finish_tick(self.now))
             } else {
                 None
@@ -982,6 +986,14 @@ impl MeshWorld {
         for (from, tick) in ticks.iter().enumerate() {
             let Some(tick) = tick else { continue };
             for tx in &tick.tx {
+                self.switch.radio_bytes += tx.bytes.len() as u64;
+                if tx.bytes.starts_with(b"RLD1")
+                    || (tx.bytes.len() > 4
+                        && tx.bytes[..4] == *b"RL\x02\0"
+                        && matches!(tx.bytes[4], 23 | 24 | 32..=35 | 40 | 41))
+                {
+                    self.switch.management_us[from] += (tx.bytes.len() as u64 + 96) * 32;
+                }
                 self.switch.c7_observe(from, tx.dst_mac, &tx.bytes, b_mac);
                 if tx.dst_mac == BROADCAST_MAC {
                     self.callbacks[from].push((self.now, 1));
@@ -1206,7 +1218,10 @@ impl MeshWorld {
             self.c6_flipped = true;
         }
         self.provision.now = self.now;
-        self.provision.site.service.tick(HostTime::sync(self.now));
+        self.provision.site.service.tick(HostTime {
+            mono_ms: self.now,
+            unix_ms: self.wall_time.unwrap_or(self.now),
+        });
         let _ = self
             .provision
             .site

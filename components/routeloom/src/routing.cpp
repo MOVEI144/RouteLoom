@@ -264,8 +264,21 @@ void RouteTable::evaluate_entry(Entry& entry, const MonotonicMs now_ms) noexcept
   }
 }
 
-void RouteTable::evaluate(const MonotonicMs now_ms) noexcept {
-  entries_.for_each([&](Entry& entry) { evaluate_entry(entry, now_ms); });
+void RouteTable::evaluate(const MonotonicMs now_ms, MonotonicMs* deadline) noexcept {
+  entries_.for_each([&](Entry& entry) {
+    evaluate_entry(entry, now_ms);
+    if (deadline == nullptr) return;
+    const auto sooner = [&](MonotonicMs at) {
+      if (at > now_ms) *deadline = std::min(*deadline, at);
+    };
+    sooner(entry.hold_until_ms);
+    sooner(entry.switch_hold_until_ms);
+    if (entry.improvement_next_hop != kInvalidNodeId)
+      sooner(entry.improvement_since_ms + kImprovementHoldMs +
+             improvement_jitter(entry.destination));
+    if (const auto* busy = busy_link(entry.committed_next_hop))
+      sooner(busy->since_ms + kSevereBusyMs);
+  });
 }
 
 bool RouteTable::update_link_cost(const NodeId next_hop, const RouteMetric cost,
@@ -442,15 +455,16 @@ void RouteTable::invalidate_next_hop(const NodeId next_hop,
         removed = true;
       }
     }
+    // Link loss may already have removed every candidate before the
+    // authenticated restart arrives. Its old hold must end in either case.
+    if (!hold && entry.hold_next_hop == next_hop) {
+      entry.hold_next_hop = kInvalidNodeId;
+      entry.hold_until_ms = 0;
+    }
     if (removed) {
       if (hold) {
         entry.hold_next_hop = next_hop;
         entry.hold_until_ms = now_ms + kRouteHoldDownMs;
-      } else if (entry.hold_next_hop == next_hop) {
-        // A restarted relay's previous-incarnation state is stale but fresh
-        // advertisements must not be held down by the earlier failure.
-        entry.hold_next_hop = kInvalidNodeId;
-        entry.hold_until_ms = 0;
       }
       if (!select(entry).valid) entry.sequence_request_needed = true;
       arm_tombstone(entry, now_ms);
@@ -459,7 +473,7 @@ void RouteTable::invalidate_next_hop(const NodeId next_hop,
   });
 }
 
-std::size_t RouteTable::expire(const MonotonicMs now_ms) noexcept {
+std::size_t RouteTable::expire(const MonotonicMs now_ms, MonotonicMs* deadline) noexcept {
   entries_.erase_if([&](const Entry& entry) {
     return entry.tombstone_expires_at_ms != 0 &&
            entry.tombstone_expires_at_ms <= now_ms;
@@ -476,6 +490,12 @@ std::size_t RouteTable::expire(const MonotonicMs now_ms) noexcept {
     // Lease expiry means the peer went silent, not that it failed: no hold-down.
     arm_tombstone(entry, now_ms);
     if (removed) evaluate_entry(entry, now_ms);
+    if (deadline != nullptr) {
+      if (entry.tombstone_expires_at_ms != 0)
+        *deadline = std::min(*deadline, entry.tombstone_expires_at_ms);
+      for (const auto& candidate : entry.candidates)
+        if (candidate.valid) *deadline = std::min(*deadline, candidate.expires_at_ms);
+    }
   });
   return 2 * entries_.capacity();  // the tombstone pass plus the lease pass
 }

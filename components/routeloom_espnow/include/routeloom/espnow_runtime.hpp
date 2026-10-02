@@ -140,16 +140,11 @@ class EspNowRuntime final : public RadioPort,
   Status start_task(const char* name = "routeloom") noexcept;
   void stop() noexcept;
   void poll_once() noexcept;
-  // Idle the calling owner task until a driver event is queued or
-  // `timeout_ms` elapses (owner_pump.hpp). Pump loops wait with
-  // kOwnerPollPeriodMs between poll_once() passes: a TX completion or RX
-  // frame posted mid-sleep wakes the task NOW instead of riding out the
-  // poll period — the TX-complete -> next-submit path keeps no tick tax
-  // (issue #60-3). Completions staged outside the queue (queue-full TX
-  // callbacks that landed after the pass's entry check) skip the wait via
-  // the shared owner gate — an empty queue must not idle a resolvable
-  // job. Thin peek: the event stays queued for poll_once's ordered drain
-  // (reserved completions still run first).
+  MonotonicMs next_deadline(MonotonicMs now_ms) const noexcept;
+  // Bind before any producer starts. Queue contents are authoritative;
+  // notifications only wake their single consumer (including staged TX).
+  void bind_wake_task(TaskHandle_t task) noexcept { wake_task_.store(task); }
+  bool sleep_quiescent() const noexcept;
   void wait_for_event(MonotonicMs timeout_ms) noexcept;
   void notify_owner() noexcept;
 
@@ -195,6 +190,11 @@ class EspNowRuntime final : public RadioPort,
   }
   // Marks the runtime as started when node bring-up was driven by a
   // PowerCoordinator resume path instead of start().
+#if !defined(ESP_PLATFORM) || CONFIG_ROUTELOOM_DEEP_SLEEP
+  // Owner sets an absolute per-wake budget before starting discovery.
+  // A new wake may arm a fresh budget; individual attempts cannot extend it.
+  void set_radio_deadline(MonotonicMs until) noexcept { radio_until_ms_ = until; }
+#endif
   void mark_started() noexcept { started_ = true; }
 
   Status send_application(NodeId destination, ByteView payload,
@@ -333,7 +333,7 @@ class EspNowRuntime final : public RadioPort,
   static void note_max(std::uint32_t& slot, const std::uint64_t value) noexcept {
     if (value > slot) slot = value > UINT32_MAX ? UINT32_MAX : static_cast<std::uint32_t>(value);
   }
-  enum class EventKind : std::uint8_t { Rx, Tx, Wake };
+  enum class EventKind : std::uint8_t { Rx, Tx };
   // TX completion provenance (02-telemetry §2.2): which lane a send callback
   // belongs to. Stale/fenced completions are evidence under their ORIGINAL
   // generations — they resolve nothing in the node.
@@ -588,6 +588,7 @@ class EspNowRuntime final : public RadioPort,
   // is written ONLY by task_entry (self-published first, self-cleared
   // last) and read by stop() to recognize a call on the poll task.
   std::atomic<TaskHandle_t> task_{nullptr};
+  std::atomic<TaskHandle_t> wake_task_{nullptr};
   std::atomic<bool> task_running_{false};
   std::uint64_t pending_token_{0};
   NodeId pending_node_{kInvalidNodeId};
@@ -708,6 +709,9 @@ class EspNowRuntime final : public RadioPort,
   bool broadcast_peer_{false};
   bool wifi_initialized_{false};
   bool espnow_initialized_{false};
+#if !defined(ESP_PLATFORM) || CONFIG_ROUTELOOM_DEEP_SLEEP
+  MonotonicMs radio_until_ms_{UINT64_MAX};
+#endif
   std::atomic<bool> started_{false};
 };
 

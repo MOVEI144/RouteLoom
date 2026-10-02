@@ -46,6 +46,8 @@ jobs:
         run: |
           cmake -S . -B build-e2e -DROUTELOOM_ENABLE_SANITIZERS="$SANITIZERS" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="$OPTIMIZATION"
           cmake --build build-e2e -j8 --target routeloom_owner_mesh_peer routeloom_joiner_interop_peer routeloom_routing_scale_tests routeloom_group_tests routeloom_periodic_load_tests
+          cmake -S . -B build-e2e-object -DROUTELOOM_ENABLE_SANITIZERS="$SANITIZERS" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="$OPTIMIZATION" -DROUTELOOM_APP_OBJECT_TRANSFER=ON -DROUTELOOM_DEDUP_PROFILE=leaf
+          cmake --build build-e2e-object -j8 --target routeloom_owner_mesh_peer
           cd host
           cargo --version
           cargo +1.85.0 test -p routeloom-host --bins --no-run --message-format=json > ../build-e2e/rust-build.json
@@ -57,7 +59,7 @@ jobs:
           shutil.copy2(executables[0], 'build-e2e/routeloom-host-tests')
           PY
       - name: Preserve executable permissions and paths
-        run: tar -czf e2e-executables.tar.gz build-e2e/routeloom-host-tests build-e2e/tests/cpp/routeloom_*peer build-e2e/tests/cpp/routeloom_routing_scale_tests build-e2e/tests/cpp/routeloom_group_tests build-e2e/tests/cpp/routeloom_periodic_load_tests
+        run: tar -czf e2e-executables.tar.gz build-e2e-object/tests/cpp/routeloom_owner_mesh_peer build-e2e/routeloom-host-tests build-e2e/tests/cpp/routeloom_*peer build-e2e/tests/cpp/routeloom_routing_scale_tests build-e2e/tests/cpp/routeloom_group_tests build-e2e/tests/cpp/routeloom_periodic_load_tests
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: e2e-executables

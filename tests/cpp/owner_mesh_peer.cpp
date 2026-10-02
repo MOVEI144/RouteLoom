@@ -33,6 +33,8 @@
 //                              (unicast succeeds iff delivered)
 //   S <dst u64le><payload>      app-level MeshNode send (reliable, 30 s
 //                              lifetime); at most 16 tracked at once
+//   v <destination u64le>      selected next hop; reply v <next_hop u64le>
+//                              (0 when no route is valid)
 //   V <index u8>               register one synthetic regular neighbor through
 //                              the real runtime; reply v <ok u8><peers u8>
 //   I <index u8> / J <index u8> occupy/release one test driver transient;
@@ -207,6 +209,7 @@
 #include <vector>
 
 #include "bootloader_random.h"
+#include "esp_sleep.h"
 #include "esp_wifi.h"
 #include "nvs.h"
 #include "psa/crypto.h"
@@ -214,6 +217,7 @@
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/edhoc.hpp"
 #include "routeloom/espnow_autonomy.hpp"
+#include "routeloom/espnow_power.hpp"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/espnow_sdkv1_entropy.hpp"
@@ -230,6 +234,13 @@
 #include "idf_stubs.hpp"
 #include "owner_mesh_c_app.h"
 #include "../../examples/standalone_gateway/main/app.hpp"
+
+esp_err_t esp_sleep_enable_timer_wakeup(std::uint64_t) { return ESP_OK; }
+esp_err_t esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(std::uint64_t,
+                                                              esp_sleep_gpio_wake_up_mode_t) {
+  return ESP_OK;
+}
+void esp_deep_sleep_start() {}
 
 namespace {
 
@@ -549,6 +560,7 @@ struct DeviceTestAccess {
   static usb::UsbBridge* bridge(Device& device) noexcept { return device.bridge_; }
   static const GatewayDelivery* gateway(Device& device) noexcept { return device.gateway_; }
   static NodeObserver* app(Device& device) noexcept { return device.app_; }
+  static PowerEvents& power_events() noexcept { return Device::observer(); }
 };
 
 }  // namespace routeloom
@@ -1127,9 +1139,62 @@ class GatewayTxObserver final : public routeloom::GatewayDeliveryObserver {
   GatewayTx& tx_;
 };
 
+struct ObjectEvents final : public routeloom::ObjectObserver {
+  std::array<std::uint8_t, 4096> buffer{};
+  Bytes loan;
+  routeloom::ObjectId active_id{0};
+  Bytes received;
+  routeloom::ObjectResult result{};
+  std::uint32_t rx_count{0};
+  std::uint32_t result_count{0};
+  void on_object(const routeloom::ObjectRxInfo&, routeloom::ByteView data) noexcept override {
+    received.assign(data.data, data.data + data.size); ++rx_count;
+  }
+  void on_object_result(const routeloom::ObjectResult& value) noexcept override {
+    result = value; active_id = 0; ++result_count;
+  }
+};
+
 // Device events and operation results (the harness asserts one event per
 // change). The counters ride the fake flash image across restarts, since a
 // finished leave is reported right before the unassigned restart.
+// Only the non-returning platform sleep syscall is modeled. Security
+// parking, RTC persistence, driver quiescence and recovery use the adapter.
+class SleepPort final : public routeloom::PowerPort {
+ public:
+  explicit SleepPort(routeloom::espnow::EspNowRuntime& runtime) : adapter(runtime) {}
+  routeloom::espnow::EspNowPowerPort adapter;
+  bool asleep{false};
+  routeloom::Status prepare_sleep(routeloom::MonotonicMs now) noexcept override {
+    return adapter.prepare_sleep(now);
+  }
+  void abort_sleep(routeloom::MonotonicMs now) noexcept override { adapter.abort_sleep(now); }
+  bool matches_context(const routeloom::PowerImage& image,
+                       routeloom::NetworkId network) const noexcept override {
+    return adapter.matches_context(image, network);
+  }
+  routeloom::Status capture_cache(routeloom::PowerImage& image) noexcept override {
+    return adapter.capture_cache(image);
+  }
+  routeloom::Status quiesce_radio() noexcept override { return adapter.quiesce_radio(); }
+  routeloom::Status start_radio(const routeloom::PowerImage* image) noexcept override {
+    asleep = false;
+    return adapter.start_radio(image);
+  }
+  routeloom::Status configure_wake(const routeloom::WakePlan& plan) noexcept override {
+    return adapter.configure_wake(plan);
+  }
+  routeloom::Status enter_sleep() noexcept override {
+    if (esp_wifi_stop() != ESP_OK)
+      return routeloom::Status::error(routeloom::StatusCode::RadioFailure, "sleep radio stop");
+    asleep = true;
+    return routeloom::Status::success();
+  }
+  routeloom::Status start_discovery(const routeloom::PowerImage& image) noexcept override {
+    return adapter.start_discovery(image);
+  }
+};
+
 struct DeviceEvents final : public routeloom::DeviceObserver {
   std::uint32_t membership_events{0};
   std::uint16_t last_cause{0};
@@ -1411,7 +1476,7 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   put_u64(out, auth.tx_sent);
   out.push_back(coord.refresh_strikes);
   const JoinSnapshot joiner = owner.coordinator().joiner_snapshot();
-  put_u32(out, joiner.counters.attempts);
+  put_u32(out, owner.coordinator().milestones(runtime.now_ms()).attempts);
   put_u32(out, joiner.counters.m1_sent);
   put_u32(out, joiner.counters.rx_dropped);
   // One bounded diagnostic for the R1 Notice target: a live gateway
@@ -1574,7 +1639,9 @@ int main(int argc, char** argv) {
   Status status = device.open_storage(setup.gateway ? profile::Role::Gateway : profile::kRole,
                                       security);
   if (!status) boot_failed(status);
+  static routeloom::sdkv1::RtcSessionImage sleep_image{};
   DeviceConfig config{};
+  config.sleep_image = &sleep_image;
   config.log_tag = "mesh_peer";
   config.role = setup.gateway ? profile::Role::Gateway : profile::kRole;
   config.security = security;
@@ -1614,6 +1681,8 @@ int main(int argc, char** argv) {
     // the post-RF entropy; the harness needs repeatability).
     config.usb_device_nonce = setup.seed ^ 0xD15EA5ED00B1E5ULL;
   }
+  ObjectEvents objects;
+  device.observe_object(&objects);
   status = device.begin(config, now);
   if (gpio_fail_call != 0) {
     if (status.ok() || status.code != StatusCode::RadioFailure ||
@@ -1640,6 +1709,13 @@ int main(int argc, char** argv) {
     fatal("boot security profile is not visible");
   }
   EspNowSecurityOwner& owner = DeviceTestAccess::owner(device);
+  const SecurityProfile expected_profile =
+      setup.devram ? SecurityProfile::Development : SecurityProfile::Candidate;
+  if (owner.security_profile() != expected_profile ||
+      owner.session_provider().security_profile() != expected_profile ||
+      device.capabilities().security_profile != expected_profile) {
+    fatal("boot security profile does not match the selected mode");
+  }
   Sdkv1Stores& stores = DeviceTestAccess::stores(device);
   EspNowRuntime& runtime = DeviceTestAccess::runtime(device);
   UsbBridge* bridge = DeviceTestAccess::bridge(device);
@@ -1656,7 +1732,7 @@ int main(int argc, char** argv) {
     rl_dev_observer_t c_observer;
     mesh_c_app_observer(&c_app, &c_observer);
     rl_dev_observer_t invalid = c_observer;
-    invalid.struct_size = sizeof(invalid) - 1;
+    invalid.struct_size = offsetof(rl_dev_observer_t, on_object) - 1;
     if (device_c_bind(device, &invalid) != nullptr) fatal("short C observer accepted");
     invalid = c_observer;
     invalid.version = RL_DEV_API_VERSION + 1;
@@ -1670,6 +1746,17 @@ int main(int argc, char** argv) {
     device.observe(&observer);
   }
 
+  SleepPort sleep_port(runtime);
+  std::array<std::uint8_t, routeloom::sdkv1::kRtcSessionRecordSize> rtc_bytes{};
+  routeloom::sdkv1::BufferRtcSessionPort rtc({rtc_bytes.data(), rtc_bytes.size()});
+  sleep_port.adapter.bind_owner(owner, &rtc);
+  routeloom::espnow::NvsBlobNamespace power_namespace;
+  if (!power_namespace.open(routeloom::espnow::kSecurityNvsPartition, "rlpwrmem"))
+    fatal("power namespace");
+  routeloom::sdkv1::BlobPowerStorage power_storage(power_namespace);
+  routeloom::PowerCoordinator power(routeloom::PowerConfig{}, runtime.node(), sleep_port,
+                                    power_storage, DeviceTestAccess::power_events());
+  bool power_bound = false;
   const std::uint32_t send_count_base = idf_stub::send_count();
   AppTx app_tx[kAppTxMax]{};
   GatewayTx gw_tx{};
@@ -1696,6 +1783,62 @@ int main(int argc, char** argv) {
     Bytes payload(length);
     if (!read_exact(payload.data(), length)) return 0;
     switch (payload[0]) {
+      case 'd': {
+        if (length != 1) fatal("bad d");
+        Bytes reply{'d'};
+        put_u64(reply, device.next_deadline(now));
+        write_frame(reply);
+        break;
+      }
+      case 's': {
+        if (length != 18) fatal("bad s");
+        const std::uint64_t at = ([&] {
+          std::uint64_t v = 0;
+          for (unsigned i = 0; i < 8; ++i) v |= std::uint64_t{payload[2 + i]} << (8 * i);
+          return v;
+        }());
+        const std::uint64_t duration = ([&] {
+          std::uint64_t v = 0;
+          for (unsigned i = 0; i < 8; ++i) v |= std::uint64_t{payload[10 + i]} << (8 * i);
+          return v;
+        }());
+        if (at < now) fatal("sleep clock regressed");
+        now = at;
+        idf_stub::set_now_us(static_cast<std::int64_t>(now) * 1000);
+        Status status = Status::success();
+        if (payload[1] == 0) {
+          if (!power_bound) {
+            status = device.bind_sleep(power, routeloom::ResetCause::ColdBoot, {}, now);
+            power_bound = status.ok();
+          }
+          if (status) {
+            routeloom::SleepRequest request{};
+            request.wake.wake_after_ms = duration;
+            status = device.prepare_sleep(request);
+          }
+        } else if (payload[1] == 1) {
+          status = device.enter_sleep(device.sleep_ticket());
+        } else if (payload[1] == 2) {
+          runtime.set_radio_deadline(UINT64_MAX);
+          status =
+              device.wake(routeloom::ResetCause::DeepSleepWake, {duration, duration, true}, now);
+        } else if (payload[1] == 3) {
+          status = device.abort_sleep();
+        } else if (payload[1] == 5) {
+          runtime.set_radio_deadline(now > UINT64_MAX - duration ? UINT64_MAX : now + duration);
+        } else if (payload[1] != 4)
+          fatal("sleep operation");
+        Bytes reply{'s', static_cast<std::uint8_t>(status.code),
+                    static_cast<std::uint8_t>(power.state()),
+                    static_cast<std::uint8_t>(device.sleep_ticket().issued),
+                    static_cast<std::uint8_t>(owner.coordinator().snapshot().sleeping)};
+        put_u64(reply, power.stats().sleeps);
+        put_u64(reply, power.stats().wakes);
+        reply.push_back(static_cast<std::uint8_t>(rtc_bytes[0] != 0));
+        put_u32(reply, idf_stub::send_count());
+        write_frame(reply);
+        break;
+      }
       case 'T': {
         if (length != 9) fatal("bad T");
         std::uint64_t next = 0;
@@ -1788,6 +1931,16 @@ int main(int argc, char** argv) {
                       setup.world_nodes, gw_tx, DeviceTestAccess::gateway(device), device,
                       events, applied);
         write_frame(Bytes{'D'});
+        break;
+      }
+      case 'v': {
+        if (payload.size() != 9) return 3;
+        NodeId destination = 0;
+        for (int i = 0; i < 8; ++i) destination |= static_cast<NodeId>(payload[1 + i]) << (8 * i);
+        const auto route = runtime.node().routes().best(destination);
+        Bytes reply{'v'};
+        put_u64(reply, route.valid ? route.next_hop : routeloom::kInvalidNodeId);
+        write_frame(reply);
         break;
       }
       case 'r': {
@@ -1957,8 +2110,19 @@ int main(int argc, char** argv) {
         if (length != 2) fatal("bad G");
         events.probe = payload[1] != 0;
         break;
+      case 'a': {
+        if (length != 1) fatal("bad a");
+        sdkv1::JoinMark mark{};
+        status = device.join_mark(mark);
+        Bytes reply{'a', static_cast<std::uint8_t>(status.code)};
+        reply.insert(reply.end(), mark.begin(), mark.end());
+        secure_clear(mark);
+        write_frame(reply);
+        secure_clear(reply.data(), reply.size());
+        break;
+      }
       case 'X': {
-        if (length != 9 && length != 13) fatal("bad X");
+        if (length != 9 && length != 13 && length != 25) fatal("bad X");
         const auto u32_at = [&](std::size_t at) {
           return static_cast<std::uint32_t>(payload[at] | (payload[at + 1] << 8) |
                                             (payload[at + 2] << 16) |
@@ -1966,7 +2130,15 @@ int main(int argc, char** argv) {
         };
         JoinPolicy policy{};
         policy.removal_holdoff_s = u32_at(1);
-        if (length == 13) policy.isolation_notice_s = u32_at(9);
+        if (length >= 13) policy.isolation_notice_s = u32_at(9);
+        if (length == 25) {
+          policy.smart_join = payload[13] != 0;
+          policy.boot_join = payload[14] != 0;
+          policy.same_site_only = payload[15] != 0;
+          policy.listen_ms = u32_at(17);
+          policy.search_ms = u32_at(21);
+          policy.start_jitter_ms = 2000;
+        }
         std::uint32_t revision = 0;
         status = device.set_join_policy(policy, u32_at(5), revision);
         Bytes reply{'x', static_cast<std::uint8_t>(status.code)};
@@ -2076,6 +2248,57 @@ int main(int argc, char** argv) {
       case 'F':
         g_cut_after_switching = true;
         break;
+      case 'o': {
+        if (length < 2) fatal("bad object RPC");
+        if (payload[1] == 0) {
+          const Status registered = setup.c_app ? Status{static_cast<StatusCode>(mesh_c_app_object_buffer(&c_app, objects.buffer.data(), objects.buffer.size())), "object C buffer"}
+              : device.register_object_buffer({objects.buffer.data(), objects.buffer.size()});
+          write_frame(Bytes{'o', static_cast<std::uint8_t>(registered.code)});
+        } else if (payload[1] == 1) {
+          if (length < 14) fatal("bad object send RPC");
+          NodeId destination = 0;
+          for (unsigned i = 0; i < 8; ++i) destination |= NodeId{payload[2 + i]} << (8 * i);
+          std::uint32_t deadline = 0;
+          for (unsigned i = 0; i < 4; ++i) deadline |= std::uint32_t{payload[10 + i]} << (8 * i);
+          if (setup.c_app && c_app.object_results != 0) objects.active_id = 0;
+          if (objects.active_id != 0) {
+            write_frame(Bytes{'o', static_cast<std::uint8_t>(StatusCode::Busy), 0, 0, 0, 0}); break;
+          }
+          objects.loan.assign(payload.begin() + 14, payload.end()); objects.result_count = 0;
+          ObjectOptions options{}; options.deadline_ms = deadline; ObjectId id = 0;
+          const Status sent = setup.c_app ? Status{static_cast<StatusCode>(mesh_c_app_object_send(&c_app, destination, objects.loan.data(), objects.loan.size(), deadline, &id)), "object C send"}
+              : device.send_object(destination, {objects.loan.data(), objects.loan.size()}, options, id);
+          if (sent) objects.active_id = id;
+          Bytes reply{'o', static_cast<std::uint8_t>(sent.code)}; put_u32(reply, id); write_frame(reply);
+        } else if (payload[1] == 2) {
+          Bytes reply{'o'}; put_u32(reply, setup.c_app ? c_app.objects : objects.rx_count);
+          put_u32(reply, setup.c_app ? c_app.object_results : objects.result_count);
+          reply.push_back(setup.c_app ? c_app.object_state : static_cast<std::uint8_t>(objects.result.state));
+          if (setup.c_app) reply.insert(reply.end(), c_app.object_data, c_app.object_data + c_app.object_size);
+          else reply.insert(reply.end(), objects.received.begin(), objects.received.end());
+          write_frame(reply);
+        } else if (payload[1] == 3) {
+          const Status cancelled = setup.c_app ? Status{static_cast<StatusCode>(mesh_c_app_object_cancel(&c_app, objects.active_id)), "object C cancel"}
+              : device.cancel_object(objects.active_id);
+          write_frame(Bytes{'o', static_cast<std::uint8_t>(cancelled.code)});
+        } else if (payload[1] == 4) {
+          if (length != 10) fatal("bad object fill RPC");
+          NodeId destination = 0;
+          for (unsigned i = 0; i < 8; ++i) destination |= NodeId{payload[2 + i]} << (8 * i);
+          const std::uint8_t ack[15] = {1, 0xff, 0xff, 0xff, 0xff, 0, 0};
+          std::uint8_t accepted = 0, refused = 0;
+          for (unsigned i = 0; i < 255; ++i) {
+            MessageId id{};
+            const auto sent = runtime.node().send_typed(FrameType::AppObjectAck, destination,
+                                                        {ack, sizeof(ack)}, 4000, now, id);
+            if (sent) ++accepted;
+            else if (sent.code == StatusCode::Busy || sent.code == StatusCode::NoCapacity ||
+                     sent.code == StatusCode::WouldBlock) ++refused;
+          }
+          write_frame(Bytes{'o', accepted, refused});
+        } else fatal("bad object subcommand");
+        break;
+      }
       case 'O': {
         if (length < 20 || length - 20 > kMaxApplicationPayload) fatal("bad O");
         NodeId next_hop = 0, dst = 0;

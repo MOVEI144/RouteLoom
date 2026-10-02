@@ -6,10 +6,12 @@
 #include "routeloom/device.h"
 
 #include <atomic>
+#include <algorithm>
 #include <cstring>
 
 #include "routeloom/device.hpp"
 #include "routeloom/status.hpp"
+#include "routeloom/secure_clear.hpp"
 
 namespace {
 using namespace routeloom;
@@ -21,6 +23,15 @@ bool sized(const T* object, const std::uint32_t version) noexcept {
 template <typename T>
 bool dev_sized(const T* object) noexcept {
   return sized(object, RL_DEV_API_VERSION);
+}
+template <>
+bool dev_sized(const rl_dev_observer_t* object) noexcept {
+  return object != nullptr && object->struct_size >= offsetof(rl_dev_observer_t, on_object) &&
+         object->version == RL_DEV_API_VERSION;
+}
+template <>
+bool dev_sized(const rl_dev_capabilities_t* object) noexcept {
+  return object != nullptr && object->struct_size >= offsetof(rl_dev_capabilities_t, object_transfer) && object->version == RL_DEV_API_VERSION;
 }
 template <typename T>
 bool core_sized(const T* object) noexcept {
@@ -108,7 +119,11 @@ static_assert(RL_DEV_CONNECTIVITY_SLEEPING == static_cast<int>(Connectivity::Sle
 static_assert(RL_APPLIED_LEASE_SIZE == sizeof(ExecutionLease), "APPLIED lease size");
 }  // namespace
 
-struct rl_dev final : public NodeObserver, public DeviceObserver, public AppliedEndpointSink {
+struct rl_dev final : public NodeObserver, public DeviceObserver, public AppliedEndpointSink
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+                      , public ObjectObserver
+#endif
+                      {
   // A posted C job waits in one of these until its Owner pass takes it.
   struct Job {
     std::atomic<bool> used{false};
@@ -124,10 +139,21 @@ struct rl_dev final : public NodeObserver, public DeviceObserver, public Applied
   void bind(Device& target, const rl_dev_observer_t* c_observer) noexcept {
     device = &target;
     observer = rl_dev_observer_t{};
-    if (dev_sized(c_observer)) std::memcpy(&observer, c_observer, sizeof(observer));
+    if (dev_sized(c_observer)) {
+      std::memcpy(&observer, c_observer, offsetof(rl_dev_observer_t, on_object));
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+      if (c_observer->struct_size >= offsetof(rl_dev_observer_t, on_object_result)) {
+        observer.on_object = c_observer->on_object;
+      }
+      if (c_observer->struct_size >= sizeof(rl_dev_observer_t)) observer.on_object_result = c_observer->on_object_result;
+#endif
+    }
     sink_installed = false;
     target.observe(this);
     target.observe_device(this);
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+    target.observe_object(this);
+#endif
     target.on_poll(&rl_dev::poll, this);
     install_sink();
   }
@@ -181,6 +207,23 @@ struct rl_dev final : public NodeObserver, public DeviceObserver, public Applied
     const rl_dev_connectivity_t c = to_c(snapshot);
     observer.on_connectivity(observer.user, &c);
   }
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  void on_object(const ObjectRxInfo& info, ByteView data) noexcept override {
+    if (observer.on_object == nullptr) return;
+    rl_dev_object_rx_t c{}; dev_header(c);
+    c.source = info.source; c.object_id = info.id; c.source_boot = info.source_boot;
+    c.end_context = info.end_context; c.app_tag = info.app_tag;
+    c.content_encoding = info.content_encoding;
+    observer.on_object(observer.user, &c, data.data, data.size);
+  }
+  void on_object_result(const ObjectResult& result) noexcept override {
+    if (observer.on_object_result == nullptr) return;
+    rl_dev_object_result_t c{}; dev_header(c);
+    c.object_id = result.id; c.state = static_cast<std::uint8_t>(result.state);
+    c.reason = static_cast<std::uint16_t>(result.reason);
+    observer.on_object_result(observer.user, &c);
+  }
+#endif
   void on_operation(const OperationId operation, const std::uint16_t result) noexcept override {
     if (observer.on_operation != nullptr) observer.on_operation(observer.user, operation, result);
   }
@@ -292,7 +335,10 @@ rl_status_code_t rl_dev_capabilities(rl_dev_t* device, rl_dev_capabilities_t* ou
   c.max_payload = caps.max_payload;
   c.max_group_payload = caps.max_group_payload;
   c.max_applied_payload = static_cast<std::uint16_t>(kAppliedUserPayloadMax);
-  *out = c;
+  c.object_transfer = caps.object_transfer; c.object_rx_slots = caps.object_rx_slots;
+  c.max_object_bytes = caps.max_object_bytes;
+  c.struct_size = static_cast<std::uint32_t>(std::min<std::size_t>(out->struct_size, sizeof(c)));
+  std::memcpy(out, &c, c.struct_size);
   return RL_STATUS_OK;
 }
 
@@ -309,6 +355,27 @@ rl_status_code_t rl_dev_send(rl_dev_t* device, const rl_node_id_t destination,
       device->device->send(destination, ByteView{payload, payload_size}, converted, id);
   if (status) *out_id = to_c(id);
   return to_c(status);
+}
+
+void rl_dev_object_options_init(rl_dev_object_options_t* options) {
+  if (options == nullptr) return;
+  *options = {}; dev_header(*options); options->deadline_ms = 30000;
+}
+rl_status_code_t rl_dev_send_object(rl_dev_t* device, rl_node_id_t destination,
+                                    const uint8_t* data, size_t size,
+                                    const rl_dev_object_options_t* options, uint32_t* out_id) {
+  if (device == nullptr || device->device == nullptr || out_id == nullptr || !dev_sized(options) ||
+      options->reserved != 0) return RL_STATUS_INVALID_ARGUMENT;
+  const ObjectOptions converted{options->deadline_ms, options->app_tag, options->content_encoding};
+  return static_cast<rl_status_code_t>(device->device->send_object(destination, {data, size}, converted, *out_id).code);
+}
+rl_status_code_t rl_dev_cancel_object(rl_dev_t* device, uint32_t object_id) {
+  if (device == nullptr || device->device == nullptr) return RL_STATUS_INVALID_ARGUMENT;
+  return static_cast<rl_status_code_t>(device->device->cancel_object(object_id).code);
+}
+rl_status_code_t rl_dev_register_object_buffer(rl_dev_t* device, uint8_t* storage, size_t size) {
+  if (device == nullptr || device->device == nullptr) return RL_STATUS_INVALID_ARGUMENT;
+  return static_cast<rl_status_code_t>(device->device->register_object_buffer({storage, size}).code);
 }
 
 rl_status_code_t rl_dev_send_group(rl_dev_t* device, const uint16_t group,
@@ -440,6 +507,15 @@ rl_status_code_t rl_dev_connectivity(rl_dev_t* device, rl_dev_connectivity_t* ou
   return RL_STATUS_OK;
 }
 
+rl_status_code_t rl_dev_join_mark(rl_dev_t* device, uint8_t out[16]) {
+  if (device == nullptr || device->device == nullptr || out == nullptr) return RL_STATUS_INVALID_ARGUMENT;
+  sdkv1::JoinMark mark{};
+  const Status status = device->device->join_mark(mark);
+  std::memcpy(out, mark.data(), mark.size());
+  secure_clear(mark);
+  return to_c(status);
+}
+
 rl_status_code_t rl_dev_request_join(rl_dev_t* device, uint32_t* out_operation) {
   if (device == nullptr || device->device == nullptr || out_operation == nullptr) {
     return RL_STATUS_INVALID_ARGUMENT;
@@ -462,7 +538,8 @@ rl_status_code_t rl_dev_leave(rl_dev_t* device, uint32_t* out_operation) {
 
 rl_status_code_t rl_dev_set_join_policy(rl_dev_t* device, const rl_dev_join_policy_t* policy,
                                         const uint32_t expected_revision, uint32_t* out_revision) {
-  if (device == nullptr || device->device == nullptr || !dev_sized(policy) ||
+  if (device == nullptr || device->device == nullptr || policy == nullptr ||
+      policy->version != RL_DEV_API_VERSION || policy->struct_size < offsetof(rl_dev_join_policy_t, smart_join) ||
       out_revision == nullptr) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
@@ -474,6 +551,16 @@ rl_status_code_t rl_dev_set_join_policy(rl_dev_t* device, const rl_dev_join_poli
   converted.isolation_notice_s = policy->isolation_notice_s;
   converted.start_jitter_ms = policy->start_jitter_ms;
   converted.role = policy->role;
+  if (policy->struct_size >= sizeof(*policy)) {
+    if (policy->smart_join > 1 || policy->boot_join > 1 || policy->same_site_only > 1) {
+      return RL_STATUS_INVALID_ARGUMENT;
+    }
+    converted.smart_join = policy->smart_join != 0;
+    converted.boot_join = policy->boot_join != 0;
+    converted.same_site_only = policy->same_site_only != 0;
+    converted.listen_ms = policy->smart_join ? policy->listen_ms : 3000;
+    converted.search_ms = policy->smart_join ? policy->search_ms : 60000;
+  }
   std::uint32_t revision = 0;
   const Status status = device->device->set_join_policy(converted, expected_revision, revision);
   *out_revision = revision;
@@ -482,7 +569,8 @@ rl_status_code_t rl_dev_set_join_policy(rl_dev_t* device, const rl_dev_join_poli
 
 rl_status_code_t rl_dev_join_policy(rl_dev_t* device, rl_dev_join_policy_t* out,
                                     uint32_t* out_revision) {
-  if (device == nullptr || device->device == nullptr || !dev_sized(out) ||
+  if (device == nullptr || device->device == nullptr || out == nullptr || out->version != RL_DEV_API_VERSION ||
+      out->struct_size < offsetof(rl_dev_join_policy_t, smart_join) ||
       out_revision == nullptr) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
@@ -500,7 +588,13 @@ rl_status_code_t rl_dev_join_policy(rl_dev_t* device, rl_dev_join_policy_t* out,
   c.isolation_notice_s = policy.isolation_notice_s;
   c.start_jitter_ms = policy.start_jitter_ms;
   c.role = policy.role;
-  *out = c;
+  c.smart_join = policy.smart_join;
+  c.boot_join = policy.boot_join;
+  c.same_site_only = policy.same_site_only;
+  c.listen_ms = policy.listen_ms;
+  c.search_ms = policy.search_ms;
+  c.struct_size = out->struct_size;
+  std::memcpy(out, &c, out->struct_size < sizeof(c) ? out->struct_size : sizeof(c));
   *out_revision = revision;
   return RL_STATUS_OK;
 }

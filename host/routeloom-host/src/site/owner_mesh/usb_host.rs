@@ -39,6 +39,7 @@ pub(super) struct UsbHost {
     pub(super) join_ups_seen: u64,
     pub(super) join_downs_sent: u64,
     pub(super) other_host_ops: u64,
+    pub(super) object_frames: Vec<(u64, u64, Vec<u8>)>,
     pub(super) data_frames: u64,
     pub(super) gateway_payloads: Vec<Vec<u8>>,
     pub(super) gateway_registering: bool,
@@ -97,6 +98,7 @@ impl UsbHost {
             join_ups_seen: 0,
             join_downs_sent: 0,
             other_host_ops: 0,
+            object_frames: Vec::new(),
             data_frames: 0,
             gateway_payloads: Vec::new(),
             gateway_registering: false,
@@ -294,16 +296,6 @@ impl UsbHost {
             if inbound.session_lost {
                 self.session_losses += 1;
             }
-            if let Some(daemon) = &self.daemon {
-                let mut info = daemon.state.session.lock().unwrap();
-                info.authenticated = self.session.phase == SessionPhase::Active;
-                info.id = self.auth_sessions.last().copied();
-                info.node = self.hello_node;
-                info.boot = self.hello_boot;
-                info.network = self.hello_network;
-                info.capability = self.hello_capability;
-                info.version = Some(2);
-            }
             let Some(inner) = inbound.inner else { continue };
             if let Some(daemon) = &self.daemon {
                 crate::record_frame(&daemon.state, &frame, &inner, now);
@@ -371,6 +363,12 @@ impl UsbHost {
                             },
                             join_note: None,
                         });
+                    } else if inner.get(..2) == Some(&[1, 0x84])
+                        || inner.get(..2) == Some(&[1, 0x86])
+                    {
+                        assert!(self.object_frames.len() < 64);
+                        self.object_frames
+                            .push((request, self.session.session_id, inner.to_vec()));
                     } else if self.watch == Some(request) {
                         self.watch = None;
                         self.watched = Some(inner.to_vec());
@@ -398,6 +396,15 @@ impl UsbHost {
             }
         }
         if let Some(daemon) = &mut self.daemon {
+            *daemon.state.session.lock().unwrap() = crate::SessionInfo {
+                authenticated: self.session.phase == SessionPhase::Active,
+                id: self.auth_sessions.last().copied(),
+                node: self.hello_node,
+                boot: self.hello_boot,
+                network: self.hello_network,
+                capability: self.hello_capability,
+                version: Some(2),
+            };
             for frame in daemon.tick(now) {
                 self.pending.push(PendingFrame {
                     frame,

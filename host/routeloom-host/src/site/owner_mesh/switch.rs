@@ -74,6 +74,8 @@ pub(super) struct Switch {
     /// so a forced-multihop world heals back to multi-hop, not to a
     /// direct radio the test never had.
     pub(super) base: Vec<Vec<bool>>,
+    /// Sender bytes, counted once per transmission including loss/broadcast.
+    pub(super) radio_bytes: u64,
     pub(super) delivered: u64,
     pub(super) dropped: u64,
     /// Drop the next N frames on the directed leg (the sender's
@@ -88,9 +90,15 @@ pub(super) struct Switch {
     /// Bounded, directed loss of an authenticated Wire frame kind.
     pub(super) drop_wire: Vec<(usize, usize, u8, u32)>,
     pub(super) wire_dropped: u32,
+    /// Lose a single-frame link authentication step on a directed leg.
+    pub(super) drop_link_step: Option<(usize, usize, u8, u8)>,
+    pub(super) link_steps_dropped: u32,
     pub(super) probes_seen: u32,
     pub(super) results_seen: u32,
     pub(super) route_updates_seen: u32,
+    /// LR estimate per physical management transmission, including broadcast
+    /// once and failed attempts: (wire bytes + fixed MAC/PHY cost) * 32 us.
+    pub(super) management_us: Vec<u64>,
     /// Hold frames on the directed leg this long before delivery.
     pub(super) delay_ms: Vec<Vec<u64>>,
     /// Per-leg evidence: what crossed and what the switch ate.
@@ -127,6 +135,7 @@ impl Switch {
         Self {
             base: audible.clone(),
             audible,
+            radio_bytes: 0,
             delivered: 0,
             dropped: 0,
             drop_next: vec![vec![0; n]; n],
@@ -135,9 +144,12 @@ impl Switch {
             callback_delay_kind: None,
             drop_wire: Vec::new(),
             wire_dropped: 0,
+            drop_link_step: None,
+            link_steps_dropped: 0,
             probes_seen: 0,
             results_seen: 0,
             route_updates_seen: 0,
+            management_us: vec![0; n],
             delay_ms: vec![vec![0; n]; n],
             leg_delivered: vec![vec![0; n]; n],
             leg_dropped: vec![vec![0; n]; n],
@@ -212,7 +224,7 @@ impl Switch {
         }
     }
 
-    /// Keep actual old-network carriers for C7. A's certificate is in
+    /// Keep actual old-scope carriers for C7/K1. A's certificate is in
     /// an EDHOC step 2/3 object; a large object starts in chunk zero.
     pub(super) fn c7_observe(
         &mut self,
@@ -310,13 +322,31 @@ impl Switch {
     }
 
     pub(super) fn consume_wire_loss(&mut self, from: usize, to: usize, frame: &[u8]) -> bool {
-        if frame.len() < 5 || frame[..4] != *b"RL\x02\0" {
-            return false;
+        if let Some((source, destination, phase, step)) = self.drop_link_step {
+            if from == source
+                && to == destination
+                && frame.len() > 46
+                && frame[..4] == *b"RLD1"
+                && frame[5] == 3
+                && frame[45] == phase
+                && frame[46] == step
+            {
+                self.drop_link_step = None;
+                self.link_steps_dropped += 1;
+                return true;
+            }
         }
+        let kind = if frame.len() >= 5 && frame[..4] == *b"RL\x02\0" {
+            frame[4]
+        } else if frame.len() >= 44 && frame[..4] == *b"RLD1" {
+            frame[5]
+        } else {
+            return false;
+        };
         if let Some(rule) = self
             .drop_wire
             .iter_mut()
-            .find(|rule| rule.0 == from && rule.1 == to && rule.2 == frame[4] && rule.3 > 0)
+            .find(|rule| rule.0 == from && rule.1 == to && rule.2 == kind && rule.3 > 0)
         {
             rule.3 -= 1;
             self.wire_dropped += 1;

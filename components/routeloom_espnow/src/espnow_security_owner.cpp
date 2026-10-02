@@ -385,6 +385,10 @@ sdkv1::SecurityCoordinator& EspNowSecurityOwner::coordinator() noexcept {
   return *reinterpret_cast<sdkv1::SecurityCoordinator*>(coordinator_box_.data());
 }
 
+const sdkv1::SecurityCoordinator& EspNowSecurityOwner::coordinator() const noexcept {
+  return *reinterpret_cast<const sdkv1::SecurityCoordinator*>(coordinator_box_.data());
+}
+
 SecurityProvider& EspNowSecurityOwner::session_provider() noexcept {
   return coordinator().session_provider();
 }
@@ -787,10 +791,33 @@ Status EspNowSecurityOwner::adopt_dev(const DevConfig& config,
     return Status::error(StatusCode::RecoveryRequired, "dev adopt failed");
   }
   booted_ = true;  // the pump now drives the dev-armed coordinator
+  security_profile_ = SecurityProfile::Development;
   ESP_LOGI(config_.log_tag, "dev adopted (node 0x%llx, boot %lu)",
            static_cast<unsigned long long>(config.node),
            static_cast<unsigned long>(config.boot));
   return Status::success();
+}
+
+MonotonicMs EspNowSecurityOwner::next_deadline(const MonotonicMs now_ms) const noexcept {
+  if (!booted_) return UINT64_MAX;
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  // Dev has no handshake, bank expiry or lifecycle poll work. Channel
+  // operations retain the compatibility cadence until their next event.
+  return tune_.active ? (now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2) : UINT64_MAX;
+#elif defined(ESP_PLATFORM)
+  // Member lifecycle and discovery still require the compatibility cadence;
+  // no slower schedule can extend this image's wait.
+  return now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2;
+#else
+  MonotonicMs due = coordinator().next_deadline(now_ms);
+  // Authority transports and channel tuning retain fallback while their
+  // pending slots do not publish a complete deadline contract.
+  if (lifecycle_live_ || tune_.active || coordinator().mode() == sdkv1::CoordinatorMode::Member) {
+    const MonotonicMs fallback = now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2;
+    if (fallback < due) due = fallback;
+  }
+  return due;
+#endif
 }
 
 void EspNowSecurityOwner::poll(const MonotonicMs now_ms) noexcept {
@@ -1173,13 +1200,14 @@ void EspNowSecurityOwner::apply_proxy_policy(const ByteView tail) noexcept {
     record.generation = set.generation;
     record.zero_touch_open = set.zero_touch_open;
     record.content = set.content;
+    record.expected = set.expected;
     const Status committed = store.commit(record);
     const Status readback = store.load(site_id, stored, has);
     if (!readback) coordinator().set_proxy_policy(site_id, false);
     if (!committed || !readback) status = sdkv1::ProxyPolicyStatus::StorageFailed;
   }
   if (status == sdkv1::ProxyPolicyStatus::Applied && has) {
-    coordinator().set_proxy_policy(site_id, stored.zero_touch_open);
+    coordinator().set_proxy_policy(site_id, stored.zero_touch_open, &stored.expected, runtime_->now_ms());
   }
   std::array<std::uint8_t, sdkv1::kProxyPolicyAckSize> ack{};
   if (!sdkv1::proxy_policy_ack_encode(status, has ? stored.generation : 0, ack)) return;
@@ -1887,9 +1915,9 @@ Status EspNowSecurityOwner::send_relay_abort_to_host(
 }
 
 SecurityProfile EspNowSecurityOwner::security_profile() const noexcept {
-  // EXPERIMENTAL until P8 declares production (§15): the node surfaces
-  // SECURITY_PROFILE_EXPERIMENTAL and nothing claims production status.
-  return SecurityProfile::Development;
+  // The selected profile survives recovery; membership is not qualification.
+  // MemberEdhoc remains Candidate until all production gates are met.
+  return security_profile_;
 }
 
 bool EspNowSecurityOwner::binds_scope() const noexcept {

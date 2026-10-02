@@ -24,6 +24,8 @@ Linux常駐、macOS/Windows開発利用を設計対象にする。USB device pat
 
 ## 3. Host API
 
+API1 の operation と message の `network` は、認証済み HelloAck と同じ epoch を含む64 bitの16桁hexを使う。下位32 bitが0の値は予約値として拒否する。mesh header と既存 canonical schema の wire network は下位32 bitのままで、operation identity と ACL は full network を照合する。受理と dispatch は同じ単調時計を使い、壁時計の巻戻りで期限を伸ばさない。
+
 初期の操作意味は以下とし、RPC schemaを版管理する。
 
 | 操作 | 意味 |
@@ -38,7 +40,7 @@ Linux常駐、macOS/Windows開発利用を設計対象にする。USB device pat
 | config.propose/get | expected revision付き設定 |
 | diagnostics.snapshot/watch | 指標と理由付きevent |
 | radio.survey/migrate | 正式権限と計画に基づく要求 |
-| objects.transfer/status | bounded保守転送 |
+| objects.submit/get/cancel | optional な最大4 KiB unicast object |
 
 API受付のoperation IDと無線Message IDは別に返す。idempotency keyはhost再接続後も指定scope内で有効。操作成功、管理commit、機器へのapplyを別stateで返す。
 
@@ -263,3 +265,13 @@ routeloomctl topology --observer 0000000000000abc --section routes --destination
 meshvizのAPI1 client（`tools/meshviz/src/routeloom_meshviz/api1_adapter.py`の`encode_health_request`／`encode_topology_request`／`parse_observation_snapshot`）からも同じ契約で取れる（画面変更なし、fixtureは`fake_api1.py`の`observation`引数）。\n\n制約：開発profileのEXPERIMENTAL機能。host試験（lane・API1・daemon配線・固定byte一致）とmeshviz fixtureのみで、実機との疎通・実RFは未確認。
 
 reference field firmwareのread-only consoleは`obs1 health`を受け、同じsystem fillから`OBS1 `接頭辞の1行JSONを返す（512B以内、1秒1応答、単一owner loop）。書込みverbと独立し、機器のboot・uptime・heap・reset・modeをconsole logと照合できる。
+
+## AppObject（optional）
+
+`objects.submit` は `network`／`node`（16桁hex）、`key`（32桁hex）、`data`（標準base64、1〜4096 B）を受ける。`deadline_ms` は既定30000、1〜120000、`app_tag` はu16、`content_encoding` はu8（SDKは解釈しない）。SEND grant、認証済みgateway、HostOps capability bit14が必要。通常の `messages.submit` の128 B上限は変わらない。
+
+`object_id` はdaemon bootを含む24桁hexのopaque token。`objects.get`／`objects.cancel` はこのtokenを受け、本人の操作だけを参照する。getはREAD_OPERATION、cancelはSENDが必要。同じprincipal／full network／keyと同じ要求は同じtoken、異内容はIDEMPOTENCY_CONFLICT。RAMに64操作を保持し、未完了4件、宛先2件/分、全体12件/分まで。記録を追い出さずBUSYを返す。daemon再起動を跨ぐ永続操作ではなく、古いtokenは再利用しない。
+
+HOST_QUEUED／UPLOADING／IN_PROGRESSは途中状態。DELIVEREDは相手の全体digest検証とcallback後のACKだけを意味する。EXPIRED、CANCELLED_BEFORE_TX、INDETERMINATE、FAILED、UNSUPPORTEDは終端。USB session喪失・応答不明はINDETERMINATEとして自動再送しない。業務上の適用成功は別途アプリが確認する。
+
+受信は `messages.subscribe {stream:"objects", network, from:"latest"|"oldest"|cursor}`。通知kindはobject／object_metaで、通常messagesとは独立したcursor epochとlogを使う。payload通知にはorigin、source_boot、end_context、object_id、app_tag、content_encoding、base64のdataがある。全体検証前の断片は公開しない。logの回収は既存のgap契約に従う。`capabilities.get` のobjectsはgatewayのobject_transfer、max_object_bytes（4096または0）、encoding（none）とhostの保持上限を返す。

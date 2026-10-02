@@ -753,6 +753,33 @@ void test_lease_remaining_ms() {
   CHECK(remaining == 0);
 }
 
+void test_matched_hop_accept_refreshes_only_reachable_peer() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, /*member=*/true);
+  Unit& b = world.add(2, 0xB2, /*member=*/true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+  world.medium.drop_wire = true;
+  world.medium.drop_rld1 = true;
+  world.run(15000);
+  const auto probes = a.engine.stats().probes_tx;
+  a.engine.on_wire_rx(b.mac, FrameType::HopAccept, {}, world.medium.now);
+  MonotonicMs remaining = 0;
+  CHECK(a.engine.lease_remaining_ms(2, world.medium.now, remaining));
+  CHECK(remaining == 30000);
+  world.run(6000);
+  CHECK(a.engine.stats().probes_tx == probes);
+  world.run(25000);
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
+  a.engine.on_wire_rx(b.mac, FrameType::HopAccept, {}, world.medium.now);
+  CHECK(a.engine.lease_remaining_ms(2, world.medium.now, remaining));
+  CHECK(remaining == 0);
+  CHECK(!a.engine.data_permitted(b.mac));
+}
+
 // Same NodeId appearing on a new MAC while the old binding is alive must be
 // quarantined, not overwritten (02 §8, D3-03).
 void test_mac_change_conflict() {
@@ -1772,7 +1799,7 @@ void test_send_failure_stats() {
   world.medium.block(b.mac, a.mac);
   const std::uint32_t probes_before = a.engine.stats().probes_tx;
   a.port.fail_next = 1;
-  world.run(10100);  // past idle_refresh_ms — a fires probes, port refuses 1
+  world.run(20100);  // past idle_refresh_ms — a fires probes, port refuses 1
   CHECK(a.engine.stats().send_failures == 1);
   CHECK(a.engine.stats().probes_tx > probes_before);
 }
@@ -2006,6 +2033,7 @@ int main() {
   test_density_suppression();
   test_lease_expiry();
   test_lease_remaining_ms();
+  test_matched_hop_accept_refreshes_only_reachable_peer();
   test_mac_change_conflict();
   test_simultaneous_open();
   test_member_take_prefers_initiator_over_same_peer_responder();

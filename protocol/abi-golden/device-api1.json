@@ -4,7 +4,7 @@
  "structs": {
   "rl_dev_capabilities_t": {
    "lp64": {
-    "size": 20,
+    "size": 24,
     "align": 4,
     "offsets": {
      "struct_size": 0,
@@ -17,11 +17,14 @@
      "group_send": 13,
      "max_payload": 14,
      "max_group_payload": 16,
-     "max_applied_payload": 18
+     "max_applied_payload": 18,
+     "object_transfer": 20,
+     "object_rx_slots": 21,
+     "max_object_bytes": 22
     }
    },
    "ilp32": {
-    "size": 20,
+    "size": 24,
     "align": 4,
     "offsets": {
      "struct_size": 0,
@@ -34,7 +37,10 @@
      "group_send": 13,
      "max_payload": 14,
      "max_group_payload": 16,
-     "max_applied_payload": 18
+     "max_applied_payload": 18,
+     "object_transfer": 20,
+     "object_rx_slots": 21,
+     "max_object_bytes": 22
     }
    }
   },
@@ -144,7 +150,7 @@
   },
   "rl_dev_join_policy_t": {
    "lp64": {
-    "size": 32,
+    "size": 44,
     "align": 4,
     "offsets": {
      "struct_size": 0,
@@ -156,29 +162,125 @@
      "isolation_notice_s": 24,
      "start_jitter_ms": 28,
      "role": 30,
+     "reserved": 31,
+     "smart_join": 32,
+     "boot_join": 33,
+     "same_site_only": 34,
+     "reserved2": 35,
+     "listen_ms": 36,
+     "search_ms": 40
+    }
+   },
+   "ilp32": {
+    "size": 44,
+    "align": 4,
+    "offsets": {
+     "struct_size": 0,
+     "version": 4,
+     "avoid_not_here_s": 8,
+     "avoid_blocked_s": 12,
+     "removal_holdoff_s": 16,
+     "retry_max_s": 20,
+     "isolation_notice_s": 24,
+     "start_jitter_ms": 28,
+     "role": 30,
+     "reserved": 31,
+     "smart_join": 32,
+     "boot_join": 33,
+     "same_site_only": 34,
+     "reserved2": 35,
+     "listen_ms": 36,
+     "search_ms": 40
+    }
+   }
+  },
+  "rl_dev_object_options_t": {
+   "lp64": {
+    "size": 16,
+    "align": 4,
+    "offsets": {
+     "struct_size": 0,
+     "version": 4,
+     "deadline_ms": 8,
+     "app_tag": 12,
+     "content_encoding": 14,
+     "reserved": 15
+    }
+   },
+   "ilp32": {
+    "size": 16,
+    "align": 4,
+    "offsets": {
+     "struct_size": 0,
+     "version": 4,
+     "deadline_ms": 8,
+     "app_tag": 12,
+     "content_encoding": 14,
+     "reserved": 15
+    }
+   }
+  },
+  "rl_dev_object_result_t": {
+   "lp64": {
+    "size": 16,
+    "align": 4,
+    "offsets": {
+     "struct_size": 0,
+     "version": 4,
+     "object_id": 8,
+     "reason": 12,
+     "state": 14,
+     "reserved": 15
+    }
+   },
+   "ilp32": {
+    "size": 16,
+    "align": 4,
+    "offsets": {
+     "struct_size": 0,
+     "version": 4,
+     "object_id": 8,
+     "reason": 12,
+     "state": 14,
+     "reserved": 15
+    }
+   }
+  },
+  "rl_dev_object_rx_t": {
+   "lp64": {
+    "size": 32,
+    "align": 8,
+    "offsets": {
+     "struct_size": 0,
+     "version": 4,
+     "source": 8,
+     "object_id": 16,
+     "source_boot": 20,
+     "end_context": 24,
+     "app_tag": 28,
+     "content_encoding": 30,
      "reserved": 31
     }
    },
    "ilp32": {
     "size": 32,
-    "align": 4,
+    "align": 8,
     "offsets": {
      "struct_size": 0,
      "version": 4,
-     "avoid_not_here_s": 8,
-     "avoid_blocked_s": 12,
-     "removal_holdoff_s": 16,
-     "retry_max_s": 20,
-     "isolation_notice_s": 24,
-     "start_jitter_ms": 28,
-     "role": 30,
+     "source": 8,
+     "object_id": 16,
+     "source_boot": 20,
+     "end_context": 24,
+     "app_tag": 28,
+     "content_encoding": 30,
      "reserved": 31
     }
    }
   },
   "rl_dev_observer_t": {
    "lp64": {
-    "size": 72,
+    "size": 88,
     "align": 8,
     "offsets": {
      "struct_size": 0,
@@ -190,11 +292,13 @@
      "on_connectivity": 40,
      "on_operation": 48,
      "on_applied_request": 56,
-     "on_poll": 64
+     "on_poll": 64,
+     "on_object": 72,
+     "on_object_result": 80
     }
    },
    "ilp32": {
-    "size": 40,
+    "size": 48,
     "align": 4,
     "offsets": {
      "struct_size": 0,
@@ -206,7 +310,9 @@
      "on_connectivity": 24,
      "on_operation": 28,
      "on_applied_request": 32,
-     "on_poll": 36
+     "on_poll": 36,
+     "on_object": 40,
+     "on_object_result": 44
     }
    }
   }

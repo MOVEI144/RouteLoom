@@ -130,8 +130,18 @@ struct WakePlan {
 class PowerPort {
  public:
   virtual ~PowerPort() = default;
+  // Park non-node work before persistence. Busy retains the drain until
+  // its deadline; an error aborts without settling any live delivery.
+  virtual Status prepare_sleep(MonotonicMs) noexcept { return Status::success(); }
+  // Undo the park on every aborted attempt, including a failed commit.
+  virtual void abort_sleep(MonotonicMs) noexcept {}
   // Fill peers[] and channel with the platform's current peer cache.
   virtual Status capture_cache(PowerImage& image) noexcept = 0;
+  // The platform may bind additional durable membership context. Node
+  // identity is always checked by PowerCoordinator before this hook.
+  virtual bool matches_context(const PowerImage& image, NetworkId network) const noexcept {
+    return image.network == network;
+  }
   // Stop the radio driver so no new TX/RX can start. MeshNode work has
   // already settled; this must not fabricate unknown TX results.
   virtual Status quiesce_radio() noexcept = 0;
@@ -295,6 +305,7 @@ class PowerCoordinator {
               MonotonicMs now_ms) noexcept;
 
   void poll(MonotonicMs now_ms) noexcept;
+  MonotonicMs next_deadline(MonotonicMs now_ms) const noexcept;
 
   // Application events (GPIO, sensor work, host request) invalidate tickets
   // and abort an active sleep attempt at once; without an attempt only the
@@ -310,6 +321,7 @@ class PowerCoordinator {
   ResumeOutcome resume_outcome() const noexcept { return outcome_; }
   const SleepTicket& ticket() const noexcept { return ticket_; }
   bool ticket_valid(const SleepTicket& ticket) const noexcept;
+  bool owns_node(const MeshNode& node) const noexcept { return &node == &node_; }
 
  private:
   // Marks one PowerEvents notification on the stack: mutating calls made
@@ -403,6 +415,9 @@ class PowerCoordinator {
   // An older slot may still hold pending records (or an uncertain write may
   // have landed): the next phase 1 must dual-write before settling.
   bool disk_pending_possible_{false};
+  // An unread slot may own durable work. Only a fresh boot may retry the
+  // complete read; no sleep image may overwrite it in this incarnation.
+  bool storage_impaired_{false};
   // Settled carry set: previously retained records plus records whose
   // durable ownership this attempt finalized. Independent of the candidate.
   std::array<PendingDeliveryRecord, kPowerPendingCapacity> carry_{};

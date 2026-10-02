@@ -323,6 +323,28 @@ bool "dev-ram (pairwise RAM sessions, no identity claim)"
 bool "member-edhoc (EDHOC membership via the security owner)"
 ```
 
+### CONFIG_ROUTELOOM_APP_OBJECT_TRANSFER
+
+```text
+bool "Authenticated unicast application objects (4 KiB)"
+        default n
+        help
+            Explicit object sends use Bulk priority and two outstanding chunks.
+            Ordinary sends keep their existing payload limit. Applications
+            provide the receive buffer and retain the immutable transmit loan.
+```
+
+### CONFIG_ROUTELOOM_APP_OBJECT_RX_SLOTS
+
+```text
+int "Application object receive slots"
+        depends on ROUTELOOM_APP_OBJECT_TRANSFER
+        range 1 1 if IDF_TARGET_ESP32C3
+        range 1 2
+        default 1 if IDF_TARGET_ESP32C3
+        default 2
+```
+
 ## routeloom_device
 
 生成元：[components/routeloom_device/Kconfig](../../components/routeloom_device/Kconfig)
@@ -655,7 +677,7 @@ int "Measured local channel-switch bound (ms) — deployment input"
 ```text
 bool "Drive a deep-sleep prepare/enter cycle"
         default n
-        depends on ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && !ROUTELOOM_ROLE_GATEWAY
+        depends on !ROUTELOOM_ROLE_GATEWAY
         help
             Experimental path: the Owner prepares sleep after
             ROUTELOOM_SLEEP_AFTER_MS of uptime and enters deep sleep with a
@@ -674,6 +696,19 @@ int "Uptime before sleep_prepare is requested"
             cycle, not a battery operating point (issue #58). Battery
             deployments need a long sleep interval with a short warm resume,
             sized against docs/spec/power.md.
+```
+
+### CONFIG_ROUTELOOM_SLEEP_RADIO_BUDGET_MS
+
+```text
+int "Maximum radio-on time per deep-sleep wake"
+        range 1000 3600000
+        default 40000
+        depends on ROUTELOOM_DEEP_SLEEP
+        help
+            Bounds discovery, membership recovery and sleep drain together.
+            Exhaustion stops the radio and uses the existing bounded fault
+            backoff, including when an isolated node never adopts membership.
 ```
 
 ### CONFIG_ROUTELOOM_SLEEP_DURATION_MS

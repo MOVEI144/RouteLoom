@@ -187,6 +187,7 @@ class RrsExchange {
     std::uint8_t attempts{0};
     bool manifest_sent{false};
     MonotonicMs ack_deadline_ms{0};
+    MonotonicMs deadline_ms{0};
     std::array<std::uint8_t, kRevocationObjectMax> data{};
   };
   // Metadata beside the 648 B buffers stays small (04 §4: <= 96 B each).

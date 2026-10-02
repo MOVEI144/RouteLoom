@@ -485,6 +485,8 @@ class ConfigEndpointSink {
   // configured AND ready verifier profiles only — 0 means the sink accepts
   // no permits or its verifier is unprovisioned.
   virtual std::uint32_t permit_profile_bits() const noexcept { return 0; }
+  virtual bool accepts_extension(FrameType) const noexcept { return false; }
+  virtual bool quiescent() const noexcept { return true; }
 };
 
 // P6 revocation-gossip sink (docs/design/sdk-v1/04-removal-revocation.md
@@ -824,6 +826,9 @@ class MeshNode {
   DeliveryResult delivery(const MessageId& id) const noexcept;
 
   Status poll(MonotonicMs now_ms) noexcept;
+  // Idle nodes publish the advertisement timer. Work whose component has
+  // no deadline contract retains the bounded 2 ms compatibility cadence.
+  MonotonicMs next_deadline(MonotonicMs now_ms) const noexcept;
   Status on_radio_receive(NodeId peer, ByteView frame, const RadioRxMetadata& metadata,
                           MonotonicMs now_ms) noexcept;
   // M1 telemetry entry point (m1-completion/02-telemetry.md §2.3): same
@@ -1188,7 +1193,8 @@ class MeshNode {
   // ordered group holds. This is stricter than radio quiescence: a
   // delivery waiting for a route can have no frame in flight.
   bool sleep_work_pending() const noexcept {
-    if (!quiesced() || component_jobs_outstanding_ != 0 ||
+    if ((config_sink_ != nullptr && !config_sink_->quiescent()) ||
+        !quiesced() || component_jobs_outstanding_ != 0 ||
         group_holds_.size() != 0 || group_promote_hold_.used) return true;
     bool pending = false;
     deliveries_.for_each([&](const Delivery& delivery) {
@@ -1359,7 +1365,7 @@ class MeshNode {
   // the image and no taken component event dangles past teardown.
   Status quiesce_for_sleep() noexcept {
     if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-    NodeGuard guard(in_call_);
+    NodeGuard guard(*this);
     if (physical_.active) {
       const NodeId peer = physical_.job.peer;
       const MessageId message = physical_.job.ack.key.id;
@@ -1741,7 +1747,7 @@ class MeshNode {
   enum class JobForm : std::uint8_t { Plain, Forwarded, Sealed };
   enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit,
                                        GatewayService, Config, Diagnostic,
-                                       Applied, Group, Bootstrap };
+                                       Applied, Group, Bootstrap, AppObject };
 
   // Records below are laid out largest-alignment first: MeshNode is a static
   // object in firmware and every byte of padding is .bss on the DRAM-bound
@@ -2203,7 +2209,10 @@ class MeshNode {
 
   // --- ExpectedReply admission machinery (issue #117) ----------------------
   struct NodeGuard {
-    explicit NodeGuard(bool& flag) noexcept : flag_(flag) { flag_ = true; }
+    explicit NodeGuard(MeshNode& node, bool invalidate = true) noexcept : flag_(node.in_call_) {
+      flag_ = true;
+      if (invalidate) node.next_poll_ms_ = 0;
+    }
     ~NodeGuard() noexcept { flag_ = false; }
     NodeGuard(const NodeGuard&) = delete;
     NodeGuard& operator=(const NodeGuard&) = delete;
@@ -2348,7 +2357,7 @@ class MeshNode {
 
   void finish_hop_accept(TxJob& job, bool rtt_sampled, std::uint32_t rtt_ms,
                          MonotonicMs now_ms) noexcept;
-  void handle_hop_accept(const wire::PlainFrame& frame, NodeId peer,
+  bool handle_hop_accept(const wire::PlainFrame& frame, NodeId peer,
                          const RxBinding& rx, MonotonicMs now_ms) noexcept;
   void handle_data(const wire::LinkOpenedFrame& frame, NodeId peer,
                    const RxBinding& rx, MonotonicMs now_ms) noexcept;
@@ -2470,6 +2479,9 @@ class MeshNode {
 
   void process_awaiting_hop(MonotonicMs now_ms) noexcept;
   void process_delivery_timeouts(MonotonicMs now_ms) noexcept;
+  bool deadline_supported() const noexcept;
+  void note_deadline(MonotonicMs at) noexcept;
+  void note_timer(MonotonicMs base, std::uint32_t delay) noexcept;
   void expire_dedup(MonotonicMs now_ms) noexcept;
   void schedule_route_advertisements(MonotonicMs now_ms) noexcept;
   void schedule_sequence_requests(MonotonicMs now_ms) noexcept;
@@ -2805,6 +2817,7 @@ class MeshNode {
   // during dispatch) is the single exempt entry — it only fills the pending
   // submit-identity slot the same dispatch consumes.
   bool in_call_{false};
+  bool deadline_complete_{true};
   // Admission transactions and deferred component events (issue #117).
   std::array<TxnSlot, kAdmissionTransactionsMax> txn_slots_{};
   std::array<EventSlot, kComponentEventsMax> event_slots_{};
@@ -2953,7 +2966,6 @@ class MeshNode {
   FixedPool<GroupStream, kGroupStreamCapacity> group_streams_{};
   FixedPool<GroupHold, kGroupHoldCapacity> group_holds_{};
   GroupPromoteHold group_promote_hold_{};
-  std::uint32_t next_group_seq_{1};
   std::int64_t group_budget_tokens_us_{kGroupBudgetCapacityUs};
   MonotonicMs group_budget_last_ms_{0};
   GroupStats group_stats_{};
@@ -2974,11 +2986,17 @@ class MeshNode {
   CongestionStats budget_stats_{};
   std::int64_t control_budget_tokens_us_{kControlBudgetCapacityUs};
   MonotonicMs control_budget_last_ms_{0};
+  // AppObject radio pacing also applies to opaque OFF relays and hop retries.
+  MonotonicMs object_send_after_ms_{0};
   // Calibrated emission demand: EWMA (alpha 1/8) of measured control-domain
   // driver service, seeded at the pinned max-frame cost so the first
   // emissions gate conservatively until local service is measured.
   std::uint32_t control_service_ewma_us_{kControlBudgetFrameCostUs};
+  // Driver-queue age of the frame currently inside receive_impl — debited
+  // from the forwarding budget by queue_forward (01 §lifetime).
+  std::uint32_t rx_age_ms_{0};
   std::uint64_t control_service_samples_{0};
+  std::uint32_t next_group_seq_{1};
   bool control_budget_unsat_reported_{false};
   // Dedup capacity counters (sdk-completion/02 §2.4) — admissions, refusals,
   // forced evictions and expiry releases, all saturating u64.
@@ -2996,12 +3014,10 @@ class MeshNode {
   // Transit refusals under a disabled/draining relay gate (01 §policy) —
   // counted so relay-off is evidence, not a silent black hole.
   std::uint64_t transit_refused_{0};
-  // Driver-queue age of the frame currently inside receive_impl — debited
-  // from the forwarding budget by queue_forward (01 §lifetime).
-  std::uint32_t rx_age_ms_{0};
   SessionStats session_stats_{};
   // Latest wall time seen on the event path; observation timestamps use it
   // where the call site (e.g. delivery-state transitions) has no clock.
+  MonotonicMs next_poll_ms_{0};
   MonotonicMs last_clock_ms_{0};
   std::uint32_t work_generation_{0};
   std::uint32_t rx_generation_{0};

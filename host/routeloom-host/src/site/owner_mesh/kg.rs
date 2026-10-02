@@ -34,11 +34,24 @@ fn open_epoch(world: &MeshWorld) -> String {
         .to_string()
 }
 
-fn submit(world: &MeshWorld, epoch: &str, key: u64, dest: u64, payload: &[u8]) -> Json {
+fn submit(
+    world: &MeshWorld,
+    epoch: &str,
+    key: u64,
+    dest: u64,
+    payload: &[u8],
+    latest: bool,
+    ttl_ms: u32,
+) -> Json {
+    let (delivery, queue) = if latest {
+        ("BEST_EFFORT", "LATEST_PER_DESTINATION")
+    } else {
+        ("RELIABLE", "FIFO")
+    };
     daemon(world).api(
         "messages.submit",
         &format!(
-            r#"{{"network":"{:016x}","admission_epoch":"{epoch}","key":"{key:032x}","destination":{{"kind":"node","id":"{dest:016x}"}},"payload_hex":"{}","payload_len":{},"options":{{"storage":"RAM_ONLY","delivery":"BEST_EFFORT","queue_mode":"LATEST_PER_DESTINATION","ttl_ms":5000}}}}"#,
+            r#"{{"network":"{:016x}","admission_epoch":"{epoch}","key":"{key:032x}","destination":{{"kind":"node","id":"{dest:016x}"}},"payload_hex":"{}","payload_len":{},"options":{{"storage":"RAM_ONLY","delivery":"{delivery}","queue_mode":"{queue}","ttl_ms":{ttl_ms}}}}}"#,
             network(world), hex(payload), payload.len(),
         ),
         world.now,
@@ -60,11 +73,53 @@ fn load_world(tag: &str, nodes: usize) -> Option<MeshWorld> {
     let topology = Topology {
         nodes,
         edges: (1..nodes)
-            .map(|n| (if n < 3 { 0 } else { 1 + n % 2 }, n))
+            .map(|n| {
+                (
+                    if nodes >= 31 {
+                        match n {
+                            1..=3 => 0,
+                            4..=9 => 1 + (n - 4) / 2,
+                            10..=20 => 4 + (n - 10) % 6,
+                            _ => 10 + n - 21,
+                        }
+                    } else if nodes == 5 && n == 2 {
+                        1
+                    } else if n < 3 {
+                        0
+                    } else {
+                        1 + n % 2
+                    },
+                    n,
+                )
+            })
             .collect(),
     };
     let mut world =
         MeshWorld::start_plan(tag, Switch::new(&topology), &staggered_boot(nodes), false)?;
+    for gated in 2..nodes {
+        world.gate[gated] = true;
+    }
+    for ready in 2..=nodes {
+        world.pump_until(2400, |snaps| {
+            snaps[..ready]
+                .iter()
+                .all(|s| s.authority_ready && s.join_confirmed)
+        });
+        assert!(
+            world.snaps[..ready]
+                .iter()
+                .all(|s| s.authority_ready && s.join_confirmed),
+            "staged load world {tag}, ready {ready}"
+        );
+        if ready < nodes {
+            if nodes == 31 {
+                // JoinConfirm can precede the initial unbound-neighbour sweep.
+                // Allow its 5 s exchange budget before the next staged boot.
+                world.pump_until(5000, |_| false);
+            }
+            world.gate[ready] = false;
+        }
+    }
     converge(&mut world, tag);
     world.usb_host.daemon = Some(daemon::MeshDaemon::new(world.now));
     world.pump_until(80, |_| false);
@@ -72,27 +127,55 @@ fn load_world(tag: &str, nodes: usize) -> Option<MeshWorld> {
 }
 
 #[test]
-#[ignore = "#195/#127: operations.open_epoch still rejects the full 64-bit network"]
 fn mesh_k01_periodic_latest_status_and_events() {
     let Some(mut world) = load_world("k01", 5) else {
         return;
     };
     let epoch = open_epoch(&world);
+
     let start = world.now;
     let mut key = 100;
     let mut cursor = None;
     let mut seen = std::collections::BTreeSet::new();
     let mut latency = Vec::new();
     let mut expected = 0;
+    let mut content_received = 0;
+    let mut last_view = [world.now; 5];
+    let mut last_rx = [0; 5];
     for slot in 0..60_u64 {
+        if slot == 12 {
+            world.switch.set_noise(
+                LegNoise {
+                    loss_ppm: 10_000,
+                    ..LegNoise::default()
+                },
+                21,
+            );
+        }
         let mut view = [0_u8; 10];
         view[..8].copy_from_slice(&slot.to_be_bytes());
+        if slot % 12 == 0 {
+            for index in [3, 4] {
+                key += 1;
+                let mut content = [0_u8; 127];
+                content[..8].copy_from_slice(&slot.to_be_bytes());
+                result(&submit(
+                    &world,
+                    &epoch,
+                    key,
+                    world.nodes[index],
+                    &content,
+                    false,
+                    5000,
+                ));
+            }
+        }
         for index in [3, 4] {
             key += 1;
-            let response = submit(&world, &epoch, key, world.nodes[index], &view);
+            let response = submit(&world, &epoch, key, world.nodes[index], &view, true, 5000);
             result(&response);
         }
-        if slot % 3 == 0 || slot % 9 == 1 {
+        if slot % 3 == 0 || slot % 18 == 1 {
             for index in [3, 4] {
                 let mut status = [0_u8; 34];
                 status[..8].copy_from_slice(&world.now.to_be_bytes());
@@ -105,6 +188,22 @@ fn mesh_k01_periodic_latest_status_and_events() {
         let until = start + (slot + 1) * 5_000;
         while world.now < until {
             world.step(25);
+            for index in [3, 4] {
+                let snap = &world.snaps[index];
+                if snap.rx_count != last_rx[index] && snap.rx.len() == 10 {
+                    let generated_slot = u64::from_be_bytes(snap.rx[..8].try_into().unwrap());
+                    assert!(
+                        generated_slot <= slot,
+                        "view cannot come from a future slot"
+                    );
+                    last_view[index] = start + generated_slot * 5_000;
+                }
+                last_rx[index] = snap.rx_count;
+                assert!(
+                    world.now - last_view[index] < 20_000,
+                    "continuous view freshness"
+                );
+            }
             if world.now % 1000 < 25 {
                 let response = read(&world, cursor.as_deref());
                 let page = result(&response);
@@ -127,18 +226,111 @@ fn mesh_k01_periodic_latest_status_and_events() {
             }
         }
         for index in [3, 4] {
-            assert_eq!(world.snaps[index].rx, view, "latest value in its 5 s slot");
+            let received = world.peers[index].receipts();
+            content_received += received.iter().filter(|r| r.3.len() == 127).count();
+            if slot < 12 {
+                assert!(
+                    received.iter().any(|r| r.3 == view),
+                    "latest value in its normal 5 s slot"
+                );
+            }
         }
     }
+    assert_eq!(content_received, 10, "127 B content every 60 s");
     assert_eq!(
         seen.len(),
         expected,
         "all reliable status and change events retained"
     );
+    assert!(world.switch.noise_hits.lost > 0, "leg noise fired");
+    assert!(world
+        .snaps
+        .iter()
+        .all(|s| s.mode == MODE_MEMBER && s.phase == PHASE_ACTIVE));
     latency.sort_unstable();
     let p99 = latency[(99 * latency.len()).div_ceil(100) - 1];
     assert!(p99 < 2_000, "status p99 {p99} ms");
     eprintln!("K01: {expected}/{expected} status/events, p99 {p99} ms, CURSOR_GAP 0");
+}
+
+#[test]
+fn mesh_k02_owner_management_and_periodic_load() {
+    let Some(mut world) = load_world("k02-owner", 31) else {
+        return;
+    };
+    let members = 21..31;
+    let mut last_view = [world.now; 31];
+    let mut seen = std::collections::BTreeSet::new();
+    let mut expected = 0;
+    let mut content_received = 0;
+    world.switch.management_us.fill(0);
+    for peer in &mut world.peers {
+        peer.receipts();
+    }
+    let start = world.now;
+    for slot in 0..60_u64 {
+        if slot == 12 || slot == 13 {
+            world.switch.set_audible(0, 2, slot == 13);
+            world.switch.set_audible(2, 0, slot == 13);
+        }
+        for index in members.clone() {
+            let mut view = [0_u8; 10];
+            view[..8].copy_from_slice(&slot.to_be_bytes());
+            world.peers[0].app_send_with(world.nodes[index], 0, 1, &view);
+            if slot % 3 == 0 {
+                let mut status = [0_u8; 34];
+                status[..8].copy_from_slice(&slot.to_be_bytes());
+                world.peers[index].app_send(testkit::GATEWAY, &status);
+                expected += 1;
+            }
+            if slot % 18 == 0 {
+                let mut event = [0_u8; 34];
+                event[..8].copy_from_slice(&slot.to_be_bytes());
+                event[33] = 1;
+                world.peers[index].app_send(testkit::GATEWAY, &event);
+                expected += 1;
+            }
+            if slot % 12 == 0 {
+                world.peers[0].app_send_with(world.nodes[index], 0, 0, &[slot as u8; 127]);
+            }
+            world.step(25);
+        }
+        let until = start + (slot + 1) * 5_000;
+        while world.now < until {
+            world.step(25);
+            for index in members.clone() {
+                for (_, _, _, payload) in world.peers[index].receipts() {
+                    match payload.len() {
+                        10 => last_view[index] = world.now,
+                        127 => content_received += 1,
+                        _ => panic!("unexpected display payload"),
+                    }
+                }
+                assert!(
+                    world.now - last_view[index] < 20_000,
+                    "Owner view freshness"
+                );
+            }
+            for (source, session, seq, payload) in world.peers[0].receipts() {
+                assert_eq!(payload.len(), 34);
+                assert!(
+                    seen.insert((source, session, seq)),
+                    "unique reliable status"
+                );
+            }
+        }
+    }
+    assert!(seen.len() * 1000 >= expected * 995, "Owner status >=99.5%");
+    let total = world.switch.management_us.iter().sum::<u64>() * 1000 / (world.now - start);
+    eprintln!(
+        "K02 Owner: status/events={}/{expected}, content={content_received}, management={total} us/s",
+        seen.len()
+    );
+    assert!(total <= 100_000, "all management including discovery/HELLO");
+    assert!(
+        total <= 1000 * world.peers.len() as u64,
+        "mean management <=1000 us/s/node"
+    );
 }
 
 #[test]
@@ -188,22 +380,81 @@ fn mesh_k05_cursor_replay_gap_and_epoch_change() {
 }
 
 #[test]
-#[ignore = "#195/#127: operations.open_epoch still rejects the full 64-bit network"]
 fn mesh_k03_simultaneous_latest_and_group() {
     let nodes = if max_nodes() == 32 { 32 } else { 6 };
     let Some(mut world) = load_world("k03", nodes) else {
         return;
     };
+    let full = nodes - 1;
     let epoch = open_epoch(&world);
     let before: Vec<_> = world.snaps.iter().map(|s| s.group_delivered).collect();
-    world.peers[0].group_send(1, b"all-disabled");
+    world.peers[0].group_send(0xFFFF, b"all-disabled");
     let start = world.now;
     let mut accepted = 0;
     let mut refused = 0;
+    let mut latest_received = vec![0; nodes];
+    let mut group_completed_at = None;
     for index in 1..nodes {
-        let response = submit(&world, &epoch, index as u64, world.nodes[index], b"latest");
+        if index == full {
+            // Group delivery also updates the last-payload snapshot. Count
+            // verified receives so it cannot hide an earlier latest value.
+            for _ in 0..5000 {
+                world.step(1);
+                for (peer, count) in world.peers.iter_mut().zip(&mut latest_received).skip(1) {
+                    *count += peer.receipts().iter().filter(|r| r.3 == b"latest").count();
+                }
+                if world
+                    .snaps
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .all(|(i, s)| s.group_delivered == before[i] + 1)
+                {
+                    group_completed_at.get_or_insert(world.now);
+                }
+                if latest_received[1..full].iter().all(|&count| count == 1)
+                    && group_completed_at.is_some()
+                {
+                    break;
+                }
+            }
+            assert!(
+                latest_received[1..full].iter().all(|&count| count == 1),
+                "every ordinary destination received once: {latest_received:?}"
+            );
+            assert!(world.peers[0]
+                .tracked_burst(8, u64::MAX - 1)
+                .iter()
+                .all(|r| r.0 == 0));
+        }
+        let response = submit(
+            &world,
+            &epoch,
+            index as u64,
+            world.nodes[index],
+            b"latest",
+            true,
+            5000,
+        );
         if response.get("ok").and_then(Json::as_bool) == Some(true) {
             accepted += 1;
+            if index == 1 {
+                let retry = submit(
+                    &world,
+                    &epoch,
+                    index as u64,
+                    world.nodes[index],
+                    b"latest",
+                    true,
+                    5000,
+                );
+                assert_eq!(
+                    result(&response).get("operation_id"),
+                    result(&retry).get("operation_id"),
+                    "lost admission response reuses the operation"
+                );
+            }
+            world.peers[index].app_send(testkit::GATEWAY, b"parallel-status");
         } else {
             let error = response.get("error").unwrap();
             assert!(
@@ -219,15 +470,13 @@ fn mesh_k03_simultaneous_latest_and_group() {
             );
             refused += 1;
         }
+        // Host admission does not reserve a gateway delivery slot. Keep
+        // the API burst inside the 5 s group budget while Owners drain it.
+        for _ in 0..100 {
+            world.step(1);
+        }
     }
-    world.pump_until(200, |snaps| {
-        snaps
-            .iter()
-            .enumerate()
-            .skip(1)
-            .all(|(i, s)| s.group_delivered == before[i] + 1)
-    });
-    assert!(world.now - start <= 5000);
+    assert!(group_completed_at.is_some_and(|at| at - start <= 5000));
     for (index, count) in before.iter().enumerate().skip(1) {
         assert_eq!(
             world.snaps[index].group_delivered,
@@ -236,14 +485,112 @@ fn mesh_k03_simultaneous_latest_and_group() {
         );
     }
     world.pump_until(1000, |_| false);
-    let delivered = world
-        .snaps
-        .iter()
-        .skip(1)
-        .filter(|s| s.rx == b"latest")
-        .count();
-    assert_eq!(accepted, delivered);
+    for (peer, count) in world.peers.iter_mut().zip(&mut latest_received).skip(1) {
+        *count += peer.receipts().iter().filter(|r| r.3 == b"latest").count();
+    }
+    assert!(
+        latest_received.iter().all(|&count| count <= 1),
+        "no duplicate effect"
+    );
+    let delivered = latest_received.iter().sum::<usize>();
+    assert_eq!(
+        accepted - 1,
+        delivered,
+        "one full destination, others delivered"
+    );
+    let outcome = daemon(&world).api(
+        "operations.get_by_key",
+        &format!(
+            r#"{{"network":"{:016x}","admission_epoch":"{epoch}","key":"{full:032x}"}}"#,
+            network(&world)
+        ),
+        world.now,
+    );
+    let device = result(&outcome)
+        .get("device_outcome")
+        .expect("device outcome");
+    assert_eq!(
+        device.get("state").and_then(Json::as_str),
+        Some("submit_refused")
+    );
+    assert_eq!(
+        device.get("reason").and_then(Json::as_str),
+        Some("delivery table full")
+    );
     assert_eq!(accepted + refused, nodes - 1);
+}
+
+#[test]
+fn mesh_m09_host_disconnect_keeps_only_latest() {
+    let Some(mut world) =
+        super::mesh::route_loss_world("m09-host", Switch::forced_multihop(), true)
+    else {
+        return;
+    };
+    world.usb_host.daemon = Some(daemon::MeshDaemon::new(world.now));
+    world.pump_until(80, |_| false);
+    assert!(daemon(&world).state.session.lock().unwrap().authenticated);
+    let epoch = open_epoch(&world);
+    let old_session = *world.usb_host.auth_sessions.last().unwrap();
+    world.usb_disconnect();
+    // Exercise the silent-link watchdog before admitting offline values.
+    world.pump_until(640, |_| false);
+    assert!(!daemon(&world).state.session.lock().unwrap().authenticated);
+    let mut previous: Option<String> = None;
+    for slot in 0..12_u8 {
+        if slot > 0 {
+            world.pump_until(200, |_| false);
+        }
+        let response = submit(
+            &world,
+            &epoch,
+            u64::from(slot) + 1,
+            NODE_A,
+            &[slot],
+            true,
+            30_000,
+        );
+        let admitted = result(&response);
+        let id = admitted.get("operation_id").unwrap().as_str().unwrap();
+        let superseded = admitted.get("superseded").unwrap().as_array().unwrap();
+        if let Some(previous) = &previous {
+            assert_eq!(superseded.len(), 1);
+            assert_eq!(superseded[0].as_str(), Some(previous.as_str()));
+            let retired = daemon(&world).api(
+                "operations.get",
+                &format!(r#"{{"operation_id":"{previous}"}}"#),
+                world.now,
+            );
+            assert_eq!(
+                result(&retired)
+                    .get("dispatch_state")
+                    .and_then(Json::as_str),
+                Some("CANCELLED_BEFORE_DISPATCH")
+            );
+            assert_eq!(
+                result(&retired)
+                    .get("observation")
+                    .unwrap()
+                    .get("superseded_by")
+                    .and_then(Json::as_str),
+                Some(id)
+            );
+        } else {
+            assert!(superseded.is_empty());
+        }
+        previous = Some(id.to_string());
+        assert!(world.peers[1].receipts().is_empty(), "no offline delivery");
+    }
+    world.usb_reconnect();
+    world.pump_until(200, |snaps| snaps[1].rx_count == 1);
+    assert_eq!(world.snaps[0].usb_state, USB_ACTIVE);
+    assert_ne!(world.usb_host.auth_sessions.last(), Some(&old_session));
+    // Keep observing after recovery so stale queued values or replayed
+    // submissions cannot hide behind the first latest-value delivery.
+    world.pump_until(1200, |_| false);
+    let received = world.peers[1].receipts();
+    assert_eq!(received.len(), 1, "only the latest value after reconnect");
+    assert_eq!(received[0].3, [11]);
 }
 
 #[test]

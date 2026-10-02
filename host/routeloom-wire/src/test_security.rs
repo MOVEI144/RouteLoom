@@ -155,6 +155,9 @@ mod tests {
             sender: 1,
             receiver: 3,
             epoch: 1,
+            group_epoch: 0,
+            sender_boot: 0,
+            group_id: 0,
         };
         let mut security = TestSecurity::new();
         let plaintext = b"route-loom";

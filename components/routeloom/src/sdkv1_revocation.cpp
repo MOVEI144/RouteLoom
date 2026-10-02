@@ -351,7 +351,6 @@ void RrsExchange::on_ack(const NodeId peer, const std::uint32_t binding,
 
 Status RrsExchange::publish(const NodeId dest, const std::uint32_t binding, const ByteView object,
                             const MonotonicMs now_ms) noexcept {
-  (void)now_ms;
   if (tx_.used) {
     return Status::error(StatusCode::NoCapacity, "rrs tx busy");
   }
@@ -368,6 +367,9 @@ Status RrsExchange::publish(const NodeId dest, const std::uint32_t binding, cons
   tx_.attempts = 0;
   tx_.manifest_sent = false;
   tx_.ack_deadline_ms = 0;
+  // Port refusal must not pin the sole sender beyond the requester's
+  // fetch window. Neither progress ACKs nor retries extend this deadline.
+  tx_.deadline_ms = add_sat(now_ms, rrs_const::kFetchWindowMs);
   return Status::success();
 }
 
@@ -421,6 +423,11 @@ void RrsExchange::poll(const MonotonicMs now_ms) noexcept {
     ++failed_;
   }
   if (!tx_.used) return;
+  if (now_ms >= tx_.deadline_ms) {
+    tx_.used = false;
+    ++failed_;
+    return;
+  }
   if (!tx_.manifest_sent || tx_.sent < tx_.total_len) {
     transmit_tx(now_ms);
     return;
@@ -454,6 +461,7 @@ MonotonicMs RrsExchange::next_deadline() const noexcept {
   if (tx_.used && (!tx_.manifest_sent || tx_.sent < tx_.total_len)) return 0;
   MonotonicMs next = 0xFFFFFFFFFFFFFFFFULL;
   if (rx_.used) next = rx_.deadline_ms;
+  if (tx_.used && tx_.deadline_ms < next) next = tx_.deadline_ms;
   if (tx_.used && tx_.manifest_sent && tx_.sent >= tx_.total_len && tx_.ack_deadline_ms < next) {
     next = tx_.ack_deadline_ms;
   }

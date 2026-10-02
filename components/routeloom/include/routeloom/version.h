@@ -10,14 +10,17 @@
 
 #define ROUTELOOM_CORE_C_ABI 3  /* Core C ABI */
 #define ROUTELOOM_DEVICE_C_API 1  /* Device C API */
+#define ROUTELOOM_APP_OBJECT_SCHEMA 1  /* AppObject payload */
 #define ROUTELOOM_WIRE_MAJOR 2  /* Mesh wire major */
 #define ROUTELOOM_WIRE_MINOR 0  /* Mesh wire minor */
 #define ROUTELOOM_RLD1_VERSION 1  /* RLD1 carrier */
-#define ROUTELOOM_RLD1_ZT_BODY 3  /* RLD1 ZeroTouch body */
+#define ROUTELOOM_RLD1_ZT_BODY 4  /* RLD1 ZeroTouch body */
 #define ROUTELOOM_HOSTLINK_PROTOCOL 2  /* HostLink (RLU1) protocol */
 #define ROUTELOOM_HOSTOPS_SCHEMA 1  /* HostOps schema */
 #define ROUTELOOM_HOSTOPS_JOIN_RELAY_SCHEMA 2  /* HostOps join relay schema */
 #define ROUTELOOM_AUTHORITY_ENVELOPE 1  /* AuthorityEnvelope */
+#define ROUTELOOM_STORE_PROXY_POLICY_FORMAT 2  /* Proxy policy record */
+#define ROUTELOOM_STORE_JOIN_POLICY_FORMAT 2  /* Device join policy record */
 #define ROUTELOOM_STORE_AUTHORITY_LEDGER_FORMAT 1  /* Authority ledger format */
 #define ROUTELOOM_STORE_AUTHORITY_LEDGER 1  /* Authority ledger (device) */
 #define ROUTELOOM_STORE_CONFIG_JOURNAL_FORMAT 2  /* Config journal format (device) */
@@ -39,6 +42,7 @@
 #define ROUTELOOM_STORE_MIGRATION_RECOVERY 1  /* Migration recovery snapshot */
 
 #define ROUTELOOM_REASON_NONE 0
+#define ROUTELOOM_REASON_TOO_LARGE 1
 #define ROUTELOOM_REASON_QUEUED 256
 #define ROUTELOOM_REASON_TX_ACCEPTED 257
 #define ROUTELOOM_REASON_TX_MAC_PENDING 258
@@ -171,6 +175,7 @@
 /* X(NAME, id) for every registered reason code. */
 #define ROUTELOOM_REASON_TABLE(X) \
   X(NONE, 0) \
+  X(TOO_LARGE, 1) \
   X(QUEUED, 256) \
   X(TX_ACCEPTED, 257) \
   X(TX_MAC_PENDING, 258) \
@@ -302,7 +307,8 @@
 
 /* X(NAME, id) for the common area only. */
 #define ROUTELOOM_REASON_COMMON_TABLE(X) \
-  X(NONE, 0)
+  X(NONE, 0) \
+  X(TOO_LARGE, 1)
 
 /* X(NAME, id) for the delivery area only. */
 #define ROUTELOOM_REASON_DELIVERY_TABLE(X) \

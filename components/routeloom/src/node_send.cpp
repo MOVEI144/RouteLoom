@@ -1,4 +1,5 @@
 #include "node_internal.hpp"
+#include "routeloom/app_object.hpp"
 
 namespace routeloom {
 
@@ -6,7 +7,7 @@ Status MeshNode::send(const NodeId destination, const ByteView payload,
                       const SendOptions& options, const MonotonicMs now_ms,
                       MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   // Any application TX intent is activity: it must invalidate an outstanding
@@ -64,7 +65,7 @@ Status MeshNode::send_applied(const NodeId destination, const ByteView payload,
                               const ExecutionLease& lease, const SendOptions& options,
                               const MonotonicMs now_ms, MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   ++work_generation_;
@@ -134,7 +135,7 @@ Status MeshNode::resume_delivery(const MessageId& id, const NodeId destination,
                                  const ByteView payload, const SendOptions& options,
                                  const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   ++work_generation_;
   if (paused(pause::kAppAdmission)) {
@@ -216,7 +217,7 @@ Status MeshNode::enqueue_delivery(const MessageId& id, const NodeId destination,
       record = deliveries_.allocate();
     }
     if (record == nullptr) {
-      return Status::error(StatusCode::NoCapacity, "delivery table full");
+      return Status::error(StatusCode::Busy, "delivery table full");
     }
   }
   record->id = id;
@@ -282,7 +283,7 @@ Status MeshNode::enqueue_delivery(const MessageId& id, const NodeId destination,
 
 Status MeshNode::cancel(const MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   auto* record = find_delivery(id);
   if (record == nullptr) return Status::error(StatusCode::NotFound, "delivery not found");
   switch (record->state) {
@@ -303,7 +304,7 @@ Status MeshNode::cancel(const MessageId& id) noexcept {
 
 Status MeshNode::cancel_all(const char* untransmitted_reason) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   deliveries_.for_each([&](Delivery& record) {
     switch (record.state) {
       case DeliveryState::Accepted:
@@ -450,7 +451,8 @@ Status MeshNode::decode_ack_payload(const ByteView payload, AckKey& key) noexcep
   RL_READ(reader.read_u64(key.key.id.sequence));
   RL_READ(reader.read_u8(key.round));
 #undef RL_READ
-  const bool known_type = type == static_cast<std::uint8_t>(FrameType::Data) ||
+  const bool known_type = wire::is_extension_type(static_cast<FrameType>(type)) ||
+      type == static_cast<std::uint8_t>(FrameType::Data) ||
       type == static_cast<std::uint8_t>(FrameType::EndReceipt) ||
       type == static_cast<std::uint8_t>(FrameType::BootstrapAuth) ||
       type == static_cast<std::uint8_t>(FrameType::MembershipResult) ||
@@ -677,7 +679,7 @@ Status MeshNode::send_service(const NodeId destination, const ByteView payload,
                               const std::uint32_t lifetime_ms,
                               const MonotonicMs now_ms, MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   return send_service_impl(destination, payload, lifetime_ms, Priority::Normal,
                            now_ms, id);
 }
@@ -686,7 +688,7 @@ Status MeshNode::send_service(const NodeId destination, const ByteView payload,
                               const std::uint32_t lifetime_ms, const Priority priority,
                               const MonotonicMs now_ms, MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   return send_service_impl(destination, payload, lifetime_ms, priority, now_ms, id);
 }
 
@@ -717,7 +719,7 @@ Status MeshNode::resend_service(const MessageId& id, const NodeId destination,
                                 const std::uint32_t lifetime_ms,
                                 const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   ++work_generation_;
@@ -740,7 +742,7 @@ Status MeshNode::send_typed(const FrameType type, const NodeId destination,
                             const ByteView payload, const std::uint32_t lifetime_ms,
                             const MonotonicMs now_ms, MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   ++work_generation_;
@@ -752,7 +754,10 @@ Status MeshNode::send_typed(const FrameType type, const NodeId destination,
   // link-scoped autonomy forms of the object types must NOT be sent here
   // (they keep their own MigrationWirePort path), and Service stays on
   // send_service.
-  const bool config_type = type == FrameType::Control ||
+  const bool object_type = ROUTELOOM_APP_OBJECT_TRANSFER &&
+      (type == FrameType::AppObjectStart || type == FrameType::AppObjectChunk ||
+       type == FrameType::AppObjectAck);
+  const bool config_type = object_type || type == FrameType::Control ||
       type == FrameType::ControlObject || type == FrameType::ObjectChunk ||
       type == FrameType::ObjectAck;
   if (!config_type || destination == kInvalidNodeId || destination == config_.node ||
@@ -761,15 +766,16 @@ Status MeshNode::send_typed(const FrameType type, const NodeId destination,
     return Status::error(StatusCode::InvalidArgument, "invalid typed send");
   }
   id = MessageId{config_.message_session, next_message_sequence_++};
-  return queue_typed_job(type, JobOwner::Config, id, destination, payload,
-                         /*round=*/0, lifetime_ms, Priority::Normal, now_ms);
+  return queue_typed_job(type, object_type ? JobOwner::AppObject : JobOwner::Config,
+                         id, destination, payload, /*round=*/0, lifetime_ms,
+                         object_type ? Priority::Bulk : Priority::Normal, now_ms);
 }
 
 Status MeshNode::send_bootstrap(const NodeId destination, const FrameType type,
                                 const ByteView payload, const std::uint32_t lifetime_ms,
                                 const MonotonicMs now_ms, MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   ++work_generation_;
@@ -829,6 +835,7 @@ Status MeshNode::queue_typed_job(const FrameType type, const JobOwner owner,
   job.deadline_ms = now_ms + lifetime_ms;
   job.ack = AckKey{type, MessageKey{config_.node, id}, round};
   job.plain.header.type = type;
+  job.plain.header.traffic = wire::traffic_for(priority);
   // §5.3: every Service payload is link AND end protected — the plaintext
   // path does not exist for this type (receivers drop it). Only the
   // bootstrap lane (P4 §7.4) sends link-only, so a relay forwards it
@@ -847,6 +854,12 @@ Status MeshNode::queue_typed_job(const FrameType type, const JobOwner owner,
   job.plain.header.original_lifetime_ms = lifetime_ms;
   job.plain.header.link_epoch = config_.link_epoch;
   job.plain.header.end_epoch = config_.end_epoch;
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  if (owner == JobOwner::AppObject &&
+      !security_.tx_epoch(SecurityScope::EndToEnd, destination, job.plain.header.end_epoch)) {
+    return Status::error(StatusCode::AuthRequired, "OBJECT_CONTEXT_UNAVAILABLE");
+  }
+#endif
   job.plain.payload_size = payload.size;
   if (payload.size > 0) {
     std::memcpy(job.plain.payload.data(), payload.data, payload.size);
@@ -855,7 +868,7 @@ Status MeshNode::queue_typed_job(const FrameType type, const JobOwner owner,
   // Pending/Reject) ride Management as receipt-class traffic, Query/Submit
   // stay Normal app traffic.
   job.priority = priority;
-  if (owner == JobOwner::GatewayService || owner == JobOwner::Config) {
+  if (owner == JobOwner::GatewayService || owner == JobOwner::Config || owner == JobOwner::AppObject) {
     // The completion event slot is held at send time (design-q116 §8.3):
     // when the queue cannot promise the completion, the send is Busy and
     // nothing is queued — the completion can never be silently lost.
@@ -877,7 +890,7 @@ Status MeshNode::queue_typed_job(const FrameType type, const JobOwner owner,
   }
   Status status = scheduler_.enqueue(std::move(job), config_.node, now_ms);
   if (!status) return status;
-  if (owner == JobOwner::GatewayService || owner == JobOwner::Config) {
+  if (owner == JobOwner::GatewayService || owner == JobOwner::Config || owner == JobOwner::AppObject) {
     ++component_jobs_outstanding_;
   }
   if (owner == JobOwner::Applied || owner == JobOwner::Diagnostic) {

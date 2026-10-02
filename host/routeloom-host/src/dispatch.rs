@@ -1077,6 +1077,10 @@ impl Dispatcher {
         let lease = BootLease(lease_bytes);
         let mut sorted = ops;
         sorted.sort_by_key(|op| op.seq);
+        // Retry timestamps belong only to retained operations. Reuse the
+        // sorted store snapshot so a long-lived lease cannot grow this cache.
+        self.last_attempt
+            .retain(|seq, _| sorted.binary_search_by_key(seq, |op| op.seq).is_ok());
         let mut highwater = sorted
             .iter()
             .filter_map(|op| op.dispatch.as_ref())
@@ -2310,7 +2314,9 @@ impl Dispatcher {
             let concluded = o.concluded();
             let prepared = o.dispatch_state == DispatchState::DispatchPrepared;
             let d = o.dispatch.as_mut().expect("checked above");
-            if state != SlotState::Empty && d.device_state.as_deref() == Some("submit_refused") {
+            if !matches!(state, SlotState::Empty | SlotState::Skipped)
+                && d.device_state.as_deref() == Some("submit_refused")
+            {
                 d.device_state = None;
                 d.device_reason = None;
             }
@@ -2829,6 +2835,7 @@ pub fn dispatch_loop(state: Arc<State>, outbound: mpsc::SyncSender<Outbound>) {
 
 #[cfg(test)]
 mod tests {
+    mod resources;
     use super::*;
 
     #[test]
@@ -3020,6 +3027,30 @@ mod tests {
             record.dispatch.as_ref().unwrap().device_reason.as_deref(),
             Some("NO_ROUTE")
         );
+        dispatcher.tick(&mut store, &link(), 31_001);
+        let out = dispatcher.tick(&mut store, &link(), 31_002);
+        let skip = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_SKIP)
+            .expect("expired hole owes SKIP");
+        dispatcher.handle_reply(
+            &mut store,
+            skip.request,
+            &receipt(
+                SUB_SKIP,
+                HostOpsResult::Ok,
+                SlotState::Skipped,
+                1,
+                Evidence::None,
+                [0; 32],
+            ),
+            31_020,
+        );
+        let record = op(&store, seq);
+        let attachment = record.dispatch.as_ref().unwrap();
+        assert!(attachment.device_terminal);
+        assert_eq!(attachment.device_state.as_deref(), Some("submit_refused"));
+        assert_eq!(attachment.device_reason.as_deref(), Some("NO_ROUTE"));
     }
 
     /// Same for QUERY responses: hash + operation id are verified on Ok.

@@ -60,7 +60,7 @@ P0-1／P0-2、P1-1〜P1-5、P2-1、P2-3、P3-1〜P3-4、P4-1〜P4-4、P5-1／P5-
 
 ## 3. 受入ID一覧
 
-参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）の計62件。`tools/check_review_contracts.py`は設計表のID集合とテストソース内の正確なタグを機械照合し、変異試験で検出力を確認する。タグの存在はID全条件の達成を証明しない。同じIDでもportable／host部分と実機・HIL部分は別の証拠として扱う。
+参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H12（[07](07-host-api-tooling.md) §8）の計65件。`tools/check_review_contracts.py`は設計表のID集合とテストソース内の正確なタグを機械照合し、変異試験で検出力を確認する。タグの存在はID全条件の達成を証明しない。同じIDでもportable／host部分と実機・HIL部分は別の証拠として扱う。
 
 | 範囲 | 実行済みの部分 | 未完了・範囲外 |
 |---|---|---|
@@ -82,7 +82,7 @@ F04にはhost試験がない。N06は`rlboot`欠落・後退・耐久化不明�
 4. P8-2の独立レビュー（[#100](https://github.com/MOVEI144/RouteLoom/issues/100)）で未解決の重大指摘が無い。
 5. 配備tier（T1/T2）、Device CA／Site CAの鍵保管・custody、製造／注入／移管手順（[04 provisioning §4.10](../sdk-completion/04-provisioning-lifecycle.md)）が決定・検証済み。
 
-**現状は未達**。PR #155／#156／#158で先行する独立レビューの指摘を修正したが、P8-2の受入記録と静的受け入れ検査、HIL（条件3）、鍵custody／tier（条件5）が未了であり、host受入も§3の部分証拠に留まる。`EspNowSecurityOwner::security_profile()`は`Development`を返し、Nodeは`SECURITY_PROFILE_EXPERIMENTAL`を出す。DevRamが公開既定、LegacyFixtureは明示選択のみ。Member EDHOC構成を含め`Production`と表示せず、KGuardの本番配備に使わない。
+**現状は未達**。PR #155／#156／#158で先行する独立レビューの指摘を修正したが、P8-2の受入記録、HIL（条件3）、鍵 custody／tier（条件5）が未了であり、host 受入も§3の部分証拠に留まる。`EspNowSecurityOwner::security_profile()` は DevRam で `Development`、MemberEdhoc で `Candidate` を返す。配布 image は MemberEdhoc、quick start と example は DevRam が既定（[実装案内](../../implementation/README.md)）。Node は引き続き `SECURITY_PROFILE_EXPERIMENTAL` を出し、`Production` と認定しない。既定化の merge には H2 の Member 全回帰合格記録が必要。
 
 **閉じる Issue と v2 へ移すもの（2026-09-28）**
 

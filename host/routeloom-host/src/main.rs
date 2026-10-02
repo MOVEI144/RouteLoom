@@ -7,6 +7,7 @@ mod group;
 #[cfg(test)]
 mod manifest_check;
 mod nodes;
+mod objects;
 mod observation;
 mod radio_budget;
 mod receive_log;
@@ -67,7 +68,8 @@ const CLIENT_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_mill
 const WIRE_HEADER_SIZE: usize = 26;
 const WIRE_CRC_SIZE: usize = 4;
 /// Cumulative grant the daemon extends to the device for its sends
-/// (DataFromMesh/DeliveryEvent/Diagnostic); topped up on CREDIT_QUERY.
+/// (DataFromMesh/DeliveryEvent/Diagnostic); returned in half-window batches,
+/// with CREDIT_QUERY recovery when a grant is lost.
 const DEVICE_TX_GRANT_FRAMES: u64 = 16;
 const DEVICE_TX_GRANT_BYTES: u64 = 65_536;
 /// Public development hostlink secret (the firmware Kconfig default) — used
@@ -222,6 +224,9 @@ struct DeviceSession {
     /// Cumulative grant we extend to the device for its sends.
     tx_grant_frames: u64,
     tx_grant_bytes: u64,
+    /// Authenticated non-control frames consumed since the last credit return.
+    rx_return_frames: u64,
+    rx_return_bytes: u64,
     /// Timestamp of the last begin() so the writer can pace handshake retries.
     last_begin_ms: u64,
 }
@@ -255,6 +260,8 @@ impl DeviceSession {
             send_credit: CumulativeCredit::default(),
             tx_grant_frames: 0,
             tx_grant_bytes: 0,
+            rx_return_frames: 0,
+            rx_return_bytes: 0,
             last_begin_ms: 0,
         }
     }
@@ -519,6 +526,8 @@ impl DeviceSession {
                 self.send_credit = CumulativeCredit::new(self.session_id);
                 self.tx_grant_frames = DEVICE_TX_GRANT_FRAMES;
                 self.tx_grant_bytes = DEVICE_TX_GRANT_BYTES;
+                self.rx_return_frames = 0;
+                self.rx_return_bytes = 0;
                 result.outbound.push(Outbound::Seal(self.grant_frame()));
                 result.auth_session = Some(self.session_id);
                 result.notes.push(format!(
@@ -610,6 +619,23 @@ impl DeviceSession {
                                 result.session_lost = true;
                                 self.queue_hello(&mut result);
                                 return result;
+                            }
+                        }
+                        if !is_control_kind(frame.kind) {
+                            self.rx_return_frames += 1;
+                            self.rx_return_bytes +=
+                                (WIRE_HEADER_SIZE + frame.body.len() + WIRE_CRC_SIZE) as u64;
+                            // Return consumed credit before the device runs dry:
+                            // waiting for QUERY lets a concurrent ingress/delivery
+                            // burst fill its bounded queue during the round trip.
+                            if self.rx_return_frames >= DEVICE_TX_GRANT_FRAMES / 2
+                                || self.rx_return_bytes >= DEVICE_TX_GRANT_BYTES / 2
+                            {
+                                self.tx_grant_frames += self.rx_return_frames;
+                                self.tx_grant_bytes += self.rx_return_bytes;
+                                self.rx_return_frames = 0;
+                                self.rx_return_bytes = 0;
+                                result.outbound.push(Outbound::Seal(self.grant_frame()));
                             }
                         }
                         result.inner = Some(inner);
@@ -929,6 +955,9 @@ struct State {
     /// api1 `group.send`/`group.get` submit and read here, the group lane
     /// thread drives the device exchange and emits `group_settled`.
     group_ops: group::GroupOps,
+    object_ops: objects::ObjectOps,
+    object_log: Mutex<ReceiveLog>,
+    object_ingress: Mutex<objects::IngressAssembly>,
     /// The single owned rollcall run (design-devflow §6.4, D09): the
     /// rollcall lane drives it through `group_ops`; api1 `lab.rollcall.*`
     /// starts, steers and reads it. A State singleton, so a disconnected
@@ -982,7 +1011,8 @@ impl State {
 fn queued_diagnostic_is_live(state: &State, request: u64) -> bool {
     let telemetry = telemetry::owns_request(request);
     let observation = remote_observation::owns_request(request);
-    if !telemetry && !observation {
+    let object = objects::owns_request(request);
+    if !telemetry && !observation && !object {
         return true;
     }
     let session = state.session.lock().expect("session poisoned");
@@ -993,7 +1023,9 @@ fn queued_diagnostic_is_live(state: &State, request: u64) -> bool {
     };
     let Some(id) = id else { return false };
     drop(session);
-    if telemetry {
+    if object {
+        state.object_ops.request_pending_in_session(request, id)
+    } else if telemetry {
         state.telemetry_ops.request_pending_in_session(request, id)
     } else {
         state
@@ -1615,6 +1647,31 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
         // the bounded ring — the lane publishes the transitions instead.
         // group_delivery_v1 0x51 statuses belong to the group lane (same
         // no-mirroring rule: the lane publishes `group_settled` instead).
+        FrameKind::HostOps if body.get(..2) == Some(&[1, 0x86]) => {
+            if let Ok(mut assembly) = state.object_ingress.lock() {
+                if let Some((mut ingress, tag, encoding)) = assembly.fragment(frame.session, body) {
+                    let Ok(session) = state.session.lock() else {
+                        return;
+                    };
+                    if !session.authenticated || session.id != Some(frame.session) {
+                        return;
+                    }
+                    let Some(network) = session.network.filter(|network| *network != 0) else {
+                        return;
+                    };
+                    ingress.network = network;
+                    ingress.gateway = session.node;
+                    drop(session);
+                    if let Ok(mut log) = state.object_log.lock() {
+                        log.ingest_object(ingress, tag, encoding, ms);
+                    }
+                    state.subscriptions.notify();
+                }
+            }
+        }
+        FrameKind::HostOps if body.get(..2) == Some(&[1, 0x84]) => {
+            state.object_ops.reply(frame.request, frame.session, body);
+        }
         FrameKind::HostOps if group::owns(body) => {
             if !state.group_ops.post_status(frame.request, body.to_vec()) {
                 push_event(
@@ -2625,6 +2682,8 @@ fn serve_client(
                 node_table: &state.node_table,
                 config_ops: &state.config_ops,
                 group_ops: &state.group_ops,
+                object_ops: &state.object_ops,
+                object_log: &state.object_log,
                 rollcall: &state.rollcall,
                 telemetry_ops: &state.telemetry_ops,
                 observation_ops: &state.observation_ops,
@@ -3333,6 +3392,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // different op minted by the new boot (RAM-only ids).
         config_ops: dispatch::ConfigOps::with_boot(host_boot),
         group_ops: group::GroupOps::with_boot(host_boot),
+        object_ops: objects::ObjectOps::with_boot(host_boot),
+        object_log: Mutex::new(ReceiveLog::objects(mint_id128())),
+        object_ingress: Mutex::new(objects::IngressAssembly::default()),
         subscriptions: subscribe::SubscriptionHub::with_boot(host_boot),
         config_authority: args.config_authority,
         config_authority_generation: args.config_authority_generation,
@@ -4086,6 +4148,58 @@ mod tests {
             op.dispatch_state,
             send_store::DispatchState::GatewayAccepted
         );
+    }
+
+    #[test]
+    fn session_returns_consumed_credit_before_exhaustion() {
+        let mut session = DeviceSession::new();
+        let proof = complete_handshake(&mut session);
+        let mut charged_bytes = 0;
+        for counter in 0..DEVICE_TX_GRANT_FRAMES / 2 {
+            let body = seal_body(
+                &proof.key_d2h,
+                DIRECTION_DEVICE_TO_HOST,
+                counter,
+                FrameKind::DataFromMesh,
+                0,
+                0,
+                b"value",
+            );
+            let mut data = frame(FrameKind::DataFromMesh, 0, 0, body);
+            data.session = proof.session_id;
+            charged_bytes += (WIRE_HEADER_SIZE + data.body.len() + WIRE_CRC_SIZE) as u64;
+            let inbound = session.handle(&data);
+            assert!(inbound.inner.is_some());
+            if counter + 1 < DEVICE_TX_GRANT_FRAMES / 2 {
+                assert!(inbound.outbound.is_empty());
+            } else {
+                let [Outbound::Seal(grant)] = inbound.outbound.as_slice() else {
+                    panic!("half-window must return one sealed grant");
+                };
+                assert_eq!(grant.kind, FrameKind::Credit);
+                assert_eq!(grant.body[0], CREDIT_GRANT);
+                assert_eq!(
+                    u64::from_be_bytes(grant.body[1..9].try_into().unwrap()),
+                    DEVICE_TX_GRANT_FRAMES + DEVICE_TX_GRANT_FRAMES / 2
+                );
+                assert_eq!(
+                    u64::from_be_bytes(grant.body[9..17].try_into().unwrap()),
+                    DEVICE_TX_GRANT_BYTES + charged_bytes
+                );
+            }
+            // A replay must neither be consumed nor returned as new credit.
+            let replay = session.handle(&data);
+            assert!(replay.inner.is_none());
+            assert!(replay.outbound.is_empty());
+        }
+        assert_eq!(session.rx_return_frames, 0);
+        assert_eq!(session.rx_return_bytes, 0);
+        // A new authenticated session cannot inherit a partial batch.
+        session.rx_return_frames = 3;
+        session.rx_return_bytes = 123;
+        complete_handshake(&mut session);
+        assert_eq!(session.rx_return_frames, 0);
+        assert_eq!(session.rx_return_bytes, 0);
     }
 
     #[test]

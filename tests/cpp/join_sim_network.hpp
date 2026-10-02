@@ -705,6 +705,10 @@ class SimSite {
 
   void set_policy(const AuthorityPolicy& policy) { authority_.policy = policy; }
   void set_package(const SitePackage& package) { authority_.set_package(package); }
+  void set_expected(const ExpectedJoinList& expected, std::uint64_t expires) {
+    expected_ = expected;
+    for (auto& proxy : proxies_) proxy->engine.set_expected(&expected_, expires);
+  }
   void set_proxy_muted(std::size_t index, bool muted) {
     if (index < proxies_.size()) proxies_[index]->muted = muted;
   }
@@ -812,6 +816,7 @@ class SimSite {
     return config;
   }
 
+  ExpectedJoinList expected_{};
   SimSiteParams params_;
   SimWirePort gateway_wire_;
   JoinRelayGateway gateway_;

@@ -361,8 +361,14 @@ void MeshNode::note_scoped_change(const RouteSelection& selection,
                                   const MonotonicMs now_ms) noexcept {
   const NodeId destination = selection.valid ? selection.destination : previous.destination;
   if (destination == kInvalidNodeId || destination == config_.node) return;
+  // A stable tree link carries metric/sequence refreshes on its periodic cycle.
+  // Loss and parent changes still trigger immediately; explicit repair requests
+  // keep their direct replies. This avoids propagating each load sample.
+  if (selection.valid && previous.valid && selection.next_hop == previous.next_hop) {
+    return;
+  }
   if (is_route_gateway(destination)) {
-    // Gateway route moved (next hop, sequence, metric or validity): the
+    // Gateway route moved (next hop or validity): the
     // children and interested neighbors hear it; a parent change also
     // restarts the upward cycle toward the new parent (run_scoped_triggered).
     scoped_down_dirty_ = true;
@@ -1055,7 +1061,11 @@ void MeshNode::schedule_route_discovery(const MonotonicMs now_ms) noexcept {
     discoveries_.release(done);
   }
   discoveries_.for_each([&](DiscoveryState& state) {
-    if (now_ms < state.next_request_ms || scheduler_.full()) return;
+    note_deadline(state.expires_at_ms);
+    if (now_ms < state.next_request_ms || scheduler_.full()) {
+      note_deadline(state.next_request_ms);
+      return;
+    }
     // Toward the gateway: the tree root (or the first ancestor that holds
     // the target in its subtree) turns the request down toward the target.
     // A node without an uplink (the gateway itself) cannot discover — its
@@ -1084,6 +1094,7 @@ void MeshNode::schedule_route_discovery(const MonotonicMs now_ms) noexcept {
       state.next_request_ms = now_ms + (sent
           ? std::min<std::uint32_t>(kDiscoveryMaxMs, kDiscoveryBaseMs * state.attempts)
           : (has_neighbor ? 50 : kDiscoveryBaseMs));
+      note_deadline(state.next_request_ms);
       return;
     }
     if (state.attempts != UINT8_MAX) ++state.attempts;

@@ -1,8 +1,8 @@
 #include "routeloom/power.hpp"
 
+#include <algorithm>
 #include <cstring>
 
-#include "routeloom/byte_io.hpp"
 #include "routeloom/crc32.hpp"
 
 namespace routeloom {
@@ -22,50 +22,55 @@ static_assert(kImageHeaderSize +
 
 Status encode_image(const PowerImage& image,
                     std::array<std::uint8_t, kPowerImageRecordSize>& out) noexcept {
-  out.fill(0);
-  ByteWriter writer(MutableByteView{out.data(), out.size()});
-  Status status;
-#define RL_WRITE(expr)            \
-  do {                            \
-    status = (expr);              \
-    if (!status) return status;   \
-  } while (false)
-  RL_WRITE(writer.write_u32(kImageMagic));
-  RL_WRITE(writer.write_u16(static_cast<std::uint16_t>(kPowerImageSchemaVersion)));
-  RL_WRITE(writer.write_u32(image.sequence));
-  RL_WRITE(writer.write_u64(image.network));
-  RL_WRITE(writer.write_u64(image.node));
-  RL_WRITE(writer.write_u32(image.config_revision));
-  RL_WRITE(writer.write_u8(image.channel));
-  RL_WRITE(writer.write_u8(0));
+  std::size_t offset = 0;
+  // Every field width is fixed; the layout assertion proves all accesses
+  // fit. No input-controlled length changes the record traversal.
+  const auto put = [&](std::uint32_t value, unsigned width) {
+    for (unsigned i = width; i != 0; --i)
+      out[offset++] = static_cast<std::uint8_t>(value >> (8 * (i - 1)));
+  };
+  const auto put64 = [&](std::uint64_t value) {
+    put(static_cast<std::uint32_t>(value >> 32), 4);
+    put(static_cast<std::uint32_t>(value), 4);
+  };
+  const auto bytes = [&](ByteView value) {
+    std::memcpy(out.data() + offset, value.data, value.size);
+    offset += value.size;
+  };
+  put(kImageMagic, 4);
+  put(static_cast<std::uint16_t>(kPowerImageSchemaVersion), 2);
+  put(image.sequence, 4);
+  put64(image.network);
+  put64(image.node);
+  put(image.config_revision, 4);
+  put(image.channel, 1);
+  put(0, 1);
   for (const auto& peer : image.peers) {
-    RL_WRITE(writer.write_u64(peer.node));
-    RL_WRITE(writer.write_bytes(ByteView{peer.address.data(), peer.address.size()}));
-    RL_WRITE(writer.write_u8(peer.address_size));
-    RL_WRITE(writer.write_u16(peer.metric));
-    RL_WRITE(writer.write_u8(peer.used ? 1 : 0));
+    put64(peer.node);
+    bytes(ByteView{peer.address.data(), peer.address.size()});
+    put(peer.address_size, 1);
+    put(peer.metric, 2);
+    put(peer.used ? 1 : 0, 1);
   }
   for (const auto& pending : image.pending) {
-    RL_WRITE(writer.write_u32(pending.original_id.session));
-    RL_WRITE(writer.write_u64(pending.original_id.sequence));
-    RL_WRITE(writer.write_u64(pending.destination));
-    RL_WRITE(writer.write_u8(static_cast<std::uint8_t>(pending.delivery)));
-    RL_WRITE(writer.write_u8(static_cast<std::uint8_t>(pending.priority)));
-    RL_WRITE(writer.write_u8(pending.hop_limit));
-    RL_WRITE(writer.write_u8(pending.payload_size));
-    RL_WRITE(writer.write_u32(pending.stored_remaining_ms));
-    RL_WRITE(writer.write_u8(pending.used ? 1 : 0));
-    RL_WRITE(writer.write_bytes(ByteView{pending.payload.data(), pending.payload.size()}));
+    put(pending.original_id.session, 4);
+    put64(pending.original_id.sequence);
+    put64(pending.destination);
+    put(static_cast<std::uint8_t>(pending.delivery), 1);
+    put(static_cast<std::uint8_t>(pending.priority), 1);
+    put(pending.hop_limit, 1);
+    put(pending.payload_size, 1);
+    put(pending.stored_remaining_ms, 4);
+    put(pending.used ? 1 : 0, 1);
+    bytes(ByteView{pending.payload.data(), pending.payload.size()});
   }
-#undef RL_WRITE
-  if (writer.size() != kImageCrcOffset) {
+  if (offset != kImageCrcOffset) {
     return Status::error(StatusCode::InternalError, "sleep image encode size");
   }
   const std::uint32_t crc =
       crc32_iso_hdlc(ByteView{out.data(), kImageCrcOffset});
-  status = writer.write_u32(crc);
-  if (!status) return status;
-  return writer.size() == kPowerImageRecordSize
+  put(crc, 4);
+  return offset == kPowerImageRecordSize
              ? Status::success()
              : Status::error(StatusCode::InternalError, "sleep image encode size");
 }
@@ -76,17 +81,24 @@ Status decode_image(const ByteView record, PowerImage& image) noexcept {
   }
   const std::uint32_t expected =
       crc32_iso_hdlc(ByteView{record.data, kImageCrcOffset});
-  ByteReader reader(record);
+  std::size_t offset = 0;
+  const auto get = [&](unsigned width) {
+    std::uint32_t value = 0;
+    for (unsigned i = 0; i < width; ++i) value = (value << 8) | record.data[offset++];
+    return value;
+  };
+  const auto get64 = [&]() {
+    const std::uint64_t high = get(4);
+    return (high << 32) | get(4);
+  };
+  const auto bytes = [&](MutableByteView value) {
+    std::memcpy(value.data, record.data + offset, value.size);
+    offset += value.size;
+  };
   std::uint32_t magic = 0;
   std::uint16_t schema = 0;
-  Status status;
-#define RL_READ(expr)             \
-  do {                            \
-    status = (expr);              \
-    if (!status) return status;   \
-  } while (false)
-  RL_READ(reader.read_u32(magic));
-  RL_READ(reader.read_u16(schema));
+  magic = static_cast<std::uint32_t>(get(4));
+  schema = static_cast<std::uint16_t>(get(2));
   if (magic != kImageMagic) {
     return Status::error(StatusCode::IntegrityError, "sleep image magic");
   }
@@ -98,38 +110,35 @@ Status decode_image(const ByteView record, PowerImage& image) noexcept {
     return Status::error(stored == expected ? StatusCode::Unsupported : StatusCode::IntegrityError,
                          "SLEEP_IMAGE_SCHEMA_UNSUPPORTED");
   }
-  RL_READ(reader.read_u32(image.sequence));
-  RL_READ(reader.read_u64(image.network));
-  RL_READ(reader.read_u64(image.node));
-  RL_READ(reader.read_u32(image.config_revision));
-  RL_READ(reader.read_u8(image.channel));
-  std::uint8_t scratch = 0;
-  RL_READ(reader.read_u8(scratch));
+  image.sequence = static_cast<std::uint32_t>(get(4));
+  image.network = get64();
+  image.node = get64();
+  image.config_revision = static_cast<std::uint32_t>(get(4));
+  image.channel = static_cast<std::uint8_t>(get(1));
+  (void)get(1);
   for (auto& peer : image.peers) {
     std::uint8_t used = 0;
-    RL_READ(reader.read_u64(peer.node));
-    RL_READ(reader.read_bytes(
-        MutableByteView{peer.address.data(), peer.address.size()}));
-    RL_READ(reader.read_u8(peer.address_size));
-    RL_READ(reader.read_u16(peer.metric));
-    RL_READ(reader.read_u8(used));
+    peer.node = get64();
+    bytes(MutableByteView{peer.address.data(), peer.address.size()});
+    peer.address_size = static_cast<std::uint8_t>(get(1));
+    peer.metric = static_cast<std::uint16_t>(get(2));
+    used = static_cast<std::uint8_t>(get(1));
     peer.used = used != 0;
   }
   for (auto& pending : image.pending) {
     std::uint8_t delivery = 0;
     std::uint8_t priority = 0;
     std::uint8_t used = 0;
-    RL_READ(reader.read_u32(pending.original_id.session));
-    RL_READ(reader.read_u64(pending.original_id.sequence));
-    RL_READ(reader.read_u64(pending.destination));
-    RL_READ(reader.read_u8(delivery));
-    RL_READ(reader.read_u8(priority));
-    RL_READ(reader.read_u8(pending.hop_limit));
-    RL_READ(reader.read_u8(pending.payload_size));
-    RL_READ(reader.read_u32(pending.stored_remaining_ms));
-    RL_READ(reader.read_u8(used));
-    RL_READ(reader.read_bytes(
-        MutableByteView{pending.payload.data(), pending.payload.size()}));
+    pending.original_id.session = static_cast<std::uint32_t>(get(4));
+    pending.original_id.sequence = get64();
+    pending.destination = get64();
+    delivery = static_cast<std::uint8_t>(get(1));
+    priority = static_cast<std::uint8_t>(get(1));
+    pending.hop_limit = static_cast<std::uint8_t>(get(1));
+    pending.payload_size = static_cast<std::uint8_t>(get(1));
+    pending.stored_remaining_ms = static_cast<std::uint32_t>(get(4));
+    used = static_cast<std::uint8_t>(get(1));
+    bytes(MutableByteView{pending.payload.data(), pending.payload.size()});
     if (delivery > static_cast<std::uint8_t>(DeliveryClass::Applied) ||
         priority > static_cast<std::uint8_t>(Priority::Urgent)) {
       return Status::error(StatusCode::IntegrityError, "sleep image enum range");
@@ -142,9 +151,8 @@ Status decode_image(const ByteView record, PowerImage& image) noexcept {
     }
   }
   std::uint32_t crc = 0;
-  RL_READ(reader.read_u32(crc));
-#undef RL_READ
-  if (reader.remaining() != 0 || crc != expected) {
+  crc = static_cast<std::uint32_t>(get(4));
+  if (offset != kPowerImageRecordSize || crc != expected) {
     return Status::error(StatusCode::IntegrityError, "sleep image crc");
   }
   return Status::success();
@@ -290,7 +298,7 @@ bool PowerCoordinator::ticket_valid(const SleepTicket& ticket) const noexcept {
   return ticket.issued && ticket_.issued && ticket.id == ticket_.id &&
          ticket.radio_generation == radio_generation_ &&
          ticket.config_revision == node_.config_revision() &&
-         ticket.pending_generation == pending_generation();
+         ticket.pending_generation == pending_generation() && image_usable(image_);
 }
 
 void PowerCoordinator::issue_ticket() noexcept {
@@ -313,6 +321,9 @@ Status PowerCoordinator::begin(const ResetCause cause,
              cause == ResetCause::DeepSleepWake ? "WAKE_DEEP_SLEEP" : "BOOT",
              now_ms);
   resume_flow(cause, elapsed, now_ms);
+  if (storage_impaired_) {
+    return Status::error(StatusCode::RecoveryRequired, "SLEEP_IMAGE_READ_REQUIRED");
+  }
   return Status::success();
 }
 
@@ -320,6 +331,9 @@ Status PowerCoordinator::sleep_prepare(const SleepRequest& request,
                                        const MonotonicMs now_ms) noexcept {
   if (in_callback()) {
     return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
+  }
+  if (storage_impaired_) {
+    return Status::error(StatusCode::RecoveryRequired, "SLEEP_IMAGE_READ_REQUIRED");
   }
   if (!begun_ || !node_.started()) {
     return Status::error(StatusCode::InvalidState, "not running");
@@ -384,7 +398,7 @@ bool PowerCoordinator::validate_enter(const SleepTicket& ticket,
   if (ticket.radio_generation != radio_generation_) return false;
   if (ticket.config_revision != node_.config_revision()) return false;
   if (ticket.pending_generation != pending_generation()) return false;
-  if (!image_valid_ || !sleep_image_armed_) return false;
+  if (!image_valid_ || !sleep_image_armed_ || !image_usable(image_)) return false;
   for (const auto plan : carry_plan_) {
     if (plan == CarryPlanKind::Expired) {
       return false;  // un-notified carry plan: settlement did not finish
@@ -520,6 +534,9 @@ Status PowerCoordinator::wake(const ResetCause cause,
   cause_ = cause;
   transition(PowerState::Resuming, "WAKE", now_ms);
   resume_flow(cause, elapsed, now_ms);
+  if (storage_impaired_) {
+    return Status::error(StatusCode::RecoveryRequired, "SLEEP_IMAGE_READ_REQUIRED");
+  }
   return Status::success();
 }
 
@@ -556,7 +573,12 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
     case PowerState::Draining: {
       node_.poll(now_ms);
       if (node_.quiesced() || now_ms >= drain_deadline_ms_) {
-        settle_current_attempt(now_ms);
+        const Status ready = port_.prepare_sleep(now_ms);
+        if (ready) {
+          settle_current_attempt(now_ms);
+        } else if (ready.code != StatusCode::Busy || now_ms >= drain_deadline_ms_) {
+          abort_to_running(ready.detail, ready.code, now_ms);
+        }
       }
       break;
     }
@@ -591,11 +613,28 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
   }
 }
 
+MonotonicMs PowerCoordinator::next_deadline(const MonotonicMs now_ms) const noexcept {
+  if (!begun_) return UINT64_MAX;
+  if (state_ == PowerState::ReadyToSleep) return ticket_valid(ticket_) ? UINT64_MAX : now_ms;
+  if (state_ == PowerState::Sleeping || state_ == PowerState::Persisting) return UINT64_MAX;
+  MonotonicMs due = node_.next_deadline(now_ms);
+  if (state_ == PowerState::Draining) {
+    // The platform park may be waiting for an engine without a deadline.
+    const MonotonicMs retry = now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2;
+    due = std::min(due, std::min(drain_deadline_ms_, retry));
+  } else if (state_ == PowerState::Resuming) {
+    due = std::min(due, resume_deadline_ms_);
+  }
+  return std::max(due, now_ms);
+}
+
 void PowerCoordinator::start_prepare(const SleepRequest& request,
                                      const MonotonicMs start_at) noexcept {
   request_ = request;
   node_.set_draining(true);
-  drain_deadline_ms_ = start_at + config_.drain_timeout_ms;
+  drain_deadline_ms_ = start_at > UINT64_MAX - config_.drain_timeout_ms
+                           ? UINT64_MAX
+                           : start_at + config_.drain_timeout_ms;
   sleep_image_armed_ = false;
   transition(PowerState::Draining, "SLEEP_PREPARE", start_at);
 }
@@ -893,6 +932,9 @@ bool PowerCoordinator::next_image_sequence(std::uint32_t& out) noexcept {
 }
 
 Status PowerCoordinator::commit_image(const PowerImage& image) noexcept {
+  if (storage_impaired_) {
+    return Status::error(StatusCode::RecoveryRequired, "SLEEP_IMAGE_READ_REQUIRED");
+  }
   std::array<std::uint8_t, kPowerImageRecordSize> record{};
   auto status = encode_image(image, record);
   if (!status) {
@@ -900,8 +942,9 @@ Status PowerCoordinator::commit_image(const PowerImage& image) noexcept {
     disk_pending_possible_ = true;
     return status;
   }
-  status = storage_.write(static_cast<std::uint8_t>(image.sequence & 1U),
-                          ByteView{record.data(), record.size()});
+  const std::uint32_t expected_crc = crc32_iso_hdlc(ByteView{record.data(), kImageCrcOffset});
+  const auto slot = static_cast<std::uint8_t>(image.sequence & 1U);
+  status = storage_.write(slot, ByteView{record.data(), record.size()});
   if (!status) {
     // A failed write may still have torn the slot: numbering is consumed so
     // the sequence is never reused, and the slot counts as suspect.
@@ -910,6 +953,15 @@ Status PowerCoordinator::commit_image(const PowerImage& image) noexcept {
     return status;
   }
   image_sequence_ = image.sequence;
+  status = storage_.read(slot, MutableByteView{record.data(), record.size()});
+  std::uint32_t stored_crc = 0;
+  ByteReader crc_reader(ByteView{record.data() + kImageCrcOffset, 4});
+  if (!status || !crc_reader.read_u32(stored_crc) || stored_crc != expected_crc ||
+      crc32_iso_hdlc(ByteView{record.data(), kImageCrcOffset}) != expected_crc) {
+    disk_pending_possible_ = true;
+    storage_impaired_ = true;
+    return status ? Status::error(StatusCode::IntegrityError, "SLEEP_IMAGE_READBACK") : status;
+  }
   image_valid_ = true;
   return Status::success();
 }
@@ -925,6 +977,7 @@ Status PowerCoordinator::load_image(PowerImage& image, bool& found) noexcept {
     const auto status =
         storage_.read(slot, MutableByteView{record.data(), record.size()});
     if (!status) {
+      if (status.code != StatusCode::NotFound) storage_impaired_ = true;
       notify_diagnostic(status.detail);
       continue;
     }
@@ -944,6 +997,10 @@ Status PowerCoordinator::load_image(PowerImage& image, bool& found) noexcept {
       any = true;
     }
   }
+  if (storage_impaired_) {
+    disk_pending_possible_ = true;
+    return Status::error(StatusCode::RecoveryRequired, "SLEEP_IMAGE_READ_REQUIRED");
+  }
   if (unknown_schema) {
     // An older sibling cannot prove that a newer schema has no pending work.
     // Refuse subsequent writes until an explicit migration/discard occurs.
@@ -960,12 +1017,10 @@ Status PowerCoordinator::load_image(PowerImage& image, bool& found) noexcept {
 }
 
 bool PowerCoordinator::image_usable(const PowerImage& image) const noexcept {
-  // Identity binding only. config_revision is persisted in the image for
-  // diagnostics but deliberately not compared here: MeshNode::config_revision
-  // also bumps on runtime peer add/remove, so a freshly-booted node would
-  // never match a stored image and every resume would degrade to cold start.
-  return image.network == node_.config().network &&
-         image.node == node_.config().node;
+  // Node identity is mandatory. The port owns full membership identity;
+  // a legacy port only checks network, since runtime peer changes also
+  // bump the node's diagnostic config_revision across a fresh boot.
+  return image.node == node_.config().node && port_.matches_context(image, node_.config().network);
 }
 
 void PowerCoordinator::resume_flow(const ResetCause cause,
@@ -981,7 +1036,18 @@ void PowerCoordinator::resume_flow(const ResetCause cause,
 
   PowerImage stored{};
   bool found = false;
-  (void)load_image(stored, found);
+  const Status loaded = load_image(stored, found);
+  if (!loaded && storage_impaired_) {
+    // Recovery refuses the image, not the live radio. An in-process wake
+    // must undo quiescence without installing any unread cache or pending.
+    const Status radio = port_.start_radio(nullptr);
+    if (!radio) notify_diagnostic(radio.detail);
+    if (!node_.started()) (void)node_.start(now_ms);
+    (void)node_.set_draining(false);
+    outcome_ = ResumeOutcome::CacheLost;
+    transition(PowerState::Running, "SLEEP_IMAGE_READ_REQUIRED", now_ms);
+    return;
+  }
   const bool usable = found && image_usable(stored);
   if (found && !usable) {
     notify_diagnostic("SLEEP_IMAGE_CONTEXT_MISMATCH");
@@ -1056,7 +1122,9 @@ void PowerCoordinator::resume_flow(const ResetCause cause,
     return;
   }
   confirm_baseline_ = node_.rx_generation();
-  resume_deadline_ms_ = now_ms + config_.resume_confirm_ms;
+  resume_deadline_ms_ = now_ms > UINT64_MAX - config_.resume_confirm_ms
+                            ? UINT64_MAX
+                            : now_ms + config_.resume_confirm_ms;
   // Stay RESUMING: poll() confirms saved peers inside the window or starts
   // bounded discovery on expiry.
 }
@@ -1163,6 +1231,7 @@ void PowerCoordinator::abort_to_running(const char* reason, const StatusCode cod
     radio_quiesced_ = false;
   }
   node_.set_draining(false);
+  port_.abort_sleep(now_ms);
   const PowerState from = state_;
   state_ = PowerState::Running;
   awake_entered_ms_ = now_ms;

@@ -33,8 +33,8 @@ rl_status_code_t to_c(const StatusCode code) noexcept {
 // to_c/from_c rely on numeric parity between the two enums; pin both
 // ends so a reordered or extended StatusCode breaks the build, not the
 // ABI silently.
-static_assert(static_cast<rl_status_code_t>(StatusCode::NetworkRequired) ==
-                  RL_STATUS_NETWORK_REQUIRED,
+static_assert(static_cast<rl_status_code_t>(StatusCode::TooLarge) ==
+                  RL_STATUS_TOO_LARGE,
               "rl_status_code_t must mirror StatusCode order and range");
 
 Status from_c(const rl_status_code_t code, const char* detail) noexcept {
@@ -653,8 +653,10 @@ void rl_poll(rl_context_t* context, const rl_monotonic_ms_t now_ms) {
 
 rl_monotonic_ms_t rl_next_deadline(const rl_context_t* context,
                                    const rl_monotonic_ms_t now_ms) {
-  (void)context;
-  return now_ms + RL_POLL_INTERVAL_MAX_MS;
+  const auto ceiling =
+      now_ms > UINT64_MAX - RL_POLL_INTERVAL_MAX_MS ? UINT64_MAX : now_ms + RL_POLL_INTERVAL_MAX_MS;
+  if (context == nullptr || !context->node.started()) return ceiling;
+  return std::max(now_ms, std::min(ceiling, context->node.next_deadline(now_ms)));
 }
 
 void rl_on_radio_receive(rl_context_t* context, const rl_node_id_t peer,

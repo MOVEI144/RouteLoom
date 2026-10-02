@@ -257,6 +257,11 @@ target_link_libraries(routeloom_sdkv1_authority_transport_tests PRIVATE routeloo
 target_compile_options(routeloom_sdkv1_authority_transport_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_authority_transport_tests COMMAND routeloom_sdkv1_authority_transport_tests)
 
+add_executable(routeloom_authority_assembler_tests test_authority_assembler.cpp)
+target_link_libraries(routeloom_authority_assembler_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_authority_assembler_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_authority_assembler_tests COMMAND routeloom_authority_assembler_tests)
+
 # RLRES1 resume state machine and its attack suite (plan P1-5, V1-F02).
 add_executable(routeloom_rlres1_tests test_rlres1.cpp)
 target_link_libraries(routeloom_rlres1_tests PRIVATE routeloom_core)
@@ -306,8 +311,9 @@ if(ROUTELOOM_RESOURCE_PROFILE STREQUAL "endpoint")
       COMMAND routeloom_espnow_role_mismatch_tests)
 endif()
 
-add_executable(routeloom_espnow_owner_reapply_tests test_espnow_owner_reapply.cpp
+add_executable(routeloom_espnow_owner_reapply_tests test_espnow_owner_reapply.cpp device_sleep_scenarios.cpp
     espnow_idf_stubs/idf_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_power.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp
@@ -563,6 +569,12 @@ add_test(NAME routeloom_sdkv1_join_candidates_tests COMMAND routeloom_sdkv1_join
 # SDK v1 join FSM (plan P3-4 PR 3): the portable Joiner end to end in the
 # two-site simulator (V1-J01, V1-J04-V1-J07, V1-J13, the V1-J12 remainder,
 # the V1-J08 FSM fault matrix, re-entrancy, the #109 path, quiescence).
+add_executable(routeloom_smart_join_tests test_smart_join.cpp)
+target_link_libraries(routeloom_smart_join_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_smart_join_tests PRIVATE ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_smart_join_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_smart_join_tests COMMAND routeloom_smart_join_tests)
+
 add_executable(routeloom_sdkv1_joiner_tests test_sdkv1_joiner.cpp)
 target_link_libraries(routeloom_sdkv1_joiner_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_sdkv1_joiner_tests PRIVATE
@@ -648,6 +660,7 @@ add_test(NAME routeloom_sdkv1_dev_route_tests COMMAND routeloom_sdkv1_dev_route_
 # Multi-node mesh peer (D04, issue #168): one real Owner + runtime + USB
 # node per process, driven by the Rust mesh tests and the board boot checks.
 add_library(routeloom_owner_mesh_boot OBJECT owner_mesh_peer.cpp owner_mesh_c_app.c
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_power.cpp
     espnow_idf_stubs/idf_stubs.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device_c.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device_config.cpp
@@ -896,13 +909,27 @@ add_test(NAME routeloom_edhoc_interop_replay_join COMMAND routeloom_edhoc_intero
 add_test(NAME routeloom_edhoc_interop_replay_member COMMAND routeloom_edhoc_interop_peer --replay
     ${CMAKE_SOURCE_DIR}/protocol/edhoc-interop/method0_member.txt)
 
+if(ROUTELOOM_APP_OBJECT_TRANSFER)
+  add_executable(routeloom_app_object_tests test_app_object.cpp)
+  target_link_libraries(routeloom_app_object_tests PRIVATE routeloom_core)
+  target_compile_options(routeloom_app_object_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  target_compile_definitions(routeloom_app_object_tests PRIVATE
+    ROUTELOOM_OBJECT_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/app-object-golden")
+  add_test(NAME routeloom_app_object_tests COMMAND routeloom_app_object_tests)
+  add_executable(routeloom_app_object_endpoint_tests test_app_object_endpoint.cpp)
+  target_link_libraries(routeloom_app_object_endpoint_tests PRIVATE routeloom_core)
+  target_compile_options(routeloom_app_object_endpoint_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME routeloom_app_object_endpoint_tests COMMAND routeloom_app_object_endpoint_tests)
+endif()
 add_executable(routeloom_periodic_load_tests test_periodic_load.cpp)
 target_link_libraries(routeloom_periodic_load_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_periodic_load_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(routeloom_periodic_load_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_periodic_load_tests COMMAND routeloom_periodic_load_tests)
+set_tests_properties(routeloom_periodic_load_tests PROPERTIES SKIP_RETURN_CODE 77)
 set_tests_properties(routeloom_routing_scale_100_node_tests routeloom_group_100_node_tests
     routeloom_periodic_load_tests PROPERTIES LABELS long)
-
-# K02 exceeds the management airtime envelope; tracked by #59.
-set_tests_properties(routeloom_periodic_load_tests PROPERTIES DISABLED TRUE)
+add_executable(routeloom_deadline_tests test_deadlines.cpp)
+target_link_libraries(routeloom_deadline_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_deadline_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_deadline_tests COMMAND routeloom_deadline_tests)

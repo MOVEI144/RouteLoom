@@ -96,6 +96,20 @@ void MeshNode::emit_busy_or_drop(const NodeId peer, const wire::Header& rejected
 }
 
 Status MeshNode::encode_job(TxJob& job, const MonotonicMs now_ms) noexcept {
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  if (job.owner == JobOwner::AppObject) {
+    const auto& header = job.form == JobForm::Plain ? job.plain.header : job.forwarded.header;
+    std::uint32_t epoch = 0;
+    // Object jobs belong to the boot and End context admitted at enqueue;
+    // session repair must not seal an old operation under a new context.
+    if (header.network != config_.network || header.origin != config_.node ||
+        header.message.session != config_.message_session ||
+        !security_.tx_epoch(SecurityScope::EndToEnd, header.destination, epoch) ||
+        epoch != header.end_epoch) {
+      return Status::error(StatusCode::Expired, "OBJECT_CONTEXT_RETIRED");
+    }
+  }
+#endif
   // tx_encoded_ still holds this job's sealed frame (the driver refused it
   // and nothing else was sealed since): hand the same bytes over again.
   if (job.encoded_tag != 0 && job.encoded_tag == tx_encoded_tag_) return Status::success();
@@ -439,6 +453,23 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       retry_or_fail(submitted, status.detail, now_ms);
       continue;
     }
+    const auto& submitted_header = submitted.form == JobForm::Plain ? submitted.plain.header : submitted.forwarded.header;
+    if (submitted_header.type == FrameType::AppObjectStart ||
+        submitted_header.type == FrameType::AppObjectChunk || submitted_header.type == FrameType::AppObjectAck) {
+      // 50,000 us/s with one frame of burst. Charge each physical attempt
+      // using encoded length and fixed PHY cost, independently of service time.
+      const auto cost_us = (tx_encoded_.size + kTxFrameFixedCostBytes) * 32;
+      object_send_after_ms_ = now_ms + (cost_us + 49) / 50;
+    } else if ((submitted_header.type == FrameType::Data ||
+                submitted_header.type == FrameType::Service ||
+                submitted_header.type == FrameType::EndReceipt ||
+                submitted_header.type == FrameType::AppResult) &&
+               (submitted_header.traffic & wire::kTrafficPriorityMask) != wire::kTrafficBulk) {
+      // Leave the following airtime turn for the foreground exchange's
+      // forwarded data and receipt, which may not be queued here yet.
+      const auto cost_us = (tx_encoded_.size + kTxFrameFixedCostBytes) * 32;
+      object_send_after_ms_ = std::max(object_send_after_ms_, now_ms + (cost_us + 49) / 50);
+    }
     ++submitted.physical_attempts;
     obs_tx_submitted(submitted, token, now_ms);
     physical_.job = std::move(submitted);
@@ -475,7 +506,7 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
 Status MeshNode::on_radio_tx_result(const std::uint64_t token, const bool success,
                                     const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   ++work_generation_;
   if (!physical_.active || physical_.token != token) {
@@ -578,30 +609,16 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
     group_job_done(job, true, now_ms);
     return;
   }
-  if (job.owner == JobOwner::GatewayService) {
-    // The Service endpoint owns completion: the first authenticated
-    // HOP_ACCEPT resolves the exchange; the component tracks the rest.
-    // Deferred for the Owner's outside drive — never synchronously
-    // mid-call. The slot was held at send time, so this cannot be lost.
+  if (job.owner == JobOwner::GatewayService || job.owner == JobOwner::Config ||
+      job.owner == JobOwner::AppObject) {
+    // Completion stays deferred for the Owner's outside drive.
     if (component_jobs_outstanding_ > 0) --component_jobs_outstanding_;
-    if (gateway_sink_ != nullptr) {
+    const bool service = job.owner == JobOwner::GatewayService;
+    if (service ? gateway_sink_ != nullptr : config_sink_ != nullptr) {
       if (component_event_available()) {
-        publish_component_event(ComponentEventTarget::ServiceJobDone, job.peer,
-                                kInvalidTxnHandle, job.deadline_ms, nullptr,
-                                &job.ack.key.id, true, "HOP_ACCEPTED");
-      } else {
-        observer_.on_diagnostic("COMPONENT_EVENT_LOST", job.peer,
-                                &job.ack.key.id);
-      }
-    }
-    return;
-  }
-  if (job.owner == JobOwner::Config) {
-    if (component_jobs_outstanding_ > 0) --component_jobs_outstanding_;
-    if (config_sink_ != nullptr) {
-      if (component_event_available()) {
-        publish_component_event(ComponentEventTarget::ConfigJobDone, job.peer,
-                                kInvalidTxnHandle, job.deadline_ms, nullptr,
+        publish_component_event(service ? ComponentEventTarget::ServiceJobDone
+                                        : ComponentEventTarget::ConfigJobDone,
+                                job.peer, kInvalidTxnHandle, job.deadline_ms, nullptr,
                                 &job.ack.key.id, true, "HOP_ACCEPTED");
       } else {
         observer_.on_diagnostic("COMPONENT_EVENT_LOST", job.peer,
@@ -661,27 +678,15 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
     group_job_done(job, false, now_ms);
     return;
   }
-  if (job.owner == JobOwner::GatewayService) {
-    // Deferred completion, same held slot as the success path.
+  if (job.owner == JobOwner::GatewayService || job.owner == JobOwner::Config ||
+      job.owner == JobOwner::AppObject) {
     if (component_jobs_outstanding_ > 0) --component_jobs_outstanding_;
-    if (gateway_sink_ != nullptr) {
+    const bool service = job.owner == JobOwner::GatewayService;
+    if (service ? gateway_sink_ != nullptr : config_sink_ != nullptr) {
       if (component_event_available()) {
-        publish_component_event(ComponentEventTarget::ServiceJobDone, job.peer,
-                                kInvalidTxnHandle, job.deadline_ms, nullptr,
-                                &job.ack.key.id, false, reason);
-      } else {
-        observer_.on_diagnostic("COMPONENT_EVENT_LOST", job.peer,
-                                &job.ack.key.id);
-      }
-    }
-    return;
-  }
-  if (job.owner == JobOwner::Config) {
-    if (component_jobs_outstanding_ > 0) --component_jobs_outstanding_;
-    if (config_sink_ != nullptr) {
-      if (component_event_available()) {
-        publish_component_event(ComponentEventTarget::ConfigJobDone, job.peer,
-                                kInvalidTxnHandle, job.deadline_ms, nullptr,
+        publish_component_event(service ? ComponentEventTarget::ServiceJobDone
+                                        : ComponentEventTarget::ConfigJobDone,
+                                job.peer, kInvalidTxnHandle, job.deadline_ms, nullptr,
                                 &job.ack.key.id, false, reason);
       } else {
         observer_.on_diagnostic("COMPONENT_EVENT_LOST", job.peer,
@@ -719,7 +724,13 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
       now_ms < delivery->expires_at_ms &&
       static_cast<std::uint8_t>(delivery->round + 1U) < config_.max_end_to_end_rounds) {
     ++delivery->round;
-    delivery->next_round_at_ms = now_ms + 50;
+    // Keep the last bounded round for recovery after receiver admission pressure.
+    // Earlier hop/round retries stay fast; neither attempts nor lifetime increase.
+    delivery->next_round_at_ms = std::min(delivery->expires_at_ms, now_ms + 50);
+    if (delivery->round + 1U == config_.max_end_to_end_rounds &&
+        delivery->expires_at_ms - delivery->next_round_at_ms > 5000) {
+      delivery->next_round_at_ms = delivery->expires_at_ms - 5000;
+    }
     set_delivery_state(*delivery, DeliveryState::WaitingForRoute, reason);
     return;
   }

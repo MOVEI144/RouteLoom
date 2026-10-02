@@ -6,6 +6,8 @@ pub const SDK_VERSION: &str = "2.0.0-dev";
 pub const CORE_C_ABI: u32 = 3;
 /// Device C API.
 pub const DEVICE_C_API: u32 = 1;
+/// AppObject payload.
+pub const APP_OBJECT_SCHEMA: u32 = 1;
 /// Mesh wire major.
 pub const WIRE_MAJOR: u32 = 2;
 /// Mesh wire minor.
@@ -13,7 +15,7 @@ pub const WIRE_MINOR: u32 = 0;
 /// RLD1 carrier.
 pub const RLD1_VERSION: u32 = 1;
 /// RLD1 ZeroTouch body.
-pub const RLD1_ZT_BODY: u32 = 3;
+pub const RLD1_ZT_BODY: u32 = 4;
 /// HostLink (RLU1) protocol.
 pub const HOSTLINK_PROTOCOL: u32 = 2;
 /// HostOps schema.
@@ -26,6 +28,10 @@ pub const AUTHORITY_ENVELOPE: u32 = 1;
 pub const API1_ENVELOPE: u32 = 1;
 /// API1 caps_version.
 pub const API1_CAPS: u32 = 2;
+/// Proxy policy record.
+pub const STORE_PROXY_POLICY_FORMAT: u32 = 2;
+/// Device join policy record.
+pub const STORE_JOIN_POLICY_FORMAT: u32 = 2;
 /// Authority ledger format.
 pub const STORE_AUTHORITY_LEDGER_FORMAT: u32 = 1;
 /// Authority ledger (device).
@@ -74,6 +80,7 @@ pub const STORE_HOST_OPS: u32 = 4;
 pub const STORE_SITE: u32 = 3;
 
 pub const REASON_NONE: u16 = 0;
+pub const REASON_TOO_LARGE: u16 = 1;
 pub const REASON_QUEUED: u16 = 256;
 pub const REASON_TX_ACCEPTED: u16 = 257;
 pub const REASON_TX_MAC_PENDING: u16 = 258;
@@ -206,6 +213,7 @@ pub const REASON_RESULT_EXPIRED: u16 = 1081;
 /// (id, API1 string) for every reason code; the string is `api1` when set, else the name.
 pub const REASON_API1: &[(u16, &str)] = &[
     (0, "NONE"),
+    (1, "TOO_LARGE"),
     (256, "QUEUED"),
     (257, "TX_ACCEPTED"),
     (258, "TX_MAC_PENDING"),

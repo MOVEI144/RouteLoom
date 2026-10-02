@@ -48,6 +48,21 @@ def elf32(symbols):
 
 
 class CellList(unittest.TestCase):
+    def test_distribution_defaults_and_quick_start_modes(self):
+        dev = "CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"
+        member = "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"
+        for app in ("bridge_node", "reference_node"):
+            self.assertIn(member, (ROOT / "firmware" / app / "sdkconfig.defaults").read_text())
+        for cell in check.load_cells()["cells"]:
+            settings = cell["overlay"] + cell.get("expect", [])
+            if cell["app"] in ("bridge_node", "reference_node") and not cell["overlay"]:
+                self.assertIn(member, settings, cell["id"])
+            if "devram" in cell["id"] or "app_object" in cell["id"] or cell["app"] in (
+                    "endpoint_cpp", "endpoint_c", "standalone_gateway", "idf_consumer"):
+                self.assertIn(dev, settings, cell["id"])
+                if cell["app"] in ("bridge_node", "reference_node"):
+                    self.assertIn(dev, cell["overlay"], cell["id"])
+
     def test_check_parallelism_is_bounded(self):
         build = check.core()[1]
         self.assertLessEqual(int(build.argv[-1]), 8)
@@ -65,8 +80,9 @@ class CellList(unittest.TestCase):
         data = check.load_cells()
         cells = data["cells"]
         # Every app/target and feature branch, including C6 external antenna selection.
-        self.assertEqual(len(cells), 55)
+        self.assertEqual(len(cells), 65)
         self.assertTrue({
+            "bridge_node-esp32c5-normal-off-app_object-small",
             "bridge_node-esp32c3-normal-off-maintenance_member",
             "reference_node-esp32c6-normal-off-maintenance_member",
             "bridge_node-esp32c6-normal-off-maintenance_member",
@@ -137,7 +153,7 @@ class CellList(unittest.TestCase):
     def test_workflow_runs_every_ci_stage(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         for stage in ("core --sanitizers", "docs", "golden", "rust",
-                      "profiles --build", "profile-mesh", "fuzz"):
+                      "profiles --build", "profile-mesh", "object-mesh", "fuzz"):
             self.assertIn(f"python3 tools/check.py {stage}", workflow)
 
     def test_ci_requires_e2e_report_artifact(self):
@@ -147,7 +163,7 @@ class CellList(unittest.TestCase):
     def test_ci_dry_run_lists_every_stage_and_cell(self):
         code, out, _ = run_main(["ci", "--dry-run"])
         self.assertEqual(code, 0)
-        for stage in ("docs", "core", "golden", "rust", "interop", "profiles", "profile-mesh",
+        for stage in ("docs", "core", "golden", "rust", "interop", "profiles", "profile-mesh", "object-mesh",
                       "fuzz", "firmware"):
             self.assertIn(f"=== {stage}\n", out)
         for cell in check.load_cells()["cells"]:
@@ -382,6 +398,24 @@ class Budget(unittest.TestCase):
         self.cells.write_text(json.dumps(data))
         self.assertEqual(self.size("a")[0], 0)
 
+    def test_member_image_refuses_development_providers(self):
+        data = json.loads(self.cells.read_text())
+        member = "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"
+        data["cells"][0]["expect"] = [member]
+        self.cells.write_text(json.dumps(data))
+        self.assertEqual(self.size("a")[0], 0)
+        for provider in ("DevGroupProvider", "DevGroupSender", "DevScopeProvider",
+                         "DevMembershipHooks", "DevelopmentPskSecurityProvider",
+                         "DevPskAuthenticator", "DevConfigAuthorityVerifier"):
+            with self.subTest(provider=provider):
+                self.build("a", 1000, 500, 40, symbols=("app_main", provider))
+                code, _, err = self.size("a")
+                self.assertEqual(code, 1)
+                self.assertIn(provider, err)
+        data["cells"][0]["expect"] = ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"]
+        self.cells.write_text(json.dumps(data))
+        self.assertEqual(self.size("a")[0], 0)
+
     def test_member_image_refuses_configured_development_key(self):
         key_hex = bytes(range(32)).hex()
         setting = f'CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX="{key_hex}"'
@@ -433,6 +467,36 @@ class Scenarios(unittest.TestCase):
         code, _, err = run_main(["scenarios"])
         self.assertEqual((code, err), (0, ""))
 
+    def test_repeated_bursts_use_gateway_dedup_without_changing_other_peers(self):
+        case = "site::owner_mesh::load::mesh_m08_repeated_bursts_account_for_every_send"
+        for tier in ("pr", "nightly"):
+            with self.subTest(tier=tier):
+                steps = check.e2e(tier, "mesh", "build-e2e", None)
+                load = next(step for step in steps if case in (step.require or ()))
+                self.assertEqual(load.require, [case])
+                self.assertEqual(load.env["ROUTELOOM_MESH_PEER_GW"],
+                                 str(ROOT / "build-e2e-gateway/tests/cpp/routeloom_owner_mesh_peer"))
+                self.assertEqual(load.env["ROUTELOOM_MESH_PEER"],
+                                 str(ROOT / "build-e2e/tests/cpp/routeloom_owner_mesh_peer"))
+                self.assertTrue(any("-DROUTELOOM_DEDUP_PROFILE=gateway" in step.argv
+                                    for step in steps))
+                other = next(step for step in steps if step.require and step is not load)
+                self.assertNotIn("ROUTELOOM_MESH_PEER_GW", other.env)
+
+    def test_object_rows_are_live_and_use_feature_peers(self):
+        for row_id in ("M10", "P04-O"):
+            self.assertEqual(self.rows(row_id)[0]["status"], "live")
+        steps = check.e2e("pr", "mesh", "build-e2e", None)
+        case = "site::owner_mesh::object::mesh_m10_three_hop_with_control"
+        obj = next(step for step in steps if case in (step.require or ()))
+        self.assertIn("--include-ignored", obj.argv)
+        self.assertIn("build-e2e-object", obj.env["ROUTELOOM_MESH_PEER"])
+        self.assertEqual(obj.env["ROUTELOOM_MESH_PEER_B"],
+                         str(ROOT / "build-e2e/tests/cpp/routeloom_owner_mesh_peer"))
+        off = next(step for step in steps if
+                   "site::owner_mesh::object::mesh_p04_object_off_terminal" in (step.require or ()))
+        self.assertEqual(off.env["ROUTELOOM_MESH_PEER_GW"], obj.env["ROUTELOOM_MESH_PEER_B"])
+
     def test_duplicate_id_and_missing_test_fail(self):
         row = dict(self.rows("M01")[0])
         self.data["rows"].append(row)
@@ -469,6 +533,7 @@ class Scenarios(unittest.TestCase):
                       check.scenario_errors(self.data))
 
     def test_planned_and_hil_rows(self):
+        self.rows("M10")[0]["status"] = "planned"
         self.rows("M10")[0]["test"] = self.rows("M01")[0]["test"]
         self.rows("M05")[0]["hil"]["run"] = ["tools/hil/no_such_script.py"]
         self.rows("M03")[0]["hil"] = {"rounds": ["H0"], "run": "manual"}
@@ -504,14 +569,12 @@ class Scenarios(unittest.TestCase):
         self.assertTrue(any("mesh_j08_k1b_pull_answers_dropped" in c for c in cases[2]))
         all_cases = set.union(*cases)
         self.assertIn("site::owner_mesh::consumer::mesh_k01_display_direct_smoke", all_cases)
-        for row_id in ("K01", "K01-D", "K03"):
-            for case in check.rust_cases(self.rows(row_id)[0]["test"]):
-                self.assertNotIn(case, all_cases)
-        for row_id in ("M01-T3", "M05-C", "J03-C", "F08-C", "K04-C"):
+        for row_id in ("K01", "K01-D", "K03", "M08", "M01-T3", "M05-C", "J03-C", "F08-C", "K04-C"):
             for case in check.rust_cases(self.rows(row_id)[0]["test"]):
                 self.assertIn(case, all_cases)
         self.assertIn("site::owner_mesh::kg::mesh_k05_cursor_replay_gap_and_epoch_change",
                       all_cases)
+        self.assertIn("site::owner_mesh::mesh::mesh_line_three_hops_delivers", all_cases)
 
     def test_interop_requires_every_live_pr_case(self):
         steps = [s for s in check.interop() if s.require is not None]

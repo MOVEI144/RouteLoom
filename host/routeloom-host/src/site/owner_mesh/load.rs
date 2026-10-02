@@ -4,19 +4,72 @@ use super::mesh::route_loss_world;
 use super::*;
 
 #[test]
-#[ignore = "#54/#46: accepted concurrent Reliable sends are lost in a three-node world"]
 fn mesh_m08_repeated_bursts_account_for_every_send() {
-    let Some(mut world) = route_loss_world("m08", Switch::direct(), false) else {
+    {
+        let Some(mut boundary) = route_loss_world("m08-boundary", Switch::direct(), false) else {
+            return;
+        };
+        for count in [7, 8, 9] {
+            let results = boundary.peers[1].tracked_burst(count, testkit::GATEWAY);
+            assert_eq!(
+                results.iter().filter(|r| r.0 == 0).count(),
+                usize::from(count.min(8))
+            );
+            assert!(
+                results.iter().all(|r| r.0 == 0 || r.0 == 21),
+                "full admission is Busy"
+            );
+            boundary.pump_until(400, |_| false);
+            assert_eq!(
+                boundary.peers[0].receipts().len(),
+                usize::from(count.min(8))
+            );
+        }
+    }
+    let nodes = if max_nodes() == 32 { 5 } else { 3 };
+    let mut switch = Switch::new(&Topology::full(nodes));
+    // Pin each initial binding to the gateway before exposing other peers.
+    // Full audibility alone does not require discovery to bind every pair.
+    for from in 1..nodes {
+        for to in 1..nodes {
+            switch.set_audible(from, to, false);
+        }
+    }
+    let Some(mut world) = route_loss_world("m08", switch, false) else {
         return;
     };
+    for peer in 1..nodes {
+        world.switch.heal(peer);
+    }
+    // Start the load after the full topology and its improvement hold settle.
+    world.pump_until(2400, |snaps| {
+        snaps.iter().enumerate().all(|(index, snap)| {
+            snap.phases
+                .iter()
+                .enumerate()
+                .all(|(peer, &phase)| peer == index || phase == PHASE_REACHABLE)
+        })
+    });
+    world.pump_until(600, |_| false);
     world.peers[0].receipts();
+    let routes: Vec<_> = world
+        .peers
+        .iter_mut()
+        .skip(1)
+        .map(|peer| peer.next_hop(testkit::GATEWAY))
+        .collect();
+    assert!(
+        routes.iter().all(|&hop| hop == testkit::GATEWAY),
+        "full mesh direct gateway routes settled"
+    );
     let mut expected = std::collections::BTreeMap::new();
     let mut received = std::collections::BTreeSet::new();
     let mut terminal = std::collections::BTreeMap::new();
     let mut refused = 0;
-    for round in 0..33 {
+    for round in 0..32 {
+        let round_end = world.now + 10_000;
         if round < 30 {
-            for source in 1..3 {
+            for source in 1..nodes {
                 let results = world.peers[source].tracked_burst(16, testkit::GATEWAY);
                 for (index, (status, session, seq)) in results.into_iter().enumerate() {
                     if status == 0 {
@@ -34,7 +87,26 @@ fn mesh_m08_repeated_bursts_account_for_every_send() {
             }
         }
         // Keep the 10 s burst cadence and allow every send its 30 s lifetime.
-        world.pump_until(400, |_| false);
+        let mut draining = true;
+        while world.now < round_end {
+            // Stub callbacks have no transport latency. Drive accepted work
+            // before a coarse idle tick can manufacture a hop timeout.
+            world.step((if draining { 1 } else { 25 }).min(round_end - world.now));
+            draining = world
+                .snaps
+                .iter()
+                .any(|s| s.queued != 0 || s.app_tx.iter().any(|tx| tx.state < DELIVERY_DELIVERED));
+            for (peer, &hop) in world.peers.iter_mut().skip(1).zip(&routes) {
+                assert_eq!(peer.next_hop(testkit::GATEWAY), hop, "no route flap");
+            }
+            assert!(
+                world
+                    .snaps
+                    .iter()
+                    .all(|s| s.mode == MODE_MEMBER && s.phase == PHASE_ACTIVE),
+                "membership stayed active under load"
+            );
+        }
         for (source, session, seq, payload) in world.peers[0].receipts() {
             let key = (source, session, seq);
             assert_eq!(
@@ -62,17 +134,22 @@ fn mesh_m08_repeated_bursts_account_for_every_send() {
         received.len(),
         terminal.len()
     );
-    assert_eq!(expected.len() + refused, 30 * 2 * 16);
+    assert_eq!(expected.len() + refused, 30 * (nodes - 1) * 16);
     assert!(refused > 0, "admission bound reached");
+    for snapshot in &world.snaps {
+        assert_eq!(snapshot.queued, 0, "queue drained within 30 s");
+    }
     assert_eq!(
         terminal.len(),
         expected.len(),
         "every accepted send terminates"
     );
-    assert_eq!(
-        received.len(),
-        delivered,
-        "receives match sender end receipts"
+    assert!(
+        terminal
+            .iter()
+            .filter(|(_, state)| **state == DELIVERY_DELIVERED)
+            .all(|(key, _)| received.contains(key)),
+        "every Delivered has one verified receive"
     );
     assert!(
         delivered * 100 >= expected.len() * 99,

@@ -56,9 +56,12 @@ bool edhoc_connection_id_compact(const struct connection_id *connection_id,
 		return false;
 	}
 
-	/* RFC 9528: 3.3.2 - the identifier travels as an integer exactly when
-	 * its whole byte string is one complete CBOR integer, which is what
-	 * decoding it as such answers. */
+	/* RFC 9528: 3.3.2 - only a one-byte identifier may travel as an
+	 * integer. A longer string remains a bstr even if it parses as one
+	 * complete CBOR integer. */
+	if (connection_id->length != 1) {
+		return false;
+	}
 	size_t decoded_length = 0;
 	const int ret = cbor_decode_integer_type_int_type(connection_id->value,
 							  connection_id->length,

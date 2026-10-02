@@ -112,7 +112,7 @@ ADMIN。次SiteCertは設定済みSite CAの署名を検証し、issuer／site�
 | method | 権限 | params → result |
 |---|---|---|
 | `site.status` | READ | なし → site_id、network、site_epoch、SAK fingerprint（kid）、rs_epoch、gk_epoch／gk_staged、GK要約`gk{phase,cause,targets,staged_ack,active_ack,unknown}`、authority状態`authority{attached,channels}`（Host結線のPR4までfalse/0）、`member_cap:128`、member・removed・unconfirmed数、`archived_total`（archive累計）、discovered・join_requests数、live exchange数、channel、gateways、ledger_seq、policy、counters（`rejected_unverified{reason}`・`gk_rejected{reason}`等）、`usb{configured,attached,join_relay:"not_wired"}` |
-| `join.policy.get` / `.set` | ADMIN | `zero_touch_open`、`decision_mode`（`kguard`/`closed`/`lab_inventory`）、`decision_timeout_ms`（500〜5000）、`pending_retry_after_s`（30〜3600）。setは部分更新。内容が変わるsetは`policy_generation`を+1（同内容の再送は据え置き）。get/set応答は`policy_generation`と`radio_distributed_generation`（ACKしたproxyの最小の世代、未ACKならnull）、`radio_distribution {proxies, applied, pending, unknown}`も返す。配布はauthority envelope型9のProxyPolicySet（v2.0、#176） |
+| `join.policy.get` / `.set` | ADMIN | `zero_touch_open`、`decision_mode`（`kguard`/`closed`/`lab_inventory`）、`decision_timeout_ms`（500〜5000）、`pending_retry_after_s`（30〜3600）。setは部分更新。内容が変わるsetは`policy_generation`を+1（同内容の再送は据え置き）。get/set応答は`policy_generation`と`radio_distributed_generation`（ACKしたproxyの最小の世代、未ACKならnull）、`radio_distribution {proxies, applied, pending, unknown}`も返す。配布はauthority envelope型9のProxyPolicySet（v2.0、#176）。`expected_devices`（最大3個のprivate mark）と`expected_ttl_s`（1〜86400）による[smart join](../v2/smart-join.md)の予定一覧を同じ世代で配る |
 | `join.requests.list` | READ | 開いている参加要求（≤256）：`state`＝`awaiting`／`decided`、`remaining_ms` |
 | `join.decide` | DECIDE | `join_request_id`、`device_id`、`verdict`＋その引数だけ（allow→`role`、pending→`retry_after_s`、deny→`reason`）、`idempotency_key` |
 | `devices.discovered.list` | READ | `after?`、`limit?`（1〜128）→ `devices[]`、`next_after`、`total`、`max:1024` |
@@ -332,7 +332,7 @@ esptool.py write_flash 0x20000 rlsec.bin                                       #
 | V1-H05 | revokeの段階（committed→distributing→converged）とunknownの計数（**P5 PR3でGK半分が配布・収束**：RRS1側もP6-1 PR Aでsnapshot配布・Applied ACK・unknown計数を実装済み（fake transport）。GK側は`gk_rotation`の段階とunknown計数で追える） |
 | V1-H06 | ACL：read権限では`join.decide`不可（**P3-3でhost試験済み**：`MEMBERSHIP_READ`だけのprincipalは一覧可・revoke不可、grant無しは`site.status`も不可） |
 | V1-H07 | host crash（commit後・送信前）→機器の再試行で冪等再発行（**P3-3でhost試験済み**：SQLite storeを開き直し、同じMemberCert byte列を再発行） |
-| V1-H08 | USB 0x40〜0x46 codecのC++/Rust共通vector、capability無しでUnsupported |
+| V1-H08 | USB join relay 0x60〜0x63／authority 0x64〜0x67 codecのC++/Rust共通vector、capability無しでUnsupported |
 | V1-H09 | routeloom-provision：RLI1・DevCertのgolden一致、所持証明の無い公開鍵には発行しない（**P7-1でhost試験済み**：`tests/sdkv1_office.rs`が発行したDevCert・注入鍵RLI1を共通vectorとbyte一致で確認し、PoPの不一致・改ざん・再送を拒否。**P7の残りでhost試験済み**：PoPのC++/Rust共通vectorとbyte一致、保守verbの鍵生成・PoP・bundle密封・readback（共通vectorの本物bundle）、SiteCert発行のgolden一致と`inventory.json`。HILは未実施） |
 | V1-H10 | 現場用firmwareへの切替と出荷検査（§6手順6-7）：app領域だけの再書込みで`rlsec` identityを保持し、`routeloom field boot: fw=`と`sdkv1 identity: node=`で照合、検査用現場でjoin→Memberを確認。console buildのままは不合格。**host試験済み**：`status`の`fw=`報告・`unknown`時fail-closed・`provision-expect --fw`照合（`routeloom_sdkv1_maintenance_tests`、`routeloomctl`）。実機の切替・joinはHIL未実施 |
 | V1-H11 | `membership.archive`：撤去済み行だけを1 transactionで忘却し、`revoke`履歴を残してNodeId再利用を禁止し続ける（**host試験済み**：容量回収・現役混じりCONFLICT・idempotency・再起動耐久、socket経由の入力検証・ADMIN認可） |

@@ -57,8 +57,9 @@ def acceptance_test_sources(root: Path):
         if path.is_file() and path.suffix in {".cpp", ".py"}:
             # Checker mutation tests mention IDs as decoys; they are not
             # evidence for the protocol acceptance cases themselves.
-            if path.suffix == ".py" and "from check_review_contracts import" in path.read_text(
-                encoding="utf-8"
+            if path.suffix == ".py" and re.search(
+                r"^(?:from|import) (?:check|check_review_contracts)\b",
+                path.read_text(encoding="utf-8"), re.M
             ):
                 continue
             yield path
@@ -679,10 +680,10 @@ def validate(root: Path) -> dict:
         ids = semantic["frame_numeric_ids"]
         test(
             "zero_touch_join_contract",
-            f"kZtDiscoverBodySize = {zt['rld1_body_v3']['discover_body_bytes']};" in zt_hpp
-            and f"kZtOfferBodySize = {zt['rld1_body_v3']['offer_body_bytes']};" in zt_hpp
-            and f"kZtBodyVersion = {zt['rld1_body_v3']['body_version']};" in zt_hpp
-            and f"kZtClass = {zt['rld1_body_v3']['scope_class']};" in zt_hpp
+            f"kZtDiscoverBodySize = {zt['rld1_body_v4']['discover_body_bytes']};" in zt_hpp
+            and f"kZtOfferBodySize = {zt['rld1_body_v4']['offer_body_bytes']};" in zt_hpp
+            and f"kZtBodyVersion = {zt['rld1_body_v4']['body_version']};" in zt_hpp
+            and f"kZtClass = {zt['rld1_body_v4']['scope_class']};" in zt_hpp
             and f"kJoinMessageMax = {zt['join_message_max_bytes']};" in zt_hpp
             and f"kRelayHeaderSize = {zt2['relay_header_bytes']};" in zt_hpp
             and f"RELAY_HEADER_SIZE: usize = {zt2['relay_header_bytes']};" in jr_rs

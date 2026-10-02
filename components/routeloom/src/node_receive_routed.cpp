@@ -81,8 +81,24 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
     if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
       observer_.on_verified_contact(frame.header.origin, now_ms);
     }
-    if (wire::is_extension_type(type)) {
-      // No extension type is implemented in this build: an authenticated
+    if (wire::is_extension_type(type) &&
+        (config_sink_ == nullptr || !config_sink_->accepts_extension(type))) {
+      if (type == FrameType::AppObjectStart && plain.payload_size == 31 && plain.payload[0] == 1) {
+        // The OFF endpoint only reads the version and id. No assembler,
+        // sender pump or payload codec is retained; relays remain opaque.
+        ByteReader reader({plain.payload.data() + 1, 4}); std::uint32_t object_id = 0;
+        (void)reader.read_u32(object_id);
+        if (object_id != 0) {
+          std::array<std::uint8_t, 15> bytes{}; ByteWriter writer({bytes.data(), bytes.size()});
+          (void)writer.write_u8(1); (void)writer.write_u32(object_id);
+          (void)writer.write_u8(7); (void)writer.write_u8(0); (void)writer.write_u64(0);
+          const MessageId id{config_.message_session, next_message_sequence_++};
+          (void)queue_typed_job(FrameType::AppObjectAck, JobOwner::None, id, plain.header.origin,
+                                {bytes.data(), writer.size()}, 0, 4000, Priority::Bulk, now_ms);
+          return;
+        }
+      }
+      // This extension has no endpoint in this build: an authenticated
       // refusal with a reason, before any acceptance (no HOP_ACCEPT, no
       // dedup record), so the origin fails fast instead of timing out.
       emit_transit_refusal(frame, TransitFailureReason::Unsupported, rx, now_ms);

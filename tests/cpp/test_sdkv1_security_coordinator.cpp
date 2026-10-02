@@ -98,6 +98,34 @@ struct SecurityCoordinatorTestAccess {
   static Status pump_link_chunks(SecurityCoordinator& coordinator, MonotonicMs now) noexcept {
     return coordinator.pump_link_tx(now);
   }
+  static Status send_overlapping_link(SecurityCoordinator& coordinator, bool quiet_first,
+                                      bool retry, MonotonicMs now) noexcept {
+    auto& demux = coordinator.member().demux;
+    demux = {};
+    auto& quiet = demux[quiet_first ? 0 : 1];
+    quiet.used = true;
+    quiet.peer = 9;
+    quiet.mac = MacAddress{{2, 0, 0, 0, 0, 9}};
+    quiet.object_id = 0x11000000;
+    quiet.txn[0] = 0x11;
+    quiet.quiet_retry_token = 77;
+    auto& fresh = demux[quiet_first ? 1 : 0];
+    fresh.used = true;
+    fresh.has_start = true;
+    fresh.peer = quiet.peer;
+    fresh.mac = quiet.mac;
+    fresh.object_id = 0x22000000;
+    fresh.txn[0] = 0x22;
+    HandshakeResult send{};
+    send.event = HandshakeEvent::Send;
+    send.scope = SecurityScope::Link;
+    send.peer = quiet.peer;
+    send.token = retry ? 77 : 78;
+    send.phase = 4;
+    send.step = retry ? 4 : 2;
+    send.message_size = 1;
+    return coordinator.emit_link_send(send, now);
+  }
   static JoinObjectSlot::ReplyOutcome acknowledge_link_prefix(
       SecurityCoordinator& coordinator, std::uint16_t received, MonotonicMs now) noexcept {
     JoinReply reply{};
@@ -564,6 +592,38 @@ void test_boot_silent_adoption() {
   CHECK(coordinator.session_provider().tx_epoch(SecurityScope::Link, kNode + 1, epoch).code ==
         StatusCode::AuthRequired);
   CHECK(coordinator.snapshot().demands == 1);
+}
+
+void test_smart_boot_at_clock_origin() {
+  current = "smart_boot_at_clock_origin";
+  for (const std::uint32_t listen : {0U, 1000U}) {
+    Fixture f{};
+    CHECK(f.init_stores());
+    auto identity = identity_record();
+    identity.node_id = kNode + 1;
+    identity.devcert = issue(devcert_claims(identity.node_id), device_ca());
+    auto site = site_record();
+    site.member_cert = issue(membercert_claims(site.assignment_generation, site.network,
+                                              identity.node_id), sak());
+    CHECK(f.identity.commit(identity).ok());
+    CHECK(f.site.commit(site).ok());
+    auto deps = f.deps();
+    deps.local_node = identity.node_id;
+    deps.joiner_config.node = identity.node_id;
+    deps.joiner_config.smart_join = true;
+    deps.joiner_config.listen_ms = listen;
+    SecurityCoordinator coordinator(deps);
+    CHECK(coordinator.step(boot_event(0, kBoot)).ok());
+    for (int i = 0; i < 50 && coordinator.snapshot().mode != CoordinatorMode::Member; ++i) {
+      CHECK(coordinator.step(poll_at(0)).ok());
+      CoordinatorAction action{};
+      while (coordinator.take_action(action).ok()) {}
+    }
+    CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+    CHECK(complete_member_apply(coordinator, 0, f.site.site().channel));
+    CHECK(coordinator.step(poll_at(static_cast<MonotonicMs>(listen) + 1)).ok());
+    CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  }
 }
 
 void test_site_role_above_profile_is_not_adopted() {
@@ -2794,6 +2854,34 @@ void test_direct_join_aead_and_usb_attach_retry() {
   }
 }
 
+void test_link_retry_uses_original_transaction() {
+  current = "link_retry_uses_original_transaction";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  // A parked fresh responder and a completed M4 leg can coexist. The
+  // retry must preserve its transaction regardless of table slot order.
+  for (const bool quiet_first : {false, true}) {
+    for (const bool retry : {true, false}) {
+      f.rld1.sends.clear();
+      CHECK(SecurityCoordinatorTestAccess::send_overlapping_link(
+                coordinator, quiet_first, retry, now).ok());
+      CHECK(f.rld1.sends.size() == 1);
+      if (f.rld1.sends.size() != 1) continue;
+      autonomy::Rld1Envelope env{};
+      const auto& bytes = f.rld1.sends[0].bytes;
+      CHECK(autonomy::rld1_decode(ByteView{bytes.data(), bytes.size()}, env).ok());
+      CHECK(env.transaction_nonce[0] == (retry ? 0x11 : 0x22));
+    }
+  }
+}
+
 void test_link_chunks_wait_for_receipts() {
   current = "link_chunks_wait_for_receipts";
   Fixture f{};
@@ -3048,6 +3136,7 @@ void test_milestones_confirmed_gap_past_18h() {
 
 int main() {
   test_boot_silent_adoption();
+  test_smart_boot_at_clock_origin();
   test_site_role_above_profile_is_not_adopted();
   test_member_apply_failure_is_closed();
   test_rld1_demux_gates();
@@ -3105,6 +3194,7 @@ int main() {
   test_dev_channel_failure_rebuilds_small_side();
   test_dev_revocation_blocks_membership();
   test_direct_join_aead_and_usb_attach_retry();
+  test_link_retry_uses_original_transaction();
   test_link_chunks_wait_for_receipts();
   test_end_chunks_wait_for_receipts();
   test_milestones_fresh_is_unknown();

@@ -65,6 +65,11 @@ struct JoinerConfig {
   std::uint32_t avoid_blocked_ms{static_cast<std::uint32_t>(kJoinAvoidBlockedMs)};
   std::uint32_t retry_max_ms{600000};
   std::uint32_t start_jitter_ms{0};
+  bool smart_join{false};
+  bool boot_join{true};
+  bool same_site_only{false};
+  std::uint32_t listen_ms{3000};
+  std::uint32_t search_ms{60000};
 };
 
 // --- Boot input ------------------------------------------------------------------------------
@@ -363,6 +368,7 @@ class Joiner final {
   void teardown_attempt() noexcept;
   void clear_mailbox() noexcept;
   void start_scan() noexcept;
+  Status wait_smart_probe(MonotonicMs now) noexcept;
   void schedule_rescan(MonotonicMs now) noexcept;
   // Shared run reset of start()/start_direct().
   void begin_run(const JoinBootInput& boot) noexcept;
@@ -393,7 +399,11 @@ class Joiner final {
   static MonotonicMs sat_add(MonotonicMs a, std::uint64_t delta) noexcept;
   static void sat_inc(std::uint32_t& counter) noexcept;
   static bool step_expected(JoinState state, JoinAuthPhase phase, std::uint8_t step) noexcept;
+  void end_search(MonotonicMs now) noexcept;
 
+  MonotonicMs search_deadline_{0};
+  std::uint32_t search_attempts_{0};
+  bool api_triggered_{false};
   JoinerConfig config_{};
   IdentityStore& identity_;
   SiteStore& site_;

@@ -29,9 +29,13 @@ extern "C" {
    rl_dev_node_id (a read-only identity).
 
    Structs: every struct starts with {struct_size, version}. version must be
-   RL_DEV_API_VERSION and struct_size at least the size this header
-   declares, otherwise the call returns RL_STATUS_INVALID_ARGUMENT; a larger
-   struct_size is accepted and its tail ignored. 1.x grows by appending tail
+   RL_DEV_API_VERSION and struct_size at least the required prefix, otherwise
+   the call returns RL_STATUS_INVALID_ARGUMENT. The prefix is sizeof the
+   struct except for API 1's additive tails: capabilities before
+   object_transfer, observer before on_object, and join_policy before
+   smart_join (offsetof each field). Only supplied tail fields are read or
+   written; a larger struct_size is accepted and its excess tail ignored.
+   1.x grows by appending tail
    fields and functions only; layouts are pinned by
    protocol/abi-golden/device-api1.json (ILP32 and LP64).
    rl_dev_struct_init() zeroes a struct and fills its header. Shared value
@@ -89,6 +93,9 @@ typedef struct rl_dev_capabilities {
   uint16_t max_payload;
   uint16_t max_group_payload;
   uint16_t max_applied_payload;
+  uint8_t object_transfer;
+  uint8_t object_rx_slots;
+  uint16_t max_object_bytes;
 } rl_dev_capabilities_t;
 
 typedef struct rl_dev_membership {
@@ -146,7 +153,46 @@ typedef struct rl_dev_join_policy {
   uint16_t start_jitter_ms;    /* 0..60000 */
   uint8_t role;                /* requested role bits, 0 = image default */
   uint8_t reserved;
+  uint8_t smart_join;          /* 0 legacy, 1 listen/probe/finite search */
+  uint8_t boot_join;           /* 0 API only, 1 boot trigger */
+  uint8_t same_site_only;
+  uint8_t reserved2;
+  uint32_t listen_ms;          /* 0..60000 */
+  uint32_t search_ms;          /* 1000..600000 */
 } rl_dev_join_policy_t;
+
+typedef struct rl_dev_object_options {
+  uint32_t struct_size;
+  uint32_t version;
+  uint32_t deadline_ms;
+  uint16_t app_tag;
+  uint8_t content_encoding;
+  uint8_t reserved;
+} rl_dev_object_options_t;
+
+/* ObjectState: 1 Delivered (digest and whole-object callback acknowledged),
+   2 Expired, 3 CancelledBeforeTx, 4 Indeterminate, 5 Failed, 6 Unsupported.
+   This is distinct from a normal message's END_RECEIVED and from APPLIED. */
+typedef struct rl_dev_object_result {
+  uint32_t struct_size;
+  uint32_t version;
+  uint32_t object_id;
+  uint16_t reason; /* rl_status_code_t */
+  uint8_t state;
+  uint8_t reserved;
+} rl_dev_object_result_t;
+
+typedef struct rl_dev_object_rx {
+  uint32_t struct_size;
+  uint32_t version;
+  rl_node_id_t source;
+  uint32_t object_id;
+  uint32_t source_boot;
+  uint32_t end_context;
+  uint16_t app_tag;
+  uint8_t content_encoding;
+  uint8_t reserved;
+} rl_dev_object_rx_t;
 
 /* Callbacks run on the Owner task; arguments are borrowed for the call.
    Any function may be NULL. on_applied_request receives every APPLIED
@@ -171,6 +217,9 @@ typedef struct rl_dev_observer {
   void (*on_operation)(void* user, uint32_t operation, uint16_t result);
   void (*on_applied_request)(void* user, const rl_applied_request_t* request);
   void (*on_poll)(void* user, rl_dev_t* device, rl_monotonic_ms_t now_ms);
+  void (*on_object)(void* user, const rl_dev_object_rx_t* info,
+                    const uint8_t* data, size_t size);
+  void (*on_object_result)(void* user, const rl_dev_object_result_t* result);
 } rl_dev_observer_t;
 
 void rl_dev_struct_init(void* object, size_t struct_size);
@@ -200,6 +249,15 @@ rl_status_code_t rl_dev_capabilities(rl_dev_t* device, rl_dev_capabilities_t* ou
 rl_status_code_t rl_dev_send(rl_dev_t* device, rl_node_id_t destination,
                              const uint8_t* payload, size_t payload_size,
                              const rl_dev_send_options_t* options, rl_message_id_t* out_id);
+/* Immutable send loan until on_object_result. RX loan is 4096 bytes and
+   outlives the Device; callbacks borrow it only for their duration. OFF
+   returns Unsupported. One TX object and at most object_rx_slots RX loans. */
+void rl_dev_object_options_init(rl_dev_object_options_t* options);
+rl_status_code_t rl_dev_send_object(rl_dev_t* device, rl_node_id_t destination,
+                                    const uint8_t* data, size_t size,
+                                    const rl_dev_object_options_t* options, uint32_t* out_id);
+rl_status_code_t rl_dev_cancel_object(rl_dev_t* device, uint32_t object_id);
+rl_status_code_t rl_dev_register_object_buffer(rl_dev_t* device, uint8_t* storage, size_t size);
 rl_status_code_t rl_dev_send_group(rl_dev_t* device, uint16_t group, const uint8_t* payload,
                                    size_t payload_size, const rl_group_send_options_t* options,
                                    rl_message_id_t* out_id);
@@ -229,6 +287,8 @@ rl_status_code_t rl_dev_membership(rl_dev_t* device, rl_dev_membership_t* out);
 rl_status_code_t rl_dev_connectivity(rl_dev_t* device, rl_dev_connectivity_t* out);
 /* Unassigned: the zero-touch scan starts now. Member: re-verifies the
    membership with the site. Ends with on_operation. */
+/* Private opaque mark for ProxyPolicySet, never a permission. */
+rl_status_code_t rl_dev_join_mark(rl_dev_t* device, uint8_t out[16]);
 rl_status_code_t rl_dev_request_join(rl_dev_t* device, uint32_t* out_operation);
 /* Leaves the site: the intent is durable before anything is erased; the
    device then restarts unassigned (on_operation(LEFT) first). */

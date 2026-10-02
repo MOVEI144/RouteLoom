@@ -38,7 +38,7 @@ public structにはstruct_size/versionを置く。整数幅、enum値、reserved
 
 ESP-IDF の機器は `components/routeloom_device` の `routeloom::Device` を使う。C からは `routeloom/device.h` の `rl_dev_*`（Device C API 1）を使う。C 版は同じ Device の薄い wrapper で、状態を持たない（下の「Device C API」）。Device は所属・経路・session の写しを持たず、呼出しごとに Owner と MeshNode から読む。持つのは自分の event のための最小の記録（最後に通知した段階と接続状態とその時刻、進行中の操作 1 件）だけである。
 
-呼べるのは Owner task（poll hook と post した job）だけで、他の task は `post()` を使う（8 件、満杯は Busy）。Device の callback（`NodeObserver`、`DeviceObserver`）の中から Device を呼ぶと Busy を返し、何も変えない。
+呼べるのは Owner task（poll hook と post した job）だけで、他の task は `post()` を使う（8 件、満杯または sleep handoff 中は受理前に Busy）。Device の callback（`NodeObserver`、`DeviceObserver`）の中から Device を呼ぶと Busy を返し、何も変えない。
 
 `DeviceConfig::usb` を接続する場合は HostLink secret（`usb_secret`）が必要。未設定（NULL または長さ 0）なら `begin()` は Owner／radio 起動前に InvalidArgument（`USB_SECRET_REQUIRED`）で拒否する。DevRam の Kconfig identity 経路は USB secret を持たないので gateway は BoardConfig と紐づく secret を provision して起動する。
 
@@ -51,7 +51,11 @@ ESP-IDF の機器は `components/routeloom_device` の `routeloom::Device` を�
 | `connectivity()` | 自現場の gateway に届くか（scope = SiteGateway）。Unknown／Reachable／Degraded／Isolated／Sleeping、`since_ms`、boot、最後の gateway の証拠の時刻、理由 ID。証拠は gateway 本人から直接受けた認証済みの通信と、E2E の検証に通った gateway の message・制御返信・END_RECEIPT（RSSI、表への登録、中継機による経路 lease の更新は数えない）。証拠が 60 s 以内で経路があれば Reachable、それより古いか経路が無ければ Degraded、120 s 無ければ Isolated。所属とは独立で、Isolated でも所属は捨てない。gateway 自身は Reachable。Sleeping は sleep の経路（V2-15）が設定する |
 | `request_join(op)` | 未所属：zero-touch の scan の待ちを今終える（避ける一覧は守る）。所属済み：既存の所属を site に再検証させる。結果は `on_operation`（JOINED／JOIN_DENIED／JOIN_PENDING／JOIN_TIMEOUT（60 s）／RECOVERY_REQUIRED）。DevRam は Unsupported |
 | `leave(op)` | RLX1 に LocalLeave の意図（schema 2）を書いてから消す。消すのは rlsite・rlrevo・rlres2・受付方針と RAM の session、残すのは本人（RLI1）・rlboot・rlcfg・rlkeys・JoinPolicy。自分から離れたので holdoff も RLV1 も残さない。意図の保存後は戻る前に新規受付と送信を止める。消去の失敗は Recovery と RECOVERY_REQUIRED で通知し、耐久 intent は再起動から再開できる。未送信の仕事は `CANCELLED_LEAVE`、送信済みは Indeterminate で終わる。どの段で電源が切れても次の起動で先へ進めて完了する。完了すると `on_membership(LEFT)` と `on_operation(LEFT)` を出して未所属で再起動する。旧現場への通知はしない（host の台帳は変えない） |
+| `join_mark(mark)` | 本人の秘密鍵から導く 16 B の private installation mark。管理者へ provisioning 経路で渡す。認可ではない。詳細は [smart join](../design/v2/smart-join.md) |
 | `set_join_policy(policy, expected_revision, revision)`／`join_policy(policy, revision)` | 下の JoinPolicy。範囲外は InvalidArgument、revision の不一致は Conflict。RLJP1（rlmaint の `j0`）に書いて読み戻してから次の判断に効かせる。再起動と leave の後も残る |
+| `bind_sleep(power, cause, elapsed, now)` | firmware は ROUTELOOM_DEEP_SLEEP の構成のみ有効。`mesh()` と同じ MeshNode を持つ caller-owned PowerCoordinator を adoption 後に一度だけ接続する。Owner-aware PowerPort と耐久 PowerStorage／PowerEvents は呼出元が保有し、Device より長く生存させる。未読 slot の RecoveryRequired は接続を解除せず保持する |
+| `prepare_sleep(request)`／`sleep_ticket()`／`enter_sleep(ticket)`／`abort_sleep()` | DevRam／Member 共通の二段階 sleep。step が security park と耐久 pending の精算を駆動し、commit／readback と radio quiesce 後に ticket を返す。post／受信待ち／radio 世代変更は entry 前に ticket を無効化する。未接続は Unsupported |
+| `wake(cause, elapsed, now)`／`wake_info()` | simulation の in-process wake と ResumeOutcome。実機の再起動では bind_sleep の begin 経路を使う。Member の RTC session image と耐久 pending image の形式は変えない |
 | `capabilities()` | 役割、MemberEdhoc か、`security_profile`（DevRam は Development、MemberEdhoc は Candidate）、USB gateway、payload の上限など |
 
 `DeviceObserver` の `on_membership(snapshot, cause)` と `on_connectivity(snapshot)` は、変化ごとに 1 回だけ Owner task で呼ぶ。起動時の最初の状態は変化ではないので通知しない。JoinPolicy の孤立の通知時間を過ぎて Isolated が続くと、理由 ISOLATION_NOTICE で `on_connectivity` を 1 回出す（自動では離脱しない）。受信の `DeliveryAssurance` には、送信元の検証結果に加えて、MemberEdhoc では送信元の資格が認める役割（`source_role`）が入る。
@@ -65,8 +69,8 @@ C++ の各関数に対応する `rl_dev_*` を置く（`rl_dev_send`、`rl_dev_s
 - callback は `rl_dev_observer_t`（`on_message`、`on_delivery`、`on_membership`、`on_connectivity`、`on_operation`、`on_applied_request`、`on_poll`）。`on_poll` は Owner の pass ごとに callback の外で呼ぶので、そこから Device を呼べる。
 - APPLIED の受信側は常に非同期：`on_applied_request` で ticket を受け、callback の後で `rl_dev_complete_applied` を呼ぶ。`on_applied_request` が NULL なら NoEndpoint で拒否する。
 - 他の task からは `rl_dev_post(job, ctx)` だけ（8 件、満杯は `RL_STATUS_BUSY`）。
-- 全 struct の先頭に `{struct_size, version}`。version は `RL_DEV_API_VERSION`（1）、struct_size は header の宣言以上でなければ `RL_STATUS_INVALID_ARGUMENT`。大きい struct_size は受けて末尾を無視する。1.x は末尾の追加と関数の追加だけで、layout は `protocol/abi-golden/device-api1.json`（ILP32 と LP64）で固定する。共通の値の型（`rl_message_id_t`、`rl_delivery_result_t`、`rl_applied_*_t`、`rl_group_send_options_t`）は core ABI 3 のものを使い、version は `RL_ABI_VERSION`。
-- sleep の C 版は Device の sleep API（V2-15）と同時に足す。
+- 全 struct の先頭に `{struct_size, version}`。version は `RL_DEV_API_VERSION`（1）、struct_size は必須 prefix より短いと `RL_STATUS_INVALID_ARGUMENT`。通常は `sizeof`、追加末尾を持つ capabilities／observer／join_policy はそれぞれ `offsetof(object_transfer)`／`offsetof(on_object)`／`offsetof(smart_join)` までの旧 prefix も受ける。渡された範囲だけを読み書きし、宣言より大きい struct_size の余剰末尾は無視する。1.x は末尾の追加と関数の追加だけで、layout は `protocol/abi-golden/device-api1.json`（ILP32 と LP64）で固定する。共通の値の型（`rl_message_id_t`、`rl_delivery_result_t`、`rl_applied_*_t`、`rl_group_send_options_t`）は core ABI 3 のものを使い、version は `RL_ABI_VERSION`。
+- sleep は C++ の Device API だけで提供し、C wrapper はまだ無い（v2.x で追加）。
 
 ### JoinPolicy
 
@@ -79,8 +83,13 @@ C++ の各関数に対応する `rl_dev_*` を置く（`rl_dev_send`、`rl_dev_s
 | `isolation_notice_s` | 0（無効） | 0 または 300〜2592000 |
 | `start_jitter_ms`（未所属で起動したときの開始の散らし） | 0 | 0〜60000 |
 | `role`（名乗る役割の bit、0 は image の既定） | 0 | endpoint／relay、gateway は gateway の image だけ |
+| `smart_join` | false（互換） | true で軽い問い合わせと予定一覧を使う |
+| `boot_join` | true | smart mode の未所属の起動時探索。false は API のきっかけだけ |
+| `same_site_only` | false | true は保持中の現場だけ。未所属では選ばない |
+| `listen_ms` | 3000 | 0〜60000 |
+| `search_ms` | 60000 | 1000〜600000（聞く時間を含む探索全体） |
 
-既定は方針ができる前の固定値と同じで、既定のままなら挙動は変わらない。有界の backoff と撤去後の holdoff を無効にする値は範囲検査で拒否する。避ける一覧そのものは RAM に置き、再起動で消える。
+既定は方針ができる前の固定値と同じで、既定のままなら挙動は変わらない。有界の backoff と撤去後の holdoff を無効にする値は範囲検査で拒否する。避ける一覧そのものは RAM に置き、再起動で消える。smart mode の `isolation_notice_s` は保持中の現場を 1 回だけ再検証するきっかけにもなる。[予定一覧・wire・追跡の限界](../design/v2/smart-join.md)を参照。
 
 ### 設計のみ（未実装）
 
@@ -137,3 +146,15 @@ APPLIEDのprovider変更は、shared idempotency domainまたは明示duplicate-
 Entropy Providerにはinitialize、ready、fill、reseed、failureを要求し、READY以外で鍵生成を拒否する。SDKの初期化で秘密を乱数不足のまま仮作成しない。
 
 capabilityは設計予定／実装／認定／有効を別に返す。[feature manifest](../reference/feature-profiles.json)。公開ABIの数値・struct layoutは未凍結。今回のJSONとPython小モデルはC ABIの代替ではない。
+
+SDK の firmware sleep 経路は耐久 pending の復旧結果を `DeviceObserver::on_sleep_pending_result(record, status)` に通知する。元の logical message ID を保持し、Ok は再注入の受付を示す（配送の成功ではない）。期限切れ・TIME_UNCERTAIN・再注入の失敗も通知し、callback 内の Device 変更は Busy で拒否する。caller-owned PowerCoordinator を bind する構成では、その coordinator に渡した PowerEvents が通知先になる。
+
+## AppObject（optional）
+
+componentの `CONFIG_ROUTELOOM_APP_OBJECT_TRANSFER` は既定OFF。C++ Deviceの `send_object`／`cancel_object`／`register_object_buffer` と `ObjectObserver`、Cの `rl_dev_send_object`／`rl_dev_cancel_object`／`rl_dev_register_object_buffer` とobserver末尾のobject callbackを用いる。通常sendの128 B上限を変えず、暗黙分割しない。OFFの入口はUnsupported、capabilityはfalse／max_object_bytes=0。
+
+認証済みunicastのみ、1〜4096 B。空はInvalidArgument、4097 B以上はTooLarge。deadlineの既定30000 ms、最大120000 ms。app_tagとcontent_encodingはそのまま相手に渡し、圧縮はSDKが行わない。送信は一件のimmutable loanで、結果callbackまで元のbytesを有効に保つ。Busy／AuthRequiredなどの受付失敗ではloanを保持しない。受信bufferは4096 B以上をcallerが登録し、C3は一枠、他は既定二枠。一source一件、満杯はBusy、未登録はNoBufferで拒否する。
+
+全chunkとSHA-256先頭16 Bが一致した後に一回のon_object。受信viewの寿命はcallback内だけ。ObjectState::Deliveredはcallback後の全体ACKを得た場合だけで、APP_APPLIEDではない。未送信cancelはCancelledBeforeTx、一部送信後cancelはIndeterminate。context／identity変更はFailed、全体期限または10秒無進捗はExpired。callbackからの操作はBusy。objectが動作中はsleep準備を止める。
+
+wireと再送規則は[wire-protocol.md](wire-protocol.md)、host入口は[host.md](host.md)。Device API 1のobserver／capabilities末尾を追加し、旧struct_sizeのprefix consumerを維持する。

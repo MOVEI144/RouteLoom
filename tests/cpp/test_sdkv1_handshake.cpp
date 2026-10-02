@@ -748,6 +748,12 @@ void test_responder_waits_for_m4_admission() {
   CHECK(pair.b->bank.live_count(SecurityScope::Link) == 1);
   CHECK_OK(pair.b->engine.take_result(result));
   CHECK(result.event == HandshakeEvent::Established);
+  const auto due = pair.b->engine.next_deadline(kT0 + 550);
+  CHECK(due == kT0 + 950);
+  CHECK_OK(pair.b->engine.poll(due));
+  HandshakeResult quiet_retry{};
+  CHECK_OK(pair.b->engine.take_result(quiet_retry));
+  CHECK(quiet_retry.event == HandshakeEvent::Send && quiet_retry.step == 4);
 }
 
 void test_m1_park_yields_to_live_m4() {

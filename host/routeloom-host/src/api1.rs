@@ -145,6 +145,8 @@ pub struct ApiContext<'a, S: OperationStore> {
     /// group_delivery_v1 op table: `group.send` admits here, `group.get`
     /// reads; the group lane thread is the only driver.
     pub group_ops: &'a crate::group::GroupOps,
+    pub object_ops: &'a crate::objects::ObjectOps,
+    pub object_log: &'a Mutex<ReceiveLog>,
     /// The daemon-owned rollcall run (design-devflow §6.4, D09):
     /// `lab.rollcall.*` starts, steers and reads it; the rollcall lane
     /// thread drives its polls through `group_ops`.
@@ -362,6 +364,9 @@ pub fn handle_conn<S: OperationStore>(
         "messages.unsubscribe" => messages_unsubscribe(&params, ctx).map(|r| (r, None)),
         "messages.subscriptions" => messages_subscriptions(&params, ctx).map(|r| (r, None)),
         "operations.open_epoch" => operations_open_epoch(&params, ctx).map(|r| (r, None)),
+        "objects.submit" => objects_submit(&params, ctx).map(|r| (r, None)),
+        "objects.get" => object_get(&params, ctx, false).map(|r| (r, None)),
+        "objects.cancel" => object_get(&params, ctx, true).map(|r| (r, None)),
         "messages.submit" => messages_submit(&params, ctx).map(|r| (r, None)),
         "operations.get" => operations_get(&params, ctx).map(|r| (r, None)),
         "operations.get_by_key" => operations_get_by_key(&params, ctx).map(|r| (r, None)),
@@ -483,8 +488,18 @@ fn capabilities<S: OperationStore>(
         .lock()
         .expect("operation store poisoned")
         .durable();
+    let object_capable = ctx
+        .session
+        .lock()
+        .map(|s| {
+            s.authenticated
+                && s.capability
+                    .is_some_and(|caps| caps & crate::objects::CAP != 0)
+        })
+        .unwrap_or(false);
+    let object_max = if object_capable { 4096 } else { 0 };
     Ok(format!(
-        "{{\"api\":{{\"version\":{API_VERSION},\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"capacity.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"lab.rollcall.start\":true,\"lab.rollcall.update\":true,\"lab.rollcall.stop\":true,\"lab.rollcall.status\":true,\"diagnostics.snapshot\":true,\"health.get\":true,\"topology.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"queue_mode\":[\"FIFO\",\"LATEST_PER_DESTINATION\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"observation\":{observation_caps},\"site\":{site_caps},\"rollcall\":{{\"dispatch\":\"usb_group_delivery_v1\",\"min_interval_ms\":{rollcall_min},\"max_inflight\":1}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known},\"caps_version\":{CAPS_VERSION}}}",
+        "{{\"api\":{{\"version\":{API_VERSION},\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"capacity.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"objects.submit\":true,\"objects.get\":true,\"objects.cancel\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true,\"lab.rollcall.start\":true,\"lab.rollcall.update\":true,\"lab.rollcall.stop\":true,\"lab.rollcall.status\":true,\"diagnostics.snapshot\":true,\"health.get\":true,\"topology.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"objects\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"queue_mode\":[\"FIFO\",\"LATEST_PER_DESTINATION\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"observation\":{observation_caps},\"site\":{site_caps},\"rollcall\":{{\"dispatch\":\"usb_group_delivery_v1\",\"min_interval_ms\":{rollcall_min},\"max_inflight\":1}},\"objects\":{{\"object_transfer\":{object_capable},\"max_object_bytes\":{object_max},\"encoding\":[\"none\"],\"records_max\":64,\"unsettled_max\":4}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known},\"caps_version\":{CAPS_VERSION}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -910,6 +925,9 @@ fn read_result(
 /// `messages.read` batches and `kind:"message"` subscription
 /// notifications. `cursor` is the per-record cursor (seq position).
 pub(crate) fn record_json(record: &RxRecord, cursor: &str) -> String {
+    if let Some((tag, encoding)) = record.object {
+        return format!("{{\"v\":1,\"network\":\"{:016x}\",\"origin\":\"{:016x}\",\"source_boot\":{},\"end_context\":{},\"object_id\":{},\"app_tag\":{},\"content_encoding\":{},\"data\":\"{}\",\"cursor\":\"{}\"}}",record.network,record.origin,record.msg_session,record.msg_seq>>32,record.msg_seq & 0xffffffff,tag,encoding,crate::receive_log::base64_encode(&record.payload),cursor);
+    }
     format!(
         "{{\"v\":1,\"network\":\"{:016x}\",\"gateway\":{},\"origin\":\"{:016x}\",\"message\":{{\"session\":\"{:08x}\",\"sequence\":\"{:016x}\"}},\"payload_hex\":\"{}\",\"payload_len\":{},\"cursor\":\"{}\",\"endpoint_kind\":\"gateway_mirror\",\"evidence\":\"HOST_RAM_RETAINED\",{}}}",
         record.network,
@@ -931,6 +949,9 @@ pub(crate) fn record_json(record: &RxRecord, cursor: &str) -> String {
 /// (READ_OPERATION): every field except the payload, replaced by its
 /// sha256 so a metadata client can still deduplicate/audit.
 pub(crate) fn record_meta_json(record: &RxRecord, cursor: &str) -> String {
+    if let Some((tag, encoding)) = record.object {
+        return format!("{{\"v\":1,\"network\":\"{:016x}\",\"origin\":\"{:016x}\",\"source_boot\":{},\"end_context\":{},\"object_id\":{},\"app_tag\":{},\"content_encoding\":{},\"payload_len\":{},\"payload_sha256\":\"{}\",\"cursor\":\"{}\"}}", record.network, record.origin, record.msg_session, record.msg_seq >> 32, record.msg_seq & 0xffff_ffff, tag, encoding, record.payload.len(), hex_lower(&canonical::sha256(&record.payload)), cursor);
+    }
     format!(
         "{{\"v\":1,\"network\":\"{:016x}\",\"gateway\":{},\"origin\":\"{:016x}\",\"message\":{{\"session\":\"{:08x}\",\"sequence\":\"{:016x}\"}},\"payload_len\":{},\"payload_sha256\":\"{}\",\"cursor\":\"{}\",\"endpoint_kind\":\"gateway_mirror\",\"evidence\":\"HOST_RAM_RETAINED\",{}}}",
         record.network,
@@ -1054,7 +1075,7 @@ fn messages_subscribe<S: OperationStore>(
         },
     };
     let events = match stream {
-        "messages" => false,
+        "messages" | "objects" => false,
         "events" => true,
         _ => {
             return Err(ApiError::simple(
@@ -1311,7 +1332,14 @@ fn messages_subscribe<S: OperationStore>(
     // `from:"latest"` tail snapshot and the cursor ladder both run here.
     // Registration in the hub follows immediately after unlock; an ingest
     // landing in between still has seq > position and is delivered live.
-    let mut log = ctx.receive_log.lock().expect("receive log poisoned");
+    let source = if stream == "objects" {
+        ctx.object_log
+    } else {
+        ctx.receive_log
+    };
+    let mut log = source
+        .lock()
+        .map_err(|_| ApiError::simple("INTERNAL_ERROR", "receive log unavailable"))?;
     let epoch = log.epoch();
     let acl_view = ctx.acl.revision();
     let cursor_at = |position: u64| {
@@ -1374,6 +1402,7 @@ fn messages_subscribe<S: OperationStore>(
             ctx.conn_id,
             ctx.principal.clone(),
             SubKind::Messages(MsgFilter {
+                objects: stream == "objects",
                 network,
                 origins,
                 gateways,
@@ -1389,7 +1418,7 @@ fn messages_subscribe<S: OperationStore>(
         ctx.subscriptions.stage_marker(ctx.conn_id, id, "gap", body);
     }
     let result = format!(
-        "{{\"subscription\":\"{}\",\"stream\":\"messages\",\"network\":\"{network:016x}\",\"payloads\":{payloads},\"epoch\":\"{}\",\"acl_revision\":{acl_view},\"position\":{{\"cursor\":\"{}\",\"oldest_cursor\":\"{}\",\"tail_cursor\":\"{}\"}},\"queue\":{{\"max_notifications\":{SUB_QUEUE_EVENTS},\"max_bytes\":{SUB_QUEUE_BYTES},\"line_max_bytes\":{NOTIFY_LINE_MAX}}},\"heartbeat_ms\":{heartbeat_ms}}}",
+        "{{\"subscription\":\"{}\",\"stream\":\"{stream}\",\"network\":\"{network:016x}\",\"payloads\":{payloads},\"epoch\":\"{}\",\"acl_revision\":{acl_view},\"position\":{{\"cursor\":\"{}\",\"oldest_cursor\":\"{}\",\"tail_cursor\":\"{}\"}},\"queue\":{{\"max_notifications\":{SUB_QUEUE_EVENTS},\"max_bytes\":{SUB_QUEUE_BYTES},\"line_max_bytes\":{NOTIFY_LINE_MAX}}},\"heartbeat_ms\":{heartbeat_ms}}}",
         subscribe::token(id),
         hex_lower(&epoch),
         cursor_at(position),
@@ -1473,6 +1502,15 @@ fn messages_subscriptions<S: OperationStore>(
                 entry.created_ms,
             ));
         } else {
+            let stream = if entry.objects { "objects" } else { "messages" };
+            let epoch = if entry.objects {
+                ctx.object_log
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .epoch()
+            } else {
+                epoch
+            };
             let cursor = Cursor {
                 network: entry.network.unwrap_or(0),
                 acl_view,
@@ -1481,8 +1519,9 @@ fn messages_subscriptions<S: OperationStore>(
             }
             .encode();
             out.push_str(&format!(
-                "{{\"id\":\"{}\",\"stream\":\"messages\",\"network\":\"{:016x}\",\"payloads\":{},\"position_cursor\":\"{}\",\"delivered\":{},\"dropped\":{},\"gaps\":{},\"queued\":{},\"queued_bytes\":{},\"created_ms\":{}}}",
+                "{{\"id\":\"{}\",\"stream\":\"{}\",\"network\":\"{:016x}\",\"payloads\":{},\"position_cursor\":\"{}\",\"delivered\":{},\"dropped\":{},\"gaps\":{},\"queued\":{},\"queued_bytes\":{},\"created_ms\":{}}}",
                 subscribe::token(entry.id),
+                stream,
                 entry.network.unwrap_or(0),
                 entry.payloads,
                 cursor,
@@ -1651,7 +1690,7 @@ fn messages_submit<S: OperationStore>(
         .expect("operation store poisoned");
     // The monotonic stamp rides alongside the wall admit time so a
     // wall-clock rewind can never stretch the dispatch deadline.
-    match store.submit_at_principal(uid, &req, ctx.now_ms, crate::mono_ms()) {
+    match store.submit_at_principal(uid, &req, ctx.now_ms, ctx.now_mono) {
         SubmitOutcome::Accepted { seq } => {
             // Latest-value discipline (D10): once the replacement is
             // committed, retire still-queued older values to the same
@@ -3904,6 +3943,173 @@ fn group_permitted(
         || (network > 0xffff_ffff && acl.permit_principal(uid, network & 0xffff_ffff, permission))
 }
 
+fn objects_submit<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "network" | "node" | "data" | "key" | "deadline_ms" | "app_tag" | "content_encoding"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "unknown object parameter",
+            ));
+        }
+    }
+    let network = params
+        .get("network")
+        .and_then(Json::as_str)
+        .and_then(parse_hex_u64)
+        .ok_or_else(|| ApiError::simple("INVALID_ARGUMENT", "network must be 16 hex digits"))?;
+    let network = match ctx.site.map(|site| site.network()) {
+        Some(site) if network == (site & 0xffff_ffff) => site,
+        _ => network,
+    };
+    let principal = ctx
+        .principal
+        .as_ref()
+        .filter(|uid| group_permitted(ctx.acl, uid, network, acl::PERM_SEND))
+        .ok_or_else(|| ApiError::simple("AuthorizationFailed", "principal lacks SEND"))?;
+    let node = params
+        .get("node")
+        .and_then(Json::as_str)
+        .and_then(parse_hex_u64)
+        .filter(|v| *v != 0)
+        .ok_or_else(|| {
+            ApiError::simple("INVALID_ARGUMENT", "node must be nonzero 16 hex digits")
+        })?;
+    let data = crate::objects::decode_base64(
+        params
+            .get("data")
+            .and_then(Json::as_str)
+            .ok_or_else(|| ApiError::simple("INVALID_ARGUMENT", "data must be base64"))?,
+    )
+    .map_err(|reason| {
+        ApiError::simple(reason, "data must encode 1..4096 bytes as canonical base64")
+    })?;
+    let key = params
+        .get("key")
+        .and_then(Json::as_str)
+        .and_then(|s| canonical::parse_key_hex(s).ok())
+        .ok_or_else(|| ApiError::simple("INVALID_ARGUMENT", "key must be 32 hex digits"))?;
+    let field = |name: &str, default: u64, max: u64| -> Result<u64, ApiError> {
+        match params.get(name) {
+            None => Ok(default),
+            Some(value) => value
+                .as_u64()
+                .filter(|v| *v <= max)
+                .ok_or_else(|| ApiError::simple("INVALID_ARGUMENT", "object option out of range")),
+        }
+    };
+    let deadline = field("deadline_ms", 30000, 120000)?;
+    if deadline == 0 {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "deadline must be positive",
+        ));
+    }
+    let request = crate::objects::Request {
+        node,
+        data,
+        deadline_ms: deadline as u32,
+        app_tag: field("app_tag", 0, 65535)? as u16,
+        encoding: field("content_encoding", 0, 255)? as u8,
+    };
+    if !ctx.object_ops.known(principal, network, &key) {
+        let session = ctx
+            .session
+            .lock()
+            .map_err(|_| ApiError::simple("INTERNAL_ERROR", "session unavailable"))?;
+        let connected_network = match ctx.site.map(|site| site.network()) {
+            Some(site) if session.network == Some(site & 0xffff_ffff) => site,
+            _ => session.network.unwrap_or(0),
+        };
+        if network != connected_network {
+            return Err(ApiError::simple(
+                "GATEWAY_UNAVAILABLE",
+                "gateway belongs to another network",
+            ));
+        }
+        if !session.authenticated {
+            return Err(ApiError::simple(
+                "GATEWAY_UNAVAILABLE",
+                "gateway must be authenticated",
+            ));
+        }
+        if session
+            .capability
+            .is_none_or(|caps| caps & crate::objects::CAP == 0)
+        {
+            return Err(ApiError::simple(
+                "UNSUPPORTED",
+                "gateway object transfer disabled",
+            ));
+        }
+    }
+    ctx.object_ops
+        .submit(principal.clone(), network, key, request)
+        .map(|r| r.json())
+        .map_err(|reason| ApiError::simple(reason, "object admission refused"))
+}
+fn object_get<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+    cancel: bool,
+) -> Result<String, ApiError> {
+    if params
+        .object_entries()
+        .iter()
+        .any(|(key, _)| key != "object_id")
+    {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "unknown object parameter",
+        ));
+    }
+    let principal = ctx
+        .principal
+        .as_ref()
+        .ok_or_else(|| ApiError::simple("AuthorizationFailed", "principal required"))?;
+    let id = params
+        .get("object_id")
+        .and_then(Json::as_str)
+        .and_then(|token| ctx.object_ops.resolve_id(token))
+        .ok_or_else(|| {
+            ApiError::simple(
+                "NOT_FOUND",
+                "object id belongs to another daemon boot or is invalid",
+            )
+        })?;
+    let record = ctx
+        .object_ops
+        .get(principal, id)
+        .ok_or_else(|| ApiError::simple("NOT_FOUND", "object not found"))?;
+    if !group_permitted(
+        ctx.acl,
+        principal,
+        record.network,
+        if cancel {
+            acl::PERM_SEND
+        } else {
+            acl::PERM_READ_OPERATION
+        },
+    ) {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "object grant required",
+        ));
+    }
+    if cancel {
+        ctx.object_ops.cancel(principal, id);
+    }
+    ctx.object_ops
+        .get(principal, id)
+        .map(|r| r.json())
+        .ok_or_else(|| ApiError::simple("NOT_FOUND", "object not found"))
+}
+
 /// `group.send` params: `{network, group, key, payload_hex, payload_len,
 /// options?:{priority, ordered, ttl_ms, hop_limit}, wait_ms?}`.
 ///
@@ -5691,7 +5897,7 @@ mod tests {
         dir.join("ops.db")
     }
 
-    fn ctx<'a, S: OperationStore>(
+    pub(super) fn ctx<'a, S: OperationStore>(
         uid: Option<u32>,
         acl: &'a Acl,
         log: &'a Mutex<ReceiveLog>,
@@ -5794,6 +6000,8 @@ mod tests {
             node_table: &EMPTY_NODE_TABLE,
             config_ops,
             group_ops: leaked_group_ops(),
+            object_ops: Box::leak(Box::new(crate::objects::ObjectOps::default())),
+            object_log: Box::leak(Box::new(Mutex::new(ReceiveLog::objects([0; 16])))),
             rollcall: leaked_rollcall(),
             telemetry_ops: leaked_telemetry_ops(),
             observation_ops: leaked_observation_ops(),
@@ -5811,7 +6019,7 @@ mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    fn test_env() -> (
+    pub(super) fn test_env() -> (
         Acl,
         Mutex<ReceiveLog>,
         Mutex<MemoryOperationStore>,
@@ -6333,6 +6541,7 @@ mod tests {
         );
         // The metadata-only sibling renders the same assurance.
         let record = RxRecord {
+            object: None,
             seq: 9,
             network: 1,
             gateway: Some(2),
@@ -9396,6 +9605,43 @@ mod tests {
     }
 
     #[test]
+    fn expected_join_policy_api_accepts_marks_and_bounds_ttl() {
+        use crate::site::{store::MemoryStore, testkit, SiteService};
+        let site = SiteService::new(testkit::authority(Box::new(MemoryStore::default()), 1_000));
+        let acl =
+            Acl::parse("{\"principals\":{\"501\":{\"networks\":{\"*\":[\"MEMBERSHIP_ADMIN\"]}}}}")
+                .unwrap();
+        let (_, log, store, limiter) = test_env();
+        let c = ApiContext {
+            site: Some(&site),
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+        };
+        for (ttl, accepted) in [(0, false), (86401, false), (1, true), (86400, true)] {
+            let request = group_line(
+                "join.policy.set",
+                &format!("{{\"expected_devices\":[],\"expected_ttl_s\":{ttl}}}"),
+            );
+            let response = handle(request.as_bytes(), &c);
+            let parsed = routeloom_json::parse(&response).unwrap();
+            assert_eq!(parsed.get("result").is_some(), accepted, "{response}");
+        }
+        let request = group_line(
+            "join.policy.set",
+            r#"{"expected_devices":["01010101010101010101010101010101"],"expected_ttl_s":300}"#,
+        );
+        let response = handle(request.as_bytes(), &c);
+        assert!(
+            routeloom_json::parse(&response)
+                .unwrap()
+                .get("result")
+                .is_some(),
+            "{response}"
+        );
+        assert!(!response.contains("01010101010101010101010101010101"));
+        assert_eq!(site.with(|a| a.policy().expected.count).0, 1);
+    }
+
+    #[test]
     fn site_channel_plan_signs_for_an_admin_only() {
         use crate::site::{store::MemoryStore, testkit, SiteService};
         use routeloom_provision::sdkv1::channel_plan::{issue, plan_encode, ChannelPlan};
@@ -11677,3 +11923,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "api1_objects_test.rs"]
+mod objects_test;

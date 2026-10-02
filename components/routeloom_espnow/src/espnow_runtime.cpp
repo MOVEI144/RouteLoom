@@ -33,13 +33,11 @@ constexpr std::uint32_t kAutonomyWireLifetimeMs = 500;
 TickType_t ms_to_ticks_ceil(const std::uint64_t ms) noexcept {
   constexpr std::uint64_t kMaxTicks = portMAX_DELAY - 1;  // portMAX_DELAY waits forever
   constexpr std::uint64_t kTickRate = configTICK_RATE_HZ;
-  const std::uint64_t whole_ms = ms / 1000U;
-  const std::uint64_t fraction = (ms % 1000U * kTickRate + 999U) / 1000U;
-  if (whole_ms > kMaxTicks / kTickRate) return static_cast<TickType_t>(kMaxTicks);
-  const std::uint64_t whole_ticks = whole_ms * kTickRate;
-  if (fraction >= kMaxTicks - whole_ticks) return static_cast<TickType_t>(kMaxTicks);
-  const std::uint64_t ticks = whole_ticks + fraction;
-  return static_cast<TickType_t>(ticks == 0 ? 1 : ticks);
+  static_assert(kMaxTicks <= UINT32_MAX, "ESP-IDF tick width");
+  if (ms >= kMaxTicks * 1000U / kTickRate) return static_cast<TickType_t>(kMaxTicks);
+  const auto ticks =
+      static_cast<TickType_t>(kTickRate == 1000 ? ms : (ms * kTickRate + 999U) / 1000U);
+  return ticks == 0 ? 1 : ticks;
 }
 
 void saturating_inc(std::uint32_t& counter) noexcept {
@@ -728,10 +726,15 @@ void EspNowRuntime::task_entry(void* argument) noexcept {
   // stop() running on it recognizes the self-call, self-cleared before
   // the join flag drops so a joiner never observes a dangling handle.
   runtime->task_ = xTaskGetCurrentTaskHandle();
+  runtime->bind_wake_task(xTaskGetCurrentTaskHandle());
   while (runtime->started_) {
     runtime->poll_once();
-    runtime->wait_for_event(kOwnerPollPeriodMs);
+    const auto now = runtime->now_ms();
+    const auto due =
+        std::min(runtime->next_deadline(now), now > UINT64_MAX - 100 ? UINT64_MAX : now + 100);
+    runtime->wait_for_event(due > now ? due - now : 0);
   }
+  runtime->bind_wake_task(nullptr);
   runtime->task_ = nullptr;
   // Released last: once task_running_ reads false, a joining stop() owns
   // the teardown and frees the queues this task was draining.
@@ -998,7 +1001,6 @@ void EspNowRuntime::poll_once() noexcept {
     if (depth > owner_stats_.rx_queue_max) owner_stats_.rx_queue_max = depth;
     if (xQueueReceive(event_queue_, &event, 0) != pdTRUE) break;
     ++drained;
-    if (event.kind == EventKind::Wake) continue;
     if (event.kind == EventKind::Tx) {
       // Telemetry gets every completion lane; the node's job resolution only
       // ever sees the Reserved lane — raw/stale completions resolve nothing
@@ -1264,44 +1266,55 @@ void EspNowRuntime::poll_bootstrap(const MonotonicMs now) noexcept {
   }
 }
 
+MonotonicMs EspNowRuntime::next_deadline(const MonotonicMs now_ms) const noexcept {
+  if ((event_queue_ != nullptr && uxQueueMessagesWaiting(event_queue_) != 0) ||
+      (bootstrap_queue_ != nullptr && uxQueueMessagesWaiting(bootstrap_queue_) != 0))
+    return now_ms;
+  MonotonicMs due = node_.next_deadline(now_ms);
+  const auto sooner = [&](const MonotonicMs at) {
+    if (at < due) due = at;
+  };
+  // Channel operations, optional sinks and callback-watchdog work retain
+  // their compatibility cadence until they expose every internal timer.
+  portENTER_CRITICAL(&callback_lock_);
+  const bool radio_work = pending_tx_ || raw_tx_count_ != 0 || quarantined_count_ != 0 ||
+                          fenced_outstanding_ || expired_tx_count_ != 0;
+  portEXIT_CRITICAL(&callback_lock_);
+  if (discovery_ != nullptr || migration_ != nullptr || node_.gateway_sink() != nullptr ||
+      node_.config_sink() != nullptr || radio_work) {
+    sooner(now_ms > UINT64_MAX - kOwnerPollPeriodMs ? UINT64_MAX : now_ms + kOwnerPollPeriodMs);
+  }
+  return due;
+}
+
 void EspNowRuntime::notify_owner() noexcept {
-  if (event_queue_ == nullptr) return;
-  Event event{};
-  event.kind = EventKind::Wake;
-  (void)xQueueSend(event_queue_, &event, 0);
+  const TaskHandle_t task = wake_task_.load();
+  if (task != nullptr) xTaskNotifyGive(task);
+}
+
+bool EspNowRuntime::sleep_quiescent() const noexcept {
+  portENTER_CRITICAL(&callback_lock_);
+  const bool quiet = !pending_tx_ && raw_tx_count_ == 0 && lost_tx_count_ == 0 &&
+                     !lost_node_tx_valid_ && !fenced_outstanding_ && expired_tx_count_ == 0;
+  portEXIT_CRITICAL(&callback_lock_);
+  return quiet && (event_queue_ == nullptr || uxQueueMessagesWaiting(event_queue_) == 0) &&
+         (bootstrap_queue_ == nullptr || uxQueueMessagesWaiting(bootstrap_queue_) == 0);
 }
 
 void EspNowRuntime::wait_for_event(const MonotonicMs timeout_ms) noexcept {
-  if (event_queue_ == nullptr) {
-    vTaskDelay(ms_to_ticks_ceil(timeout_ms));
-    return;
-  }
-  // Staged completions bypass the queue: a TX callback that lands on a
-  // full queue while poll_once is draining stages its completion AFTER
-  // the pass's entry check — the queue is empty now but the node's job is
-  // still unresolved. Blocking here would idle until the next tick
-  // (issue #60-3), so re-check the staging slots under the lock for the
-  // shared owner wait below.
+  if (timeout_ms == 0) return;
+  if (wake_task_.load() == nullptr) bind_wake_task(xTaskGetCurrentTaskHandle());
+  // Do not clear before inspecting staging: USB/post/worker queues belong
+  // to the Device. The atomic blocking take consumes their notification
+  // even if it arrived between the Owner pass and this wait.
+  // A notification for work already drained costs at most one empty pass.
   bool staged = false;
   portENTER_CRITICAL(&callback_lock_);
   staged = lost_node_tx_valid_ || lost_tx_count_ != 0;
   portEXIT_CRITICAL(&callback_lock_);
-  // Thin FreeRTOS binding of the shared owner wait (owner_pump.hpp — the
-  // host harness executes the same routine against a fake queue). Peek,
-  // not receive: the event stays queued for poll_once's ordered drain
-  // (reserved slots -> lost completions -> queued events -> node poll).
-  // A TX completion posted while we sleep releases the wait NOW — the
-  // event wins over the periodic tick (issue #60-3). Bootstrap-queue
-  // traffic keeps its old bounded latency via the periodic timeout.
-  struct QueueWait {
-    QueueHandle_t queue;
-    void wait_until_posted(const MonotonicMs wait_ms) noexcept {
-      Event peek{};
-      (void)xQueuePeek(queue, &peek, ms_to_ticks_ceil(wait_ms));
-    }
-  };
-  QueueWait wait{event_queue_};
-  owner_wait_for_event(wait, timeout_ms, staged);
+  staged = staged || (event_queue_ != nullptr && uxQueueMessagesWaiting(event_queue_) != 0) ||
+           (bootstrap_queue_ != nullptr && uxQueueMessagesWaiting(bootstrap_queue_) != 0);
+  if (!staged) (void)ulTaskNotifyTake(pdTRUE, ms_to_ticks_ceil(timeout_ms));
 }
 
 Status EspNowRuntime::send_application(
@@ -1316,6 +1329,11 @@ Status EspNowRuntime::send_application(
 
 Status EspNowRuntime::send_raw(const MacAddress& mac,
                                const ByteView frame) noexcept {
+#if !defined(ESP_PLATFORM) || CONFIG_ROUTELOOM_DEEP_SLEEP
+  if (now_ms() >= radio_until_ms_)
+    return Status::error(StatusCode::DiscoveryBudgetExhausted, "wake radio budget exhausted");
+#endif
+
   if (!espnow_initialized_) {
     return Status::error(StatusCode::InvalidState,
                          "ESP-NOW not initialized");
@@ -1406,7 +1424,10 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
   ++raw_tx_count_;
   portEXIT_CRITICAL(&callback_lock_);
   const esp_err_t error =
-      esp_now_send(mac.bytes.data(), frame.data, frame.size);
+#if !defined(ESP_PLATFORM) || CONFIG_ROUTELOOM_DEEP_SLEEP
+      now_ms() >= radio_until_ms_ ? ESP_ERR_ESPNOW_NO_MEM :
+#endif
+                                  esp_now_send(mac.bytes.data(), frame.data, frame.size);
 #if CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
   if (error == ESP_OK) trace_rld1("tx", frame);
 #endif
@@ -1631,6 +1652,11 @@ Status EspNowRuntime::reply_send_bound(const ReplyBinding binding,
 
 Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
                            const ByteView frame) noexcept {
+#if !defined(ESP_PLATFORM) || CONFIG_ROUTELOOM_DEEP_SLEEP
+  if (now_ms() >= radio_until_ms_)
+    return Status::error(StatusCode::DiscoveryBudgetExhausted, "wake radio budget exhausted");
+#endif
+
   if (channel_runner_.busy()) {
     // A serialized channel operation owns the radio: DATA submissions wait
     // rather than transmit against a stale configuration (04 §8).
@@ -1738,7 +1764,10 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
   // any particular neighbor. Never seed per-peer telemetry with this key.
   if (peer != kBroadcastNodeId) node_.note_tx_submit_identity(token, submit_key);
   const esp_err_t error =
-      esp_now_send(peer_mac.bytes.data(), frame.data, frame.size);
+#if !defined(ESP_PLATFORM) || CONFIG_ROUTELOOM_DEEP_SLEEP
+      now_ms() >= radio_until_ms_ ? ESP_ERR_ESPNOW_NO_MEM :
+#endif
+                                  esp_now_send(peer_mac.bytes.data(), frame.data, frame.size);
 #if CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
   if (error == ESP_OK) {
     wire::Header trace{};
@@ -2682,6 +2711,10 @@ bool EspNowRuntime::classify_bootstrap(const std::uint8_t* data,
 void EspNowRuntime::enqueue_rx(
     const esp_now_recv_info_t* info, const std::uint8_t* data,
     const int length) noexcept {
+  struct WakeOnExit {
+    EspNowRuntime& runtime;
+    ~WakeOnExit() { runtime.notify_owner(); }
+  } wake{*this};
   if (event_queue_ == nullptr || info == nullptr ||
       info->src_addr == nullptr || data == nullptr || length <= 0 ||
       length > static_cast<int>(kMaxEspNowBody)) {
@@ -2801,6 +2834,10 @@ void EspNowRuntime::enqueue_rx(
 void EspNowRuntime::enqueue_tx(
     const esp_now_send_info_t* info,
     const esp_now_send_status_t status) noexcept {
+  struct WakeOnExit {
+    EspNowRuntime& runtime;
+    ~WakeOnExit() { runtime.notify_owner(); }
+  } wake{*this};
   if (event_queue_ == nullptr || info == nullptr ||
       info->des_addr == nullptr) {
     return;

@@ -8,6 +8,9 @@
     {"id": "device_api", "label": "Device C API", "value": 1, "c": "ROUTELOOM_DEVICE_C_API", "rust": "DEVICE_C_API",
      "cpp_check": "RL_DEV_API_VERSION", "cpp_include": "routeloom/device.h",
      "source": "components/routeloom_device/include/routeloom/device.h", "rule": "exact major in every struct header; 1.x adds tail fields and functions only; layouts in protocol/abi-golden"},
+    {"id": "app_object", "label": "AppObject payload", "value": 1, "c": "ROUTELOOM_APP_OBJECT_SCHEMA", "rust": "APP_OBJECT_SCHEMA",
+     "cpp_check": "routeloom::object_wire::kVersion", "cpp_include": "routeloom/app_object_wire.hpp",
+     "source": "components/routeloom/include/routeloom/app_object_wire.hpp", "rule": "optional authenticated unicast; extension types 64-66; 121-byte chunks; 4096-byte limit"},
     {"id": "wire_major", "label": "Mesh wire major", "value": 2, "c": "ROUTELOOM_WIRE_MAJOR", "rust": "WIRE_MAJOR",
      "cpp_check": "routeloom::wire::kMajor", "cpp_include": "routeloom/wire.hpp", "rust_check": "routeloom_wire::MAJOR",
      "source": "components/routeloom/include/routeloom/wire.hpp", "rule": "never changes within SDK 2.x; other majors are rejected"},
@@ -17,9 +20,9 @@
     {"id": "rld1_carrier", "label": "RLD1 carrier", "value": 1, "c": "ROUTELOOM_RLD1_VERSION", "rust": "RLD1_VERSION",
      "cpp_check": "routeloom::autonomy::kRld1Version", "cpp_include": "routeloom/autonomy_wire.hpp",
      "source": "components/routeloom/include/routeloom/autonomy_wire.hpp", "rule": "classified once by magic+version"},
-    {"id": "rld1_zt_body", "label": "RLD1 ZeroTouch body", "value": 3, "c": "ROUTELOOM_RLD1_ZT_BODY", "rust": "RLD1_ZT_BODY",
+    {"id": "rld1_zt_body", "label": "RLD1 ZeroTouch body", "value": 4, "c": "ROUTELOOM_RLD1_ZT_BODY", "rust": "RLD1_ZT_BODY",
      "cpp_check": "routeloom::sdkv1::kZtBodyVersion", "cpp_include": "routeloom/sdkv1_join_transport.hpp",
-     "source": "components/routeloom/include/routeloom/sdkv1_join_transport.hpp", "rule": "unknown body versions are dropped"},
+     "source": "components/routeloom/include/routeloom/sdkv1_join_transport.hpp", "rule": "smart probes use 4; legacy 3 remains readable; other versions are dropped"},
     {"id": "hostlink", "label": "HostLink (RLU1) protocol", "value": 2, "c": "ROUTELOOM_HOSTLINK_PROTOCOL", "rust": "HOSTLINK_PROTOCOL",
      "cpp_check": "routeloom::usb::kProtocolVersion", "cpp_include": "routeloom/usb_codec.hpp", "rust_check": "routeloom_protocol::VERSION",
      "source": "components/routeloom/include/routeloom/usb_codec.hpp", "rule": "strict equality; bound into the HELLO transcript"},
@@ -31,7 +34,7 @@
      "source": "components/routeloom/include/routeloom/usb_host_ops.hpp", "rule": "only subcommands 0x60-0x63 use it"},
     {"id": "authority_envelope", "label": "AuthorityEnvelope", "value": 1, "c": "ROUTELOOM_AUTHORITY_ENVELOPE", "rust": "AUTHORITY_ENVELOPE",
      "cpp_check": "routeloom::keys::kAuthorityEnvelopeVersion", "cpp_include": "routeloom/key_schedule.hpp", "rust_check": "routeloom_keysched::AUTHORITY_ENVELOPE_VERSION",
-     "source": "components/routeloom/include/routeloom/key_schedule.hpp", "rule": "types 1-8 registered; new types are additive"},
+     "source": "components/routeloom/include/routeloom/key_schedule.hpp", "rule": "types 1-9 registered; new types are additive"},
     {"id": "api1_envelope", "label": "API1 envelope", "value": 1, "rust": "API1_ENVELOPE",
      "rust_check": ["crate::api1::API_VERSION", "routeloom_client::api1::API_VERSION"],
      "source": "host/routeloom-host/src/api1.rs", "rule": "methods, fields and error codes are additive"},
@@ -40,6 +43,10 @@
      "source": "host/routeloom-host/src/api1.rs", "rule": "bumped when an existing capability's meaning changes"}
   ],
   "persisted": [
+    {"id": "proxy_policy_format", "label": "Proxy policy record", "value": 2, "c": "ROUTELOOM_STORE_PROXY_POLICY_FORMAT", "rust": "STORE_PROXY_POLICY_FORMAT",
+     "source": "components/routeloom/src/sdkv1_records.cpp", "rule": "format 1 reads without an expected list; format 2 stores the bounded list; others refused"},
+    {"id": "join_policy_format", "label": "Device join policy record", "value": 2, "c": "ROUTELOOM_STORE_JOIN_POLICY_FORMAT", "rust": "STORE_JOIN_POLICY_FORMAT",
+     "source": "components/routeloom/src/sdkv1_records.cpp", "rule": "format 1 reads with legacy defaults; format 2 adds finite smart search; others refused"},
     {"id": "authority_ledger_format", "label": "Authority ledger format", "value": 1, "c": "ROUTELOOM_STORE_AUTHORITY_LEDGER_FORMAT", "rust": "STORE_AUTHORITY_LEDGER_FORMAT",
      "source": "components/routeloom/src/authority.cpp", "rule": "unknown format rejected"},
     {"id": "authority_ledger", "label": "Authority ledger (device)", "value": 1, "c": "ROUTELOOM_STORE_AUTHORITY_LEDGER", "rust": "STORE_AUTHORITY_LEDGER",
@@ -114,7 +121,7 @@
     "esp_idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
     "rust": "1.85.0"
   },
-  "partition_layout": null,
+  "partition_layout": "PT-4M-v2",
   "reason_codes": {
     "width_bits": 16,
     "ranges": [
@@ -128,6 +135,7 @@
     ],
     "codes": [
       {"id": 0, "name": "NONE", "api1": null},
+      {"id": 1, "name": "TOO_LARGE", "api1": "TOO_LARGE"},
       {"id": 256, "name": "QUEUED", "api1": null},
       {"id": 257, "name": "TX_ACCEPTED", "api1": null},
       {"id": 258, "name": "TX_MAC_PENDING", "api1": null},

@@ -16,6 +16,7 @@ import gen_manifest  # noqa: E402
 
 INPUTS = [
     "protocol/manifest.json",
+    "components/routeloom_espnow/include/routeloom/espnow_flash_layout.hpp",
     "docs/reference/radio-defaults.json",
     ".github/workflows/sdk.yml",
     "host/Cargo.toml",
@@ -43,6 +44,16 @@ def copy_inputs(root: Path) -> None:
 
 
 class ManifestDriftTest(unittest.TestCase):
+    def test_partition_layout_drift_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            copy_inputs(root)
+            path = root / "components/routeloom_espnow/include/routeloom/espnow_flash_layout.hpp"
+            path.write_text(path.read_text().replace('"PT-4M-v2"', '"PT-4M-other"'))
+            result = run(root, "--check")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("partition layout differs from the manifest", result.stderr)
+
     def test_component_target_docs_cover_manifest(self) -> None:
         component = (ROOT / "components/routeloom_espnow/idf_component.yml").read_text(encoding="utf-8")
         targets = re.search(r"^targets:\n((?:  - esp32\w+\n)+)", component, re.M)

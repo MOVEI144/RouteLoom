@@ -179,13 +179,25 @@ fn mesh_route_loss_management_loss_then_repair() {
     };
     world.switch.drop_wire_kind(1, 0, WIRE_RESULT, 1);
     world.switch.drop_wire_kind(0, 1, WIRE_RESULT, 1);
+    // Matched hop ACKs also renew leases. Withhold that evidence, and
+    // let both idle Probes leave before either RX refreshes the other timer.
+    world.switch.drop_wire_kind(1, 0, WIRE_HOP_ACCEPT, 32);
+    world.switch.drop_wire_kind(0, 1, WIRE_HOP_ACCEPT, 32);
+    world.switch.delay_ms[1][0] = 1000;
+    world.switch.delay_ms[0][1] = 1000;
     for _ in 0..1000 {
-        if world.switch.wire_dropped == 2 {
+        if world.switch.drop_wire[..2].iter().all(|rule| rule.3 == 0) {
             break;
         }
         world.step(25);
     }
-    assert_eq!(world.switch.wire_dropped, 2, "both Results lost");
+    assert!(
+        world.switch.drop_wire[..2].iter().all(|rule| rule.3 == 0),
+        "both Results lost: {:?}",
+        world.switch.drop_wire
+    );
+    world.switch.delay_ms[1][0] = 0;
+    world.switch.delay_ms[0][1] = 0;
     world.switch.drop_wire_kind(1, 0, WIRE_PROBE, 32);
     world.switch.drop_wire_kind(0, 1, WIRE_PROBE, 32);
     world.pump_until(2400, |snaps| snaps[1].phases[0] == PHASE_STALE);
@@ -201,6 +213,10 @@ fn mesh_route_loss_management_loss_then_repair() {
         world.switch.drop_wire
     );
     assert!(world.switch.wire_dropped >= 4, "Probe losses fired");
+    assert!(
+        world.switch.drop_wire[4..].iter().all(|rule| rule.3 < 32),
+        "both directed Probe losses fired"
+    );
     world.switch.drop_wire.clear();
     world.peers[1].app_send(testkit::GATEWAY, b"route-repair");
     world.pump_until(8000, |snaps| snaps[1].phases[0] == PHASE_REACHABLE);
@@ -220,6 +236,10 @@ fn mesh_route_loss_probe_result_survives_callback_delay() {
         return;
     };
     for delay in [20, 100, 500] {
+        // Keep A's liveness evidence from postponing the gateway's idle
+        // Probe. Restore the leg before sending the DATA overlap sample.
+        world.switch.drop_wire_kind(1, 0, WIRE_HOP_ACCEPT, 32);
+        world.switch.drop_wire_kind(1, 0, WIRE_PROBE, 32);
         world.switch.delay_ms[0][1] = 1000;
         let pending_probe = |world: &MeshWorld| {
             world.delayed.iter().position(|(_, delivery)| {
@@ -237,6 +257,7 @@ fn mesh_route_loss_probe_result_survives_callback_delay() {
             world.step(25);
         }
         let probe_index = pending_probe(&world).expect("real gateway Probe captured in flight");
+        world.switch.drop_wire.clear();
         // Wait for the real DATA callback before delivering the captured
         // Probe. A pending session setup is not a DATA send.
         world.delayed[probe_index].0 = world.now + 30_000;
@@ -248,9 +269,17 @@ fn mesh_route_loss_probe_result_survives_callback_delay() {
         world.switch.callback_delay_kind = Some(WIRE_DATA);
         world.peers[1].app_send(testkit::GATEWAY, b"during-probe");
         let mut overlap = false;
+        let mut result_deadline = world.now;
         for _ in 0..1000 {
             world.step(25);
-            if world.callbacks[1].iter().any(|(at, _)| *at > world.now) {
+            if let Some(&(callback_at, _)) =
+                world.callbacks[1].iter().find(|(at, _)| *at > world.now)
+            {
+                // A parked Result retries at 50 ms; allow two radio ticks
+                // after that retry, before a new Probe can mask its loss.
+                result_deadline = callback_at + 100;
+                world.switch.watch_kind = Some(WIRE_RESULT);
+                world.switch.watched.clear();
                 let index = pending_probe(&world).expect("captured Probe still held");
                 // Inject on the same tick as the pending callback, before
                 // the harness services that callback (including 20 ms).
@@ -265,6 +294,20 @@ fn mesh_route_loss_probe_result_survives_callback_delay() {
         assert!(
             overlap,
             "{delay} ms: Probe RX scheduled with DATA callback pending"
+        );
+        let result_sent = |world: &MeshWorld| {
+            world
+                .switch
+                .watched
+                .iter()
+                .any(|(from, to, _)| *from == 1 && *to == 0)
+        };
+        while world.now < result_deadline && !result_sent(&world) {
+            world.step(25);
+        }
+        assert!(
+            result_sent(&world),
+            "{delay} ms: A's parked Result crossed after the DATA slot freed"
         );
         for _ in 0..1000 {
             world.step(25);
@@ -705,7 +748,13 @@ fn mesh_direct_converges_and_delivers() {
     );
     assert_eq!(world.usb_host.hello_node, Some(testkit::GATEWAY));
     assert_eq!(world.usb_host.hello_network, Some(testkit::network()));
-    assert_eq!(world.usb_host.hello_capability, Some(USB_CAP));
+    assert_eq!(
+        world
+            .usb_host
+            .hello_capability
+            .map(|cap| cap & !routeloom_protocol::host_ops::CAP_APP_OBJECT_V1),
+        Some(USB_CAP)
+    );
     assert_eq!(world.usb_host.session_losses, 0, "USB session held");
     assert!(
         world.usb_host.ups_seen > 0 && world.usb_host.downs_sent > 0,

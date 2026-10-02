@@ -48,7 +48,7 @@ constexpr MonotonicMs kNoDiscover = ~MonotonicMs{0};
 // hint check by construction — so the survivors' own traffic must
 // carry the ahead-generation observations it strikes on.
 constexpr MonotonicMs kMemberAnnounceFirstMs = 1500;
-constexpr MonotonicMs kMemberAnnounceIntervalMs = 2000;
+constexpr MonotonicMs kMemberAnnounceIntervalMs = 5000;
 constexpr MonotonicMs kMemberAnnounceWindowMs = 90000;
 // A rebooted relay can have a live link while its route advert is still
 // converging. Wait for that short repair window before seeking a new peer.
@@ -426,7 +426,8 @@ Status NeighborDiscovery::begin_discovery_filtered(const MonotonicMs now_ms,
     return Status::error(StatusCode::PeerCapacity, "no transient peer slot");
   }
   if (!sweep) {
-    if (start_round_begun_) {
+    // Repair may overlap a handed-off start; keep its bounded sweep alive.
+    if (start_round_begun_ && !sweep_retry_) {
       sweep_armed_ = false;
       sweep_due_ms_ = 0;
     }
@@ -1404,9 +1405,22 @@ void NeighborDiscovery::on_wire_rx(const MacAddress& source, const FrameType typ
           membership_.state() != MembershipState::Member) {
         ++stats_.kind_rejects;
         reject_event("DATA_REJECT", neighbor->node);
+      } else if (type == FrameType::HopAccept) {
+        // Only a matched current-binding round trip reaches this lane.
+        refresh_lease(*neighbor, now_ms, 0);
       }
       break;
   }
+}
+
+void NeighborDiscovery::refresh_lease(Neighbor& neighbor, const MonotonicMs now_ms,
+                                      const std::uint32_t lease_ms) noexcept {
+  neighbor.last_confirmed_ms = now_ms;
+  neighbor.stale_reprobes = 0;
+  neighbor.repair_probes = 0;
+  const std::uint32_t granted = lease_ms == 0 || lease_ms > config_.awake_lease_ms
+                                    ? config_.awake_lease_ms : lease_ms;
+  neighbor.lease_expires_at_ms = now_ms + granted;
 }
 
 void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
@@ -1430,10 +1444,7 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
   }
   if (!older_generation) {
     // A current-generation probe is liveness evidence.
-    neighbor.last_confirmed_ms = now_ms;
-    neighbor.stale_reprobes = 0;
-    neighbor.repair_probes = 0;
-    neighbor.lease_expires_at_ms = now_ms + config_.awake_lease_ms;
+    refresh_lease(neighbor, now_ms, 0);
   }
 
   PendingResult* pending = nullptr;
@@ -1547,13 +1558,7 @@ void NeighborDiscovery::handle_probe_result(Neighbor& neighbor,
       before == NeighborPhase::Reachable) {
     neighbor.phase = NeighborPhase::Reachable;
     neighbor.repair_rediscovery_used = false;
-    neighbor.last_confirmed_ms = now_ms;
-    const std::uint32_t granted = result.lease_granted_ms == 0
-                                      ? config_.awake_lease_ms
-                                      : result.lease_granted_ms;
-    neighbor.lease_expires_at_ms =
-        now_ms + (granted < config_.awake_lease_ms ? granted
-                                                  : config_.awake_lease_ms);
+    refresh_lease(neighbor, now_ms, result.lease_granted_ms);
     if (before != NeighborPhase::Reachable) {
       event("REACHABLE", neighbor.node);
     }
@@ -1693,8 +1698,7 @@ void NeighborDiscovery::elevate_confirmed_peer(const MacAddress& peer_mac,
     if (membership_.state() == MembershipState::Member && peer_member) {
       same->peer_member_verified = true;
       same->phase = NeighborPhase::Bound;
-      same->last_confirmed_ms = now_ms;
-      same->lease_expires_at_ms = now_ms + config_.awake_lease_ms;
+      refresh_lease(*same, now_ms, 0);
       send_probe(*same, now_ms);
     } else {
       same->phase = NeighborPhase::ApprovalPending;
@@ -1955,7 +1959,9 @@ Status NeighborDiscovery::complete_handshake(const std::uint32_t token,
   // Decide once the new binding's first probe has left and the late OFFERs
   // of the last DISCOVER had their chance.
   if (sweep_armed_) {
-    sweep_retry_ = false;
+    // Keep the handed-off requester's retry: another OFFER may have
+    // been lost while it authenticated. A responder completion alone
+    // must not start another round.
     sweep_due_ms_ = std::max(add_sat(now_ms, config_.backoff_min_ms), sweep_window_end_ms_);
   }
   return Status::success();
@@ -2501,7 +2507,10 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
         membership_.state() != MembershipState::Member) {
       announce_next_ms_ = 0;
     } else {
-      announce_next_ms_ = add_sat(now_ms, kMemberAnnounceIntervalMs);
+      // Preserve the initial 20 s convergence cadence before suppression.
+      announce_next_ms_ = add_sat(now_ms,
+          static_cast<std::uint32_t>(announce_until_ms_ - now_ms) > 70000
+              ? 2000 : kMemberAnnounceIntervalMs);
       (void)send_scope_announce(now_ms);
     }
   }
@@ -2658,8 +2667,7 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
             break;
           }
           n.phase = NeighborPhase::Bound;
-          n.lease_expires_at_ms = now_ms + config_.awake_lease_ms;
-          n.last_confirmed_ms = now_ms;
+          refresh_lease(n, now_ms, 0);
           if (!reserve_regular(n)) {
             ++stats_.peer_capacity;
             reject_event("PEER_CAPACITY", n.node);

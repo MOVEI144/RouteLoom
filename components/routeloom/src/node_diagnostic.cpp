@@ -10,7 +10,7 @@ Status MeshNode::send_telemetry_query(const NodeId observer,
                                       const TelemetryQuery& query,
                                       const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   if (!started_) {
     return Status::error(StatusCode::InvalidState, "node not started");
   }
@@ -34,7 +34,7 @@ Status MeshNode::send_observation_query(const NodeId observer,
                                         const RemoteObservationQuery& query,
                                         const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   if (!started_) {
     return Status::error(StatusCode::InvalidState, "node not started");
   }
@@ -59,7 +59,7 @@ Status MeshNode::send_capabilities_query(
     const std::array<std::uint8_t, kCapabilitiesNonceSize>& nonce,
     const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   if (!started_) {
     return Status::error(StatusCode::InvalidState, "node not started");
   }
@@ -154,7 +154,7 @@ Status MeshNode::build_telemetry_snapshot(
     const TelemetryQuery& query, const MonotonicMs now_ms,
     TelemetrySnapshot& out, DiagnosticRejectReason& reject_reason) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   return build_telemetry_snapshot_impl(query, now_ms, out, reject_reason);
 }
 

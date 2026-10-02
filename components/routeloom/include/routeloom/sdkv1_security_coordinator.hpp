@@ -473,6 +473,14 @@ class SecurityCoordinator final : public BootstrapSink,
   // when none stands): the save side resolves the retained link through
   // this. Side-effect-free observation, like snapshot().
   bool first_live_peer(SecurityScope scope, NodeId& peer) const noexcept;
+  // Durable Member identity for sleep pending. Does not expose credentials.
+  bool member_context(NetworkId& network, std::uint32_t& generation) const noexcept {
+    if (mode_ != CoordinatorMode::Member || deps_.site == nullptr || !deps_.site->has_site())
+      return false;
+    network = deps_.site->site().network;
+    generation = deps_.site->site().assignment_generation;
+    return true;
+  }
   // The membership hooks over the adopted stores (dev: over the static
   // dev config plus the shared revocation gates), for the adopted
   // discovery's MembershipHooks port (the firmware initializes the
@@ -551,7 +559,8 @@ class SecurityCoordinator final : public BootstrapSink,
   // The site's durable ProxyPolicySet (RLPP1, #176): applied to the member
   // proxy now when it serves `site_id`, and at every adoption of that
   // site before the proxy starts. Another site's proxy stays open.
-  void set_proxy_policy(std::uint64_t site_id, bool zero_touch_open) noexcept;
+  void set_proxy_policy(std::uint64_t site_id, bool zero_touch_open,
+                        const ExpectedJoinList* expected = nullptr, MonotonicMs now = 0) noexcept;
   // Wipes the member site trust held outside the stores (GK scope,
   // discovery membership) and verifies it is gone. Idempotent: safe to
   // re-assert after traffic already stopped.
@@ -598,6 +607,9 @@ class SecurityCoordinator final : public BootstrapSink,
     if (mode_ != CoordinatorMode::ZeroTouch) return JoinSnapshot{};
     return joiner().snapshot();
   }
+  // Retained membership can resume after an exhausted search; the Device
+  // operation must report that result rather than a new successful join.
+  StatusCode join_search_result() const noexcept { return join_search_result_; }
   Status send_authority_typed(std::uint8_t type, ByteView body, MonotonicMs now) noexcept;
   // Adopted GK epochs for the 0x66 QueryLocal answer (0/0 pre-adoption;
   // false until the member config lands).
@@ -655,7 +667,7 @@ class SecurityCoordinator final : public BootstrapSink,
     bool initiator{false};
     keys::LinkCarrier carrier{};
     std::uint32_t discovery_token{NeighborDiscovery::kMemberHandshakeNone};
-    std::uint32_t quiet_retry_token{0};  // RLRES1 R3 may need three more sends
+    std::uint32_t quiet_retry_token{0};  // completed R3/M4 send leg owner
     // Our transaction nonce (initiator: drawn on first send; responder:
     // echoed from the inbound m1/R1). object_id is its first 4 bytes.
     std::array<std::uint8_t, 16> txn{};
@@ -1025,6 +1037,7 @@ class SecurityCoordinator final : public BootstrapSink,
   SignatureProgress join_signature_{};
   SdkMembershipHooks hooks_;
   NullJoinObserver joiner_observer_{};
+  StatusCode join_search_result_{StatusCode::Ok};
   // The bank stays outside the union: the firmware binds the session
   // provider over it at construction, before any workspace exists. The
   // GK state, the group/pairwise mux, the scope views and the authority
@@ -1092,6 +1105,8 @@ class SecurityCoordinator final : public BootstrapSink,
   bool refresh_active_{false};
   MonotonicMs refresh_start_{0};
   MonotonicMs refresh_cooldown_until_{0};
+  // Armed on retained smart boot; 0 is done, no-deadline waits for adoption.
+  MonotonicMs boot_listen_until_{0};
   MonotonicMs last_authority_start_{0};
   // 04 §3.5: last live-links strike (spacing clock — the live road
   // strikes once per window at most, so one rotation overlap cannot
@@ -1128,6 +1143,9 @@ class SecurityCoordinator final : public BootstrapSink,
   MonotonicMs removal_holdoff_at_{0};
   std::uint64_t removal_watermark_site_id_{0};
   // The site whose stored ProxyPolicySet is closed (0: every proxy open).
+  ExpectedJoinList proxy_expected_{};
+  MonotonicMs proxy_expected_expires_{0};
+  std::uint64_t proxy_expected_site_{0};
   std::uint64_t proxy_closed_site_id_{0};
   std::uint32_t removal_watermark_generation_{0};
   bool cutover_intent_{false};
