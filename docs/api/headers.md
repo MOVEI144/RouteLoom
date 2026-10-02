@@ -8,6 +8,8 @@
 |---|---|
 | `admission.hpp` | [routeloom](../../components/routeloom/include/routeloom/admission.hpp) |
 | `aead_gcm.hpp` | [routeloom](../../components/routeloom/include/routeloom/aead_gcm.hpp) |
+| `app_object.hpp` | [routeloom](../../components/routeloom/include/routeloom/app_object.hpp) |
+| `app_object_wire.hpp` | [routeloom](../../components/routeloom/include/routeloom/app_object_wire.hpp) |
 | `authority.hpp` | [routeloom](../../components/routeloom/include/routeloom/authority.hpp) |
 | `autonomy.hpp` | [routeloom](../../components/routeloom/include/routeloom/autonomy.hpp) |
 | `autonomy_wire.hpp` | [routeloom](../../components/routeloom/include/routeloom/autonomy_wire.hpp) |
@@ -42,6 +44,7 @@
 | `migration_wire.hpp` | [routeloom](../../components/routeloom/include/routeloom/migration_wire.hpp) |
 | `node.hpp` | [routeloom](../../components/routeloom/include/routeloom/node.hpp) |
 | `node_status.hpp` | [routeloom](../../components/routeloom/include/routeloom/node_status.hpp) |
+| `object_assembler.hpp` | [routeloom](../../components/routeloom/include/routeloom/object_assembler.hpp) |
 | `observation.hpp` | [routeloom](../../components/routeloom/include/routeloom/observation.hpp) |
 | `owner_pump.hpp` | [routeloom](../../components/routeloom/include/routeloom/owner_pump.hpp) |
 | `peer_directory.hpp` | [routeloom](../../components/routeloom/include/routeloom/peer_directory.hpp) |

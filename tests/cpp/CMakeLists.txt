@@ -257,6 +257,11 @@ target_link_libraries(routeloom_sdkv1_authority_transport_tests PRIVATE routeloo
 target_compile_options(routeloom_sdkv1_authority_transport_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_authority_transport_tests COMMAND routeloom_sdkv1_authority_transport_tests)
 
+add_executable(routeloom_authority_assembler_tests test_authority_assembler.cpp)
+target_link_libraries(routeloom_authority_assembler_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_authority_assembler_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_authority_assembler_tests COMMAND routeloom_authority_assembler_tests)
+
 # RLRES1 resume state machine and its attack suite (plan P1-5, V1-F02).
 add_executable(routeloom_rlres1_tests test_rlres1.cpp)
 target_link_libraries(routeloom_rlres1_tests PRIVATE routeloom_core)
@@ -897,6 +902,18 @@ add_test(NAME routeloom_edhoc_interop_replay_join COMMAND routeloom_edhoc_intero
 add_test(NAME routeloom_edhoc_interop_replay_member COMMAND routeloom_edhoc_interop_peer --replay
     ${CMAKE_SOURCE_DIR}/protocol/edhoc-interop/method0_member.txt)
 
+if(ROUTELOOM_APP_OBJECT_TRANSFER)
+  add_executable(routeloom_app_object_tests test_app_object.cpp)
+  target_link_libraries(routeloom_app_object_tests PRIVATE routeloom_core)
+  target_compile_options(routeloom_app_object_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  target_compile_definitions(routeloom_app_object_tests PRIVATE
+    ROUTELOOM_OBJECT_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/app-object-golden")
+  add_test(NAME routeloom_app_object_tests COMMAND routeloom_app_object_tests)
+  add_executable(routeloom_app_object_endpoint_tests test_app_object_endpoint.cpp)
+  target_link_libraries(routeloom_app_object_endpoint_tests PRIVATE routeloom_core)
+  target_compile_options(routeloom_app_object_endpoint_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME routeloom_app_object_endpoint_tests COMMAND routeloom_app_object_endpoint_tests)
+endif()
 add_executable(routeloom_periodic_load_tests test_periodic_load.cpp)
 target_link_libraries(routeloom_periodic_load_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_periodic_load_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

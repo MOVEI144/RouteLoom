@@ -34,6 +34,10 @@ set(ROUTELOOM_FUZZ_TARGETS
   sdkv1_join
 )
 
+if(ROUTELOOM_APP_OBJECT_TRANSFER)
+  list(APPEND ROUTELOOM_FUZZ_TARGETS app_object)
+endif()
+
 foreach(target ${ROUTELOOM_FUZZ_TARGETS})
   add_executable(fuzz_${target} fuzz_${target}.cpp)
   target_link_libraries(fuzz_${target} PRIVATE routeloom_core)
@@ -78,3 +82,7 @@ add_test(NAME fuzz_sdkv1_ead_mutation
 add_test(NAME fuzz_sdkv1_join_mutation
          COMMAND fuzz_sdkv1_join ${CMAKE_CURRENT_SOURCE_DIR}/corpus/sdkv1_join
                  -runs=20000 -seed=17)
+
+if(ROUTELOOM_APP_OBJECT_TRANSFER)
+  add_test(NAME fuzz_app_object_mutation COMMAND fuzz_app_object ${CMAKE_CURRENT_SOURCE_DIR}/corpus/app_object -runs=20000 -seed=19)
+endif()

@@ -71,6 +71,7 @@ pub struct RxRecord {
     /// legacy UNKNOWN/unverified assurance (unnegotiated session, group
     /// delivery, or a gateway without the bit).
     pub assurance: Option<RxAssurance>,
+    pub object: Option<(u16, u8)>,
 }
 
 /// Fields a USB-session-verified DataFromMesh body contributes to the log.
@@ -160,11 +161,13 @@ struct NetworkLog {
     /// MessageKey -> retained record for the 60s duplicate window.
     dedup: HashMap<MessageKey, DedupEntry>,
     bytes: usize,
+    charge: usize,
 }
 
 impl NetworkLog {
-    fn new() -> Self {
+    fn new(charge: usize) -> Self {
         Self {
+            charge,
             records: VecDeque::new(),
             evicted_through: 0,
             next_seq: 1,
@@ -189,7 +192,7 @@ impl NetworkLog {
             }
             let record = self.records.pop_front().expect("front exists");
             self.evicted_through = record.seq;
-            self.bytes = self.bytes.saturating_sub(RECORD_CHARGE_BYTES);
+            self.bytes = self.bytes.saturating_sub(self.charge);
             self.dedup.retain(|_, e| e.seq != record.seq);
         }
     }
@@ -197,7 +200,7 @@ impl NetworkLog {
     fn evict_oldest(&mut self) {
         if let Some(record) = self.records.pop_front() {
             self.evicted_through = record.seq;
-            self.bytes = self.bytes.saturating_sub(RECORD_CHARGE_BYTES);
+            self.bytes = self.bytes.saturating_sub(self.charge);
             self.dedup.retain(|_, e| e.seq != record.seq);
         }
     }
@@ -225,6 +228,8 @@ pub struct ReceiveLog {
     epoch: [u8; 16],
     networks: HashMap<u64, NetworkLog>,
     total_bytes: usize,
+    payload_max: usize,
+    record_charge: usize,
 }
 
 impl Default for ReceiveLog {
@@ -241,16 +246,43 @@ impl ReceiveLog {
             epoch,
             networks: HashMap::new(),
             total_bytes: 0,
+            payload_max: NORMAL_PAYLOAD_MAX,
+            record_charge: RECORD_CHARGE_BYTES,
         }
     }
 
+    pub fn objects(mut epoch: [u8; 16]) -> Self {
+        epoch[0] ^= 0x80;
+        Self {
+            payload_max: 4096,
+            record_charge: 4352,
+            ..Self::new(epoch)
+        }
+    }
+    pub fn ingest_object(
+        &mut self,
+        ingress: Ingress,
+        tag: u16,
+        encoding: u8,
+        now_ms: u64,
+    ) -> IngestOutcome {
+        self.ingest_inner(ingress, now_ms, Some((tag, encoding)))
+    }
     pub fn epoch(&self) -> [u8; 16] {
         self.epoch
     }
 
     /// Feed one verified DataFromMesh body into the log.
     pub fn ingest(&mut self, ingress: Ingress, now_ms: u64) -> IngestOutcome {
-        if ingress.payload.len() > NORMAL_PAYLOAD_MAX {
+        self.ingest_inner(ingress, now_ms, None)
+    }
+    fn ingest_inner(
+        &mut self,
+        ingress: Ingress,
+        now_ms: u64,
+        object: Option<(u16, u8)>,
+    ) -> IngestOutcome {
+        if ingress.payload.len() > self.payload_max {
             return IngestOutcome::RejectedOversize;
         }
         self.expire_all(now_ms);
@@ -260,7 +292,7 @@ impl ReceiveLog {
         let log = self
             .networks
             .entry(ingress.network)
-            .or_insert_with(NetworkLog::new);
+            .or_insert_with(|| NetworkLog::new(self.record_charge));
         let key: MessageKey = (ingress.origin, ingress.msg_session, ingress.msg_seq);
         // 60s dedup window: identical re-observation folds into the existing
         // record; a differing body under the same key is a conflict and the
@@ -291,7 +323,7 @@ impl ReceiveLog {
                 // Dedup compares the payload only: a redelivery of the
                 // same bytes carries the same verdict, so the fold keeps
                 // the first record's assurance untouched.
-                return if record.payload == ingress.payload {
+                return if record.payload == ingress.payload && record.object == object {
                     IngestOutcome::Duplicate { seq: existing_seq }
                 } else {
                     IngestOutcome::Conflict { existing_seq }
@@ -312,9 +344,10 @@ impl ReceiveLog {
             payload: ingress.payload,
             stored_ms: now_ms,
             assurance: ingress.assurance,
+            object,
         });
-        log.bytes += RECORD_CHARGE_BYTES;
-        self.total_bytes += RECORD_CHARGE_BYTES;
+        log.bytes += self.record_charge;
+        self.total_bytes += self.record_charge;
         // Trim BEFORE inserting: when the index is full and several
         // entries share the oldest timestamp, an insert-then-trim order
         // could evict the just-inserted entry itself.
@@ -323,7 +356,7 @@ impl ReceiveLog {
         // First-hit limits reclaim from the front, keeping evicted_through.
         while log.records.len() > ENTRIES_PER_NETWORK || log.bytes > BYTES_PER_NETWORK {
             log.evict_oldest();
-            self.total_bytes = self.total_bytes.saturating_sub(RECORD_CHARGE_BYTES);
+            self.total_bytes = self.total_bytes.saturating_sub(self.record_charge);
         }
         // Global cap: reclaim the globally-oldest record across networks.
         while self.total_bytes > GLOBAL_LOG_BYTES {
@@ -338,7 +371,7 @@ impl ReceiveLog {
                     if let Some(log) = self.networks.get_mut(&network) {
                         log.evict_oldest();
                     }
-                    self.total_bytes = self.total_bytes.saturating_sub(RECORD_CHARGE_BYTES);
+                    self.total_bytes = self.total_bytes.saturating_sub(self.record_charge);
                 }
                 None => break,
             }
@@ -479,7 +512,17 @@ fn b64url_encode(bytes: &[u8]) -> String {
     out
 }
 
+pub(crate) fn base64_encode(data: &[u8]) -> String {
+    let mut text = b64url_encode(data).replace('-', "+").replace('_', "/");
+    while text.len() % 4 != 0 {
+        text.push('=');
+    }
+    text
+}
 fn b64url_decode(text: &str) -> Option<Vec<u8>> {
+    b64url_decode_limit(text, CURSOR_MAX_DECODED_BYTES)
+}
+pub(crate) fn b64url_decode_limit(text: &str, limit: usize) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() * 3 / 4 + 3);
     let mut acc: u32 = 0;
     let mut bits: u32 = 0;
@@ -497,7 +540,7 @@ fn b64url_decode(text: &str) -> Option<Vec<u8>> {
         if bits >= 8 {
             bits -= 8;
             out.push((acc >> bits) as u8);
-            if out.len() > CURSOR_MAX_DECODED_BYTES {
+            if out.len() > limit {
                 return None;
             }
         }

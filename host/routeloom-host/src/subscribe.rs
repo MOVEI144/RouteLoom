@@ -122,6 +122,7 @@ pub enum CapacityDeny {
 /// Per-network message subscription filter (05 §5.3.1).
 #[derive(Clone, Debug)]
 pub struct MsgFilter {
+    pub objects: bool,
     pub network: u64,
     pub origins: Option<Vec<u64>>,
     pub gateways: Option<Vec<u64>>,
@@ -373,6 +374,7 @@ pub struct SubStats {
 pub struct SubListEntry {
     pub id: u64,
     pub is_events: bool,
+    pub objects: bool,
     pub network: Option<u64>,
     pub payloads: bool,
     /// messages: last_scanned; events: next-to-deliver seq.
@@ -584,6 +586,7 @@ impl SubscriptionHub {
                     .map(|sub| SubListEntry {
                         id: sub.id,
                         is_events: matches!(sub.kind, SubKind::Events(_)),
+                        objects: matches!(&sub.kind, SubKind::Messages(f) if f.objects),
                         network: match &sub.kind {
                             SubKind::Messages(f) => Some(f.network),
                             SubKind::Events(_) => None,
@@ -906,6 +909,15 @@ fn pump_pass(
     let mut worked = false;
     let mut fatal = false;
     for snap in &snaps {
+        let object_epoch = state
+            .object_log
+            .lock()
+            .map(|log| log.epoch())
+            .unwrap_or(*epoch);
+        let epoch = match &snap.kind {
+            SubKind::Messages(filter) if filter.objects => &object_epoch,
+            _ => epoch,
+        };
         let marker = marker_for(state, snap, epoch, acl_rev, now);
         let (work, progressed) = match &snap.kind {
             SubKind::Messages(filter) => produce_messages(state, snap, filter, epoch, acl_rev, now),
@@ -1041,7 +1053,14 @@ fn produce_messages(
     let mut position = snap.position;
     let mut tail_seq = None;
     {
-        let mut log = state.receive_log.lock().expect("receive log poisoned");
+        let source = if filter.objects {
+            &state.object_log
+        } else {
+            &state.receive_log
+        };
+        let mut log = source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A Gap is a position jump, not a failure: emit the marker, move
         // to the reclaim boundary, then read once more into the page.
         for _ in 0..2 {
@@ -1057,10 +1076,17 @@ fn produce_messages(
                         }
                         progressed = true;
                         let (kind, record_body) = if filter.payloads {
-                            ("message", record_json(record, &cursor_at(record.seq)))
+                            (
+                                if filter.objects { "object" } else { "message" },
+                                record_json(record, &cursor_at(record.seq)),
+                            )
                         } else {
                             (
-                                "message_meta",
+                                if filter.objects {
+                                    "object_meta"
+                                } else {
+                                    "message_meta"
+                                },
                                 record_meta_json(record, &cursor_at(record.seq)),
                             )
                         };
@@ -1191,6 +1217,7 @@ mod tests {
 
     fn msg_sub(network: u64) -> SubKind {
         SubKind::Messages(MsgFilter {
+            objects: false,
             network,
             origins: None,
             gateways: None,

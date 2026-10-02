@@ -117,6 +117,8 @@ constexpr std::uint32_t kCapRxAssuranceV1 = 1u << 12;
 // authority (attach_channel_plan); bound into the Hello transcript.
 constexpr std::uint32_t kCapChannelPlanV1 = 1u << 13;
 
+constexpr std::uint32_t kCapAppObjectV1 = 1u << 14;
+
 constexpr std::uint8_t kHostOpsSchema = 1;
 // The join relay family's own inner schema (#116 §5.2): only 0x60-0x63
 // speak it; every other family stays on schema 1.
@@ -125,6 +127,13 @@ constexpr std::uint8_t kJoinRelaySchema = 2;
 // 03-send-api.md §6 (0x01-0x05) and scope-gateway-config/05-wire-api.md
 // §5.6 (0x10-0x13, 0x20-0x23): registered once, never renumbered locally.
 enum class HostOpsSub : std::uint8_t {
+  ObjectBegin = 0x80,  // token u32, node u64, deadline u32, tag u16, encoding u8, total u16
+  ObjectChunk = 0x81,  // token u32, offset u16, length u16, <=512 bytes
+  ObjectEnd = 0x82,    // token u32: explicitly send the staged object
+  ObjectCancel = 0x83, // token u32
+  ObjectStatus = 0x84, // reply: token u32, phase u8, status u16, object id u32
+  ObjectGet = 0x85,    // token u32
+  ObjectIngress = 0x86, // G->H fragments: metadata, digest, <=512 bytes
   Submit = 0x01,
   QueryDispatch = 0x02,
   RetireThrough = 0x03,

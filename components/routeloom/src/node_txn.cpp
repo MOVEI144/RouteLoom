@@ -226,7 +226,13 @@ void MeshNode::publish_component_event(
     slot.event.peer = peer;
     slot.event.txn = txn;
     slot.event.deadline_ms = deadline_ms;
-    if (frame != nullptr) slot.event.frame = *frame;
+    if (frame != nullptr) {
+      slot.event.frame = *frame;
+      // Terminal components inherit the budget after time in the driver queue.
+      const auto remaining = frame->header.remaining_deadline_ms;
+      slot.event.frame.header.remaining_deadline_ms =
+          remaining > rx_age_ms_ ? remaining - rx_age_ms_ : 0;
+    }
     if (job_id != nullptr) slot.event.job_id = *job_id;
     slot.event.job_accepted = job_accepted;
     slot.event.job_reason = job_reason;

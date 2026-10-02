@@ -31,6 +31,7 @@
 
 #include "routeloom/autonomy_wire.hpp"
 #include "routeloom/config.hpp"
+#include "routeloom/object_assembler.hpp"
 #include "routeloom/endpoint_wire.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/security_floor.hpp"
@@ -182,7 +183,7 @@ class ConfigTarget final : public ConfigEndpointSink {
     ConfigJournal* journal{nullptr};  // owner for kind 3/4; null for kind 5
     autonomy::ObjectHash hash{};
     std::uint16_t total_len{0};
-    std::uint16_t received{0};
+    ObjectAssembler assembler{};
     MonotonicMs started_ms{0};
     std::array<std::uint8_t, kConfigTrustObjectMax> buffer{};
     std::array<std::uint8_t, kConfigTrustObjectMax / 8> bitmap{};

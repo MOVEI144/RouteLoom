@@ -76,6 +76,12 @@ python3 tools/firmware_ram_report.py build/size.json --target <target> --app <ap
 ```
 
 - 続く`check.py size --cell <id>`はcellごとの予算（`cells.json`の`budget`：app.binの上限、上のguardと同じ主SRAMの静的空きの下限、RTC／LP SRAM使用量の上限。初期値は2026-09-28の`main`のCI artifactの実測）と、ELFに残ってはいけないsymbolの正規表現（`symbols_absent`）を検査する。bin・ELF・map・`ram-report.json`のどれかが無いcellは失敗する。予算を上げるPRは理由を書く。
+- V2-19の共通再組立とopaque AppObjectの実dispatch pacingにより、既存flashのsoft予算を超えた8 cell（bench S3 normal／deep_sleep、bench C3／C5 deep_sleep、bench C6 normal、reference C3 config_target／config_member、endpoint_cpp C3）はv6.0.3実測のapp.binに更新した。drift許容値、静的RAM／RTC予算、上記hard floorは変更しない。pacingの時計追加は既存のprivate fieldのpadding整理で相殺する。
+- AppObject ONのC3 bridgeはOFF比で静的RAM＋10,416 B（229,468−219,052 B）。peer floorの保持件数・64 bit ID・boot・contextを維持してpaddingを減らし、従来のONから296 B削減したが、5 KiB目標は未達。内訳にはUSB upload／egress共用arenaと常時登録mesh RXの各4096 Bが含まれる。両方を重ねるには、immutable TX loan、受信後の消去、USB egress完了までの保持を一つの受付・解放経路で管理する変更が別途必要で、領域をstack／heapへ移すだけでは達成にならない。
+- AuthorityEndpointは共有ObjectAssemblerへ移行済み。private fieldのpadding整理でhostのsizeofは4496→4504 Bとなり、既存4512 B guardを維持する。共有assembler導入時のC3静的RAMはOFFで219,060 B、ONで229,468 B。共有コードのlinkによりC3 OFFのapp.binは1,218,496→1,219,456 Bとなり、bridge通常OFFのC3／S3／C5のflash soft予算を実測値へ更新した（S3は1,215,008 B、C5は1,381,920 B）。C3 ONは1,230,672→1,230,560 B。drift許容幅、RAM／RTC予算、hard floorは変更しない。
+- AppObject OFFでは内部Device／C observerの継承とcallbackも除去する。v6.0.3のC3 bridge実測でOFFのapp.binは1,219,456→1,219,376 B、静的RAMは219,060→219,052 B。新しいsource bootで旧受信を退役させる修正によりONのapp.binは1,230,560→1,230,576 B、静的RAMは229,468 Bで変化しない。OFFのELFで内部object callbackの不在を検査し、公開APIのUnsupported入口は維持する。
+- 共有authority再組立を未linkだった構成では、追加の共通コードにより残るflash drift幅を超過した。v6.0.3の全57 cellでbuild／symbol／RAM guardを検査し、上記3 cellを含む38 cellのflash soft基準だけを実測値へ校正した。通常／debug／Member／example／component-only consumerの既定値や容量は変更しない。
+- ESP-IDF v6.0.3のC5 bridgeは既定gateway profile＋ONで静的空き7,675 Bとなり8,192 B guardを満たさない。ONでは既存の`CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL=y`を明示して使う（RX上限2は維持、静的空き17,467 B）。通常profileの既定値やguardは変えない。
 - `size.json`はESP-IDF v6.0が使うesp-idf-size 2.xのjson2要約（`layout[]`の各memory typeに`name/total/used/free/parts`）。toolはraw形式（`memory_types`）も読み、`free`が無ければ`total − used`で求める。**静的データを持つ内部RAMのmemory typeが見つからない報告はエラー**（exit 2）で、入力を読めずにpassすることはない。
 - 内部RAMの各memory type（flash・外部RAMを除く）のused／total／freeと大きいsectionをjob summaryへ書き、`ram-report.json`と`size.json`をfirmware artifactに入れる。
 - guardの対象は`.bss`／`.data`を持つ主SRAM（C3は`DRAM`、S3は`DIRAM`、C5は`HP SRAM`）の`free`。IRAMのcodeも同じ領域に入るので、これはlink時の`dram0_0_seg`超過までの残りそのものである。RTC／LP SRAMはesp-idf-sizeが`.rtc.data`（`RTC_DATA_ATTR`）も`.data`と略すが、表に出すだけでguardの対象にしない（deep-sleep cellのRTC SLOWは8 KB全体でも閾値に届かない）。
@@ -140,3 +146,34 @@ firmwareの既定：reference_node・bench_nodeはrelay、exampleはendpoint、b
 - 表の「推定残量」は実測ではない。imageの値はCIの`ram-report.json`で確かめる。
 - 実行時のheap最小値・最大block・task stackの余裕は測っていない（HILの受入項目のまま）。
 - `docs/reference/resource-profiles.json`は設計上の上限（sizeofではない）で、dedupの割当は1件152 Bの許容のまま残した（実際の136 Bを上回るので条件を満たす）。
+
+### V2-19: integration review footprint (ESP-IDF v6.0.3)
+
+Measured against `61af1d0c` (current main integrated), with the same C3 bridge
+cell and defaults. Flash is the app binary; static RAM is `.bss + .data`.
+No RAM floor, RTC budget or drift allowance changes.
+
+| C3 bridge | app.bin before → after | static RAM before → after | static free after |
+|---|---:|---:|---:|
+| OFF | 1,220,464 → 1,220,800 B (+336 B) | 219,052 → 219,052 B (0 B) | 52,896 B |
+| ON | 1,231,648 → 1,231,968 B (+320 B) | 229,468 → 229,388 B (−80 B) | 42,560 B |
+
+ON adds 10,336 B of static RAM over OFF, 5,216 B above the 5 KiB target.
+The receiver now uses its reserved completion record for identity and manifest
+metadata, and its assembler for deadline/completion state. RX capacity, all
+source floors and four protected completion records are retained. The two
+4,096 B arenas remain: mesh RX is cleared after its callback, while USB egress
+must retain a verified copy until HostLink credit permits sending; upload TX
+also holds an immutable loan until its result. Sharing them would require an
+explicit loan/return contract across those lifetimes. Neither heap/stack
+relocation nor shortened dedup retention is used to meet the target.
+
+The flash increase makes AppObject yield to ready foreground flows,
+including at OFF relays. The real-Owner two-hop comparison measures Reliable
+p99 at 200 → 200 ms for PR and 200 → 225 ms (+12.5%) for ten nightly objects,
+with no control timeout or End failure increase;
+these are host-harness measurements, not RF qualification. H3 remains separate.
+
+The C6 reference ON cell measures app.bin 1,255,440 B, static free 156,253 B
+and RTC 136 B after main integration. Its flash soft baseline is updated from
+1,252,784 B to that measured value; RAM/RTC budgets and drift are unchanged.

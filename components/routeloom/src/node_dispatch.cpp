@@ -96,6 +96,20 @@ void MeshNode::emit_busy_or_drop(const NodeId peer, const wire::Header& rejected
 }
 
 Status MeshNode::encode_job(TxJob& job, const MonotonicMs now_ms) noexcept {
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  if (job.owner == JobOwner::AppObject) {
+    const auto& header = job.form == JobForm::Plain ? job.plain.header : job.forwarded.header;
+    std::uint32_t epoch = 0;
+    // Object jobs belong to the boot and End context admitted at enqueue;
+    // session repair must not seal an old operation under a new context.
+    if (header.network != config_.network || header.origin != config_.node ||
+        header.message.session != config_.message_session ||
+        !security_.tx_epoch(SecurityScope::EndToEnd, header.destination, epoch) ||
+        epoch != header.end_epoch) {
+      return Status::error(StatusCode::Expired, "OBJECT_CONTEXT_RETIRED");
+    }
+  }
+#endif
   // tx_encoded_ still holds this job's sealed frame (the driver refused it
   // and nothing else was sealed since): hand the same bytes over again.
   if (job.encoded_tag != 0 && job.encoded_tag == tx_encoded_tag_) return Status::success();
@@ -439,6 +453,23 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       retry_or_fail(submitted, status.detail, now_ms);
       continue;
     }
+    const auto& submitted_header = submitted.form == JobForm::Plain ? submitted.plain.header : submitted.forwarded.header;
+    if (submitted_header.type == FrameType::AppObjectStart ||
+        submitted_header.type == FrameType::AppObjectChunk || submitted_header.type == FrameType::AppObjectAck) {
+      // 50,000 us/s with one frame of burst. Charge each physical attempt
+      // using encoded length and fixed PHY cost, independently of service time.
+      const auto cost_us = (tx_encoded_.size + kTxFrameFixedCostBytes) * 32;
+      object_send_after_ms_ = now_ms + (cost_us + 49) / 50;
+    } else if ((submitted_header.type == FrameType::Data ||
+                submitted_header.type == FrameType::Service ||
+                submitted_header.type == FrameType::EndReceipt ||
+                submitted_header.type == FrameType::AppResult) &&
+               (submitted_header.traffic & wire::kTrafficPriorityMask) != wire::kTrafficBulk) {
+      // Leave the following airtime turn for the foreground exchange's
+      // forwarded data and receipt, which may not be queued here yet.
+      const auto cost_us = (tx_encoded_.size + kTxFrameFixedCostBytes) * 32;
+      object_send_after_ms_ = std::max(object_send_after_ms_, now_ms + (cost_us + 49) / 50);
+    }
     ++submitted.physical_attempts;
     obs_tx_submitted(submitted, token, now_ms);
     physical_.job = std::move(submitted);
@@ -596,7 +627,7 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
     }
     return;
   }
-  if (job.owner == JobOwner::Config) {
+  if (job.owner == JobOwner::Config || job.owner == JobOwner::AppObject) {
     if (component_jobs_outstanding_ > 0) --component_jobs_outstanding_;
     if (config_sink_ != nullptr) {
       if (component_event_available()) {
@@ -676,7 +707,7 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
     }
     return;
   }
-  if (job.owner == JobOwner::Config) {
+  if (job.owner == JobOwner::Config || job.owner == JobOwner::AppObject) {
     if (component_jobs_outstanding_ > 0) --component_jobs_outstanding_;
     if (config_sink_ != nullptr) {
       if (component_event_available()) {
