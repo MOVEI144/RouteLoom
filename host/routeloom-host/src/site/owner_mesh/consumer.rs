@@ -175,28 +175,22 @@ fn devram_world(tag: &str, switch: Switch) -> MeshWorld {
     world
 }
 
-/// The receive log attributes a Member record to the authenticated full
-/// network; the current API1 parser rejects its high word before reading it.
 #[test]
-#[ignore = "Member full network is rejected by API1; tracked as K05-M in scenarios.json"]
 fn mesh_k05_member_full_network_consumer() {
     let mut world =
         MeshWorld::start("k05-member", Switch::direct()).expect("K05-M requires real Owner peers");
     converge(&mut world, "k05-member");
     let network = world.usb_host.hello_network.unwrap();
     assert!(network > u64::from(u32::MAX));
-    let endpoint = ConsumerEndpoint::start(&world.provision.site.dir, network);
-    world.usb_host.receive_state = Some(Arc::clone(&endpoint.state));
-    world.peers[1].app_send(testkit::GATEWAY, b"member-st");
-    world.pump_until(800, |_| false);
-    let reply = endpoint.read(network, None);
-    next_cursor(&reply);
-    assert_eq!(records(&reply), 1);
+    documented_consumer(world);
 }
 
 #[test]
 fn mesh_p06_k05_documented_consumer_commits_and_resumes() {
-    let mut world = devram_world("p06-k05", Switch::direct());
+    documented_consumer(devram_world("p06-k05", Switch::direct()));
+}
+
+fn documented_consumer(mut world: MeshWorld) {
     let network = world.usb_host.hello_network.unwrap();
     let endpoint = ConsumerEndpoint::start(&world.provision.site.dir, network);
     world.usb_host.receive_state = Some(Arc::clone(&endpoint.state));
@@ -243,6 +237,7 @@ fn mesh_p06_k05_documented_consumer_commits_and_resumes() {
     let failed = endpoint.run_example(network, &db, Some(&cursor_before_save));
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stdout).contains("CURSOR_GAP"));
+    assert_eq!(db_position(&db), committed);
     drop(endpoint);
     world.daemon_restart();
     let restarted = ConsumerEndpoint::start(&world.provision.site.dir, network);

@@ -24,6 +24,11 @@ def check() -> None:
         validators['response'].validate(case['response'])
         if case['request']['method'] == 'messages.read' and case['response']['ok']:
             validators['read-result'].validate(case['response']['result'])
+            for record in case['response']['result']['records']:
+                if record['payload_len'] != len(bytes.fromhex(record['payload_hex'])):
+                    raise ValueError(f'{path}: payload length mismatch')
+                if record['network'] != case['request']['params']['network'].lower():
+                    raise ValueError(f'{path}: record network mismatch')
         if case['request']['request_id'] != case['response']['request_id']:
             raise ValueError(f'{path}: request_id mismatch')
     print(f'API1 schemas and {len(fixtures)} fixtures valid')

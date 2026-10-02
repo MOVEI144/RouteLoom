@@ -8,7 +8,7 @@
 {"principals":{"1000":{"networks":{"00000000524c0001":["READ_PAYLOAD","READ_OPERATION"]}}}}
 ```
 
-network は利用する network に置き換える。messages.read は現在 low 32-bit range のみ受理し、Member の epoch を含む full network の受信は未対応（[API1 制約](../api/api1.md)参照）。送信には SEND、所属の観測／判断／管理は MEMBERSHIP_READ／MEMBERSHIP_DECIDE／MEMBERSHIP_ADMIN を用途ごとに足す。socket は 0600、親 directory は service user のみが使えるようにする。[host §4](../spec/host.md)が認可の正本。
+network は利用する network に置き換える。Member の受信では epoch を含む full 64-bit network を ACL と読取り引数の両方に指定する（[API1 scope](../api/api1.md)参照）。送信には SEND、所属の観測／判断／管理は MEMBERSHIP_READ／MEMBERSHIP_DECIDE／MEMBERSHIP_ADMIN を用途ごとに足す。socket は 0600、親 directory は service user のみが使えるようにする。[host §4](../spec/host.md)が認可の正本。
 
 systemd の例。パス・ユーザー・device を利用環境に合わせ、service 起動前に credentials と directory の owner/mode を確認する。daemon は接続断後に再接続する。
 

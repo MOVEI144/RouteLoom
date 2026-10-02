@@ -10,15 +10,37 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def unique_object(pairs: list[tuple]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate key')
+        result[key] = value
+    return result
+
+
+def invalid_constant(value: str) -> None:
+    raise ValueError('non-RFC JSON number')
+
+
+def check_depth(value, depth: int = 0) -> None:
+    if isinstance(value, (dict, list)):
+        if depth >= 8:
+            raise ValueError('JSON depth exceeds 8')
+        for child in value.values() if isinstance(value, dict) else value:
+            check_depth(child, depth + 1)
+
+
 def response(line: bytes, cases: list[dict]) -> dict:
     request_id = None
     try:
         if len(line) > 8192 or not line.endswith(b'\n') or not line.startswith(b'API1 '):
             raise ValueError('invalid line')
-        req = json.loads(line[5:])
+        req = json.loads(line[5:].decode('utf-8'), object_pairs_hook=unique_object, parse_constant=invalid_constant)
+        check_depth(req)
         request_id = req.get('request_id')
         if (set(req) - {'v', 'request_id', 'method', 'params'}
-                or req.get('v') != 1 or not isinstance(request_id, str)
+                or type(req.get('v')) is not int or req.get('v') != 1 or not isinstance(request_id, str)
                 or not 1 <= len(request_id) <= 64
                 or any(not 32 <= ord(c) <= 126 for c in request_id)
                 or not isinstance(req.get('method'), str)
@@ -32,7 +54,7 @@ def response(line: bytes, cases: list[dict]) -> dict:
                 result['request_id'] = request_id
                 return result
         code = 'UNSUPPORTED_METHOD'
-    except (ValueError, UnicodeError, AttributeError):
+    except (ValueError, UnicodeError, AttributeError, RecursionError):
         code = 'INVALID_REQUEST'
     return {'v': 1, 'request_id': request_id, 'ok': False,
             'error': {'code': code, 'detail': {'message': 'mock fixture unavailable'}, 'retryable': False}}

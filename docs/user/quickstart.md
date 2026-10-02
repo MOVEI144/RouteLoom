@@ -80,4 +80,4 @@ cargo +1.85.0 build --release --locked
 
 paths と UID は実環境に合わせる。socket の親 directory は先に作る。ACL は[運用](operations.md)を参照。`capabilities.get`、`link.get`、`nodes.list` で実際の接続と capability を確認する。Member の鍵・署名・epoch は daemon が判断し、アプリで複製しない。
 
-Member の API1 payload read は現在 full network の引数検査で拒否される（[K05-M の制約](../api/api1.md)）。参加や Site Authority の管理 API と区別する。上の consumer smoke は DevRam を使う。5 台／3-hop は Member の参加収束に失敗し、DevRam でも負荷前の warm-up 配送が期限切れになる未合格項目（K01-D）。直接構成の表示板負荷の成功を Member の資格へ流用しない。
+Member の API1 payload read は epoch を含む full network と対応する ACL を使う（[network の scope](../api/api1.md)）。上の consumer smoke は DevRam と Member の両方を使う。5 台／3-hop は Member の参加収束に失敗し、DevRam でも負荷前の warm-up 配送が期限切れになる未合格項目（K01-D）。直接構成の表示板負荷の成功を Member の資格へ流用しない。

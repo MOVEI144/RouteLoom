@@ -78,7 +78,7 @@
       "properties": {
         "network": {
           "type": "string",
-          "pattern": "^00000000[0-9a-fA-F]{8}$",
+          "pattern": "^[0-9a-fA-F]{8}(?!00000000)[0-9a-fA-F]{8}$",
           "not": {
             "const": "0000000000000000"
           }

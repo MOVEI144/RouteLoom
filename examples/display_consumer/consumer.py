@@ -39,7 +39,7 @@ def save_batch(db: sqlite3.Connection, network: str, result: dict) -> None:
 
 def poll(path: Path, network: str, cursor: str | None) -> dict:
     params = {'network': network, 'limit': 32}
-    params.update({'cursor': cursor} if cursor else {'from': 'earliest'})
+    params.update({'cursor': cursor} if cursor is not None else {'from': 'earliest'})
     request = {'v': 1, 'request_id': 'display-read', 'method': 'messages.read', 'params': params}
     with socket.socket(socket.AF_UNIX) as conn:
         conn.settimeout(5)
@@ -72,14 +72,12 @@ def main() -> int:
     db = None
     try:
         db = open_db(args.db)
-        if args.resume_cursor is not None:
-            with db:
-                db.execute('INSERT INTO cursors VALUES (?,?) ON CONFLICT(network) DO UPDATE SET cursor=excluded.cursor',
-                           (network, args.resume_cursor))
+        resume = args.resume_cursor
         while True:
             row = db.execute('SELECT cursor FROM cursors WHERE network=?', (network,)).fetchone()
-            result = poll(args.socket, network, row[0] if row else None)
+            result = poll(args.socket, network, resume if resume is not None else row[0] if row else None)
             save_batch(db, network, result)
+            resume = None
             print(f"saved {len(result['records'])} records", flush=True)
             if args.once:
                 return 0

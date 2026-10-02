@@ -6,7 +6,7 @@ API1 は local IPC の行 protocol。daemon へ `API1 ` + UTF-8 JSON + LF を送
 |---|---|
 | [request.schema.json](../../protocol/api1/request.schema.json) | envelope、capabilities/capacity の無引数、messages.read 引数。他 method の params は [host 正本](../spec/host.md)参照 |
 | [response.schema.json](../../protocol/api1/response.schema.json) | success/error envelope。追加 field を許容 |
-| [read-result.schema.json](../../protocol/api1/read-result.schema.json) | 受信 record、cursor、保持量。payload_len と hex の一致は別途確認 |
+| [read-result.schema.json](../../protocol/api1/read-result.schema.json) | 受信 record、cursor、保持量。fixture の payload_len と hex の一致・要求 network は checker で確認 |
 | [fixture](../../protocol/api1/fixtures/read.json) | 公開の合成 payload。秘密・実機 identity を含めない |
 | [mock daemon](../../tools/api1_mock/daemon.py) | fixture の request に応答。RF／認証／永続化／rate／参加の実装は無い |
 | [method 一覧](api1-methods.md) | 現在の production dispatch から生成 |
@@ -26,6 +26,6 @@ consumer は `(network, origin, message.session, message.sequence)` を保存の
 
 push を使うときは subscribe の成功応答を待つ。notification はその後、接続終了で subscription は消える。overflow/gap と heartbeat を扱い、notification の受信を durable 成功と扱わない。すべての権限・各 method の意味は [host 契約](../spec/host.md)が正本。
 
-## 現在の制約：Member の受信
+## network の scope
 
-`messages.read` の network 引数は `00000000` + low 32-bit の 8 桁を受理する。一方、Member の receive log は HostLink で認証した epoch 付き full network を保存する。現在の main は full network の read を INVALID_ARGUMENT で拒否するため、この経路を利用可能とは案内しない。上位 bit を落とす workaround は異なる scope になり、正しい解決ではない。実 Owner の `K05-M` は red（ignore を外すと失敗を再現）。修正は別 PR で追跡する。DevRam の low-word network での入門・consumer smoke は別に検証する。
+`messages.read` と `messages.subscribe` は DevRam の low-word network と Member の epoch を含む full 64-bit network を受理する。ACL、cursor、受信 record の network は同じ完全な値で照合する。上位 bit を落とすと別 scope になる。wire network の low word が 0 の値は予約値として拒否する。実 Owner の `K05-M` は Member の保存・再読込・再起動を検査する。送信など他 method の引数制約は [host 正本](../spec/host.md)を参照する。

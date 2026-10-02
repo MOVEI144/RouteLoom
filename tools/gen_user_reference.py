@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,14 @@ HEADERS = (
 def outputs(root: Path) -> dict[str, str]:
     generated = '生成元を編集し、`python3 tools/gen_user_reference.py` で更新する。\n\n'
     files = {}
+    headers = sorted(path for path in (root / 'components').glob('*/include/routeloom/*')
+                     if path.suffix in ('.h', '.hpp'))
+    files['docs/api/headers.md'] = (
+        '# 公開 header reference\n\n' + generated
+        + '全 component の公開 header。各宣言は Doxygen artifact の file／source reference から確認する。\n\n'
+        + '| Header | Source |\n|---|---|\n'
+        + ''.join(f'| `{p.name}` | [{p.parent.parent.parent.name}](../../{p.relative_to(root)}) |\n'
+                  for p in headers))
     for header in HEADERS:
         name = Path(header).name
         text = (root / header).read_text()
@@ -57,6 +66,7 @@ def outputs(root: Path) -> dict[str, str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--doxygen-xml', type=Path, help='check public headers and C functions in Doxygen index.xml')
     args = parser.parse_args()
     stale = []
     for path, text in outputs(ROOT).items():
@@ -69,7 +79,21 @@ def main() -> int:
             file.write_text(text)
     if stale:
         print('stale user references: ' + ', '.join(stale))
-    return bool(stale)
+    missing = []
+    if args.doxygen_xml is not None:
+        index = ET.parse(args.doxygen_xml / 'index.xml').getroot()
+        files = {c.findtext('name') for c in index.findall('compound') if c.get('kind') == 'file'}
+        members = {m.findtext('name') for c in index.findall('compound') for m in c.findall('member')}
+        for header in ROOT.glob('components/*/include/routeloom/*'):
+            if header.suffix in ('.h', '.hpp') and header.name not in files:
+                missing.append(str(header.relative_to(ROOT)))
+        for header in HEADERS:
+            if header.endswith('.h'):
+                functions = set(re.findall(r'^\w[\w *]*\b(rl_\w+)\s*\(', (ROOT / header).read_text(), re.M))
+                missing.extend(sorted(functions - members))
+        if missing:
+            print('missing Doxygen references: ' + ', '.join(missing))
+    return bool(stale or missing)
 
 
 if __name__ == '__main__':

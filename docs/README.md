@@ -25,7 +25,7 @@ SDK **2.0.0-dev** の利用者向け文書。日本語で説明し、API・Kconf
 | 賢い参加 | **pending：V2-18**。予定一覧の利用手順は merge 後 | [所属](spec/identity-membership.md) |
 | AppObject（大きいデータ） | **pending：V2-19**。通常 payload 上限を維持 | [配送](spec/delivery-storage.md) |
 | 表示板の 5 台／3-hop workload | **未合格：K01-D**。DevRam でも warm-up が期限切れ。直接構成の smoke と区別する | [scenario](../tests/e2e/scenarios.json) |
-| Member の API1 payload read | **未合格：K05-M**。epoch 付き full network が拒否される | [API1 制約](api/api1.md) |
+| Member の API1 payload read | **host-tested：K05-M**。full network の ACL／cursor で保存・再読込・epoch 変更を検査。実機は未実施 | [API1 scope](api/api1.md) |
 | release 配布物・provenance・本番鍵検査 | **pending：V2-22／H4** | [互換性](spec/compatibility.md) |
 | IP gateway／UART coprocessor／自動移設／圧縮 | v2.0 対象外。将来の設計を現在の機能と読まない | [transport](spec/transport-extension.md) |
 

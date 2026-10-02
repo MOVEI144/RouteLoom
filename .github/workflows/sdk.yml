@@ -138,6 +138,15 @@ jobs:
         working-directory: host
         run: cargo --version
       - run: python3 tools/check.py rust
+      - name: Generate Rust API reference
+        working-directory: host
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: cargo doc --workspace --no-deps --locked
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: routeloom-rust-reference
+          path: host/target/doc
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

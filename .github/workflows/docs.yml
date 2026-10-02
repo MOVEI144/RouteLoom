@@ -25,6 +25,7 @@ jobs:
           python3 tools/gen_user_reference.py --check
           python3 tools/check_api1_contract.py
           doxygen tools/Doxyfile
+          python3 tools/gen_user_reference.py --check --doxygen-xml build-docs/doxygen/xml
       - name: Upload API reference
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

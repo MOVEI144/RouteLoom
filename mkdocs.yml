@@ -67,6 +67,7 @@ nav:
     - Pages 公開: user/pages.md
   - API reference:
     - 案内: api/README.md
+    - 全公開 header: api/headers.md
     - Device C++: api/device.hpp.md
     - Device C: api/device.h.md
     - Core C ABI: api/routeloom.h.md

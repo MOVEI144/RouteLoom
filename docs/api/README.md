@@ -11,12 +11,15 @@
 | API1 | [method 一覧](api1-methods.md)、[JSON Schema・fixture・mock](api1.md)、[host の正本](../spec/host.md) |
 | HostLink／HostOps | [USB 契約](../spec/usb-protocol.md)、[HostOps 定義](../../components/routeloom/include/routeloom/usb_host_ops.hpp)。認証・credit・方向・capability を交渉してから使う |
 | Registry | [版の生成表](../spec/compatibility.md)、[理由 ID](../../protocol/manifest.json)、[frame semantics](../../protocol/semantics.json)、[capability bits](../../components/routeloom/include/routeloom/usb_host_ops.hpp) |
+| ESP-NOW adapter／core C++ | [全公開 header](headers.md)。Doxygen の file／namespace／class reference と source browser |
+| Rust client／CLI／daemon | `cargo +1.85.0 doc --workspace --no-deps --locked`（`host/` で実行）。CI の `routeloom-rust-reference` artifact |
 
 header reference は全文を生成するため、対象の公開記号を省略しない。`python3 tools/gen_user_reference.py --check` が header／Kconfig／dispatch と文書の一致を検査する。core の各 C++ header の詳細は Doxygen の namespace/class/member reference を使う。
 
 ```sh
 python3 tools/gen_user_reference.py --check
 doxygen tools/Doxyfile
+python3 tools/gen_user_reference.py --check --doxygen-xml build-docs/doxygen/xml
 ```
 
 HTML は `build-docs/doxygen/html/index.html`、XML は同じ directory の `xml/` に生成する。CI の `routeloom-api-reference` artifact に保存する。EXTRACT_ALL と source browser で全宣言に辿れる。内部/private member は利用契約に含めない。公開 API の互換範囲は [compatibility](../spec/compatibility.md)で確認する。Doxygen artifact の生成は実機での機能認定とは別である。
