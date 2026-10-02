@@ -1747,7 +1747,10 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
             }
         }
         FrameKind::HostOps if site::owns(body) => {
-            if !state.site_inbox.post(frame.request, body.to_vec()) {
+            if !state
+                .site_inbox
+                .post(frame.session, frame.request, body.to_vec())
+            {
                 push_event(
                     state,
                     ms,
