@@ -33,18 +33,24 @@ void EspNowPowerPort::abort_sleep(const MonotonicMs now_ms) noexcept {
 }
 
 bool EspNowPowerPort::matches_context(const PowerImage& image, NetworkId network) const noexcept {
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  return PowerPort::matches_context(image, network);
+#else
   if (owner_ == nullptr || owner_->coordinator().mode() == sdkv1::CoordinatorMode::Dev)
     return PowerPort::matches_context(image, network);
   NetworkId member_network = 0;
   std::uint32_t generation = 0;
   return owner_->coordinator().member_context(member_network, generation) &&
          image.network == member_network && image.config_revision == generation;
+#endif
 }
 
 Status EspNowPowerPort::capture_cache(PowerImage& image) noexcept {
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
   if (owner_ != nullptr && owner_->coordinator().mode() != sdkv1::CoordinatorMode::Dev &&
       !owner_->coordinator().member_context(image.network, image.config_revision))
     return Status::error(StatusCode::InvalidState, "sleep membership unavailable");
+#endif
   image.channel = runtime_.channel();
   runtime_.for_each_peer(
       [&](const NodeId node, const MacAddress& mac, const RouteMetric metric,
@@ -91,6 +97,7 @@ Status EspNowPowerPort::quiesce_radio() noexcept {
                         "ESP-NOW callback unregister failed");
   }
   if (!runtime_.sleep_quiescent()) return Status::error(StatusCode::Busy, "queued sleep ingress");
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
   if (parked_ && rtc_ != nullptr &&
       owner_->coordinator().mode() == sdkv1::CoordinatorMode::Member) {
     NodeId parent = kInvalidNodeId;
@@ -105,6 +112,7 @@ Status EspNowPowerPort::quiesce_radio() noexcept {
     // Isolation is a cold sleep; no old parent/session image may survive.
     return rtc_->invalidate();
   }
+#endif
   return Status::success();
 }
 

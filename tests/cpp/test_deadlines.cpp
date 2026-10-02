@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 #include "test_sim.hpp"
@@ -109,7 +110,8 @@ int main() {
     return 1;
   }
   for (std::size_t i = 0; i < results[0].size(); ++i) {
-    if (results[0][i].id != results[1][i].id || results[0][i].state != results[1][i].state)
+    if (results[0][i].id != results[1][i].id || results[0][i].state != results[1][i].state ||
+        std::strcmp(results[0][i].reason, results[1][i].reason) != 0)
       return 1;
   }
   if (polls[1] >= polls[0] / 2) return 1;

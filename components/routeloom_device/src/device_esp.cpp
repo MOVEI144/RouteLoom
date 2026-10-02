@@ -719,7 +719,11 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   static EspNowPowerPort owner_power_port(runtime);
   static FailStreakClearOnSleep owner_streak_clear;
   owner_power_port.set_pre_sleep_hook(&owner_streak_clear);
-  bool owner_restore_settled = config.security == DeviceSecurity::DevRam;
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  constexpr bool owner_restore_settled = true;
+#else
+  bool owner_restore_settled = false;
+#endif
   bool power_bound = false;
   bool sleep_requested = false;
   static espnow::NvsBlobNamespace power_namespace;
@@ -799,6 +803,7 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
     // Warm restore: retried while the parent re-binds (Busy) with a freshly
     // bounded elapsed upper bound each round; terminal (warm or refused)
     // settles once and a refusal resumes cold.
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
     if (!owner_restore_settled) {
       const MonotonicMs awake_ms = monotonic_now_ms();
       const std::uint32_t awake32 =
@@ -817,6 +822,7 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
         }
       }
     }
+#endif
     if (!power_bound && owner_restore_settled && node.started()) {
       const MonotonicMs awake_ms = monotonic_now_ms();
       const std::uint32_t awake32 =

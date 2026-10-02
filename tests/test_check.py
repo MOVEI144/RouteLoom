@@ -78,7 +78,7 @@ class CellList(unittest.TestCase):
         data = check.load_cells()
         cells = data["cells"]
         # Every app/target and feature branch, including C6 external antenna selection.
-        self.assertEqual(len(cells), 61)
+        self.assertEqual(len(cells), 62)
         self.assertTrue({
             "bridge_node-esp32c3-normal-off-maintenance_member",
             "reference_node-esp32c6-normal-off-maintenance_member",

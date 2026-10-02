@@ -773,6 +773,10 @@ MonotonicMs EspNowSecurityOwner::next_deadline(const MonotonicMs now_ms) const n
   // Dev has no handshake, bank expiry or lifecycle poll work. Channel
   // operations retain the compatibility cadence until their next event.
   return tune_.active ? (now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2) : UINT64_MAX;
+#elif defined(ESP_PLATFORM)
+  // Member lifecycle and discovery still require the compatibility cadence;
+  // no slower schedule can extend this image's wait.
+  return now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2;
 #else
   MonotonicMs due = coordinator().next_deadline(now_ms);
   // Authority transports and channel tuning retain fallback while their
