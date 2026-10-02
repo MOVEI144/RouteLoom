@@ -1155,7 +1155,7 @@ void test_delivery_table_terminal_eviction() {
   MessageId extra{};
   const auto refused = a->send(2, payload_view(), best, h.now, extra);
   CHECK(!refused);
-  CHECK(refused.code == StatusCode::NoCapacity);
+  CHECK(refused.code == StatusCode::Busy);
   CHECK(a->dedup_stats().delivery_terminal_evicted == 0);
 
   // Complete all eight (best-effort resolves at TX success) -> terminal.
