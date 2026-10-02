@@ -94,7 +94,7 @@ Authorities. Owner mesh tests cover list cancellation/distribution, a mixed
 cohort with OFFER and EDHOC reply loss, and retained cutover recovery under
 closed intake. A 60-second simultaneous-boot comparison in the real Owner
 harness (G—R—two unassigned devices, one expected, `start_jitter_ms=2000`
-in both modes) measures 5 versus 1 full relay starts and 90322 versus 55771 sender radio bytes for legacy versus smart.
+in both modes) measures 5 versus 1 full relay starts and 89073 versus 54933 sender radio bytes for legacy versus smart.
 The byte count includes all mesh transmissions, including retries and
 broadcasts, counted once at the sender; it is also not measured RF airtime.
 Scenario registration is in `tests/e2e/scenarios.json`.
@@ -103,20 +103,26 @@ host results do not establish its airtime or latency acceptance.
 
 ## Firmware footprint
 
-ESP-IDF v6.0.3, compared with 4a931258 in the same cells:
+ESP-IDF v6.0.3, final source including main 90e9c819, compared with
+4a931258 in the same cells:
 
 | Cell | app.bin before → after | Static free RAM before → after | RTC/LP used |
 |---|---|---|---|
-| C3 bridge, normal DevRam gateway_small | 1218688 → 1224112 B (+5424) | 52896 → 52720 B (−176) | 6480 B, unchanged |
-| C6 bench, normal Member relay | 1425056 → 1432704 B (+7648) | 147527 → 147351 B (−176) | 164 B, unchanged |
+| C3 bridge, normal DevRam gateway_small | 1218688 → 1224304 B (+5616) | 52896 → 52720 B (−176) | 6480 B, unchanged |
+| C6 bench, normal Member relay | 1425056 → 1433696 B (+8640) | 147527 → 147311 B (−216) | 164 B, unchanged |
 
 The expected keys, site/expiry binding and finite-search/boot-listen state
 account for the fixed RAM growth; the positive-offer reservation reuses
-existing table rows. The review changes after 57c4bb42 add 928 B of flash
-and 16 B of static RAM on C3, and 1088 B of flash and 16 B of static RAM on C6.
+existing table rows. Before integrating main 90e9c819, the review changes after 57c4bb42 added
+928 B of flash and 16 B of static RAM on C3, and 1088 B of flash and 16 B of
+static RAM on C6. The main integration adds a further 192 B of flash on C3,
+and 992 B of flash and 40 B of static RAM on C6 (including RF initialization).
 Measured `app_bin_max` and `static_free_min` regression baselines in
 `tools/ci/cells.json` are refreshed for the cells whose previous baselines
 no longer cover the measured growth. Static-RAM floors, RTC limits, drift
 tolerance, partitions and capacity profiles are unchanged. C3's 27648 B
-floor passes with 52720 B remaining. The firmware matrix separately checks
-all repository cells against their RAM floors and size regression budgets.
+floor passes with 52720 B remaining. The repository CI matrix checks all
+cells against their RAM floors and size regression budgets. The local helper
+now builds eight representative cells; targeted checks also cover C6 bench
+and the external-antenna cell. The final integrated source has not completed
+the full 55-cell matrix locally.

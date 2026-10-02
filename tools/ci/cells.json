@@ -281,7 +281,7 @@
       "overlay": ["CONFIG_ROUTELOOM_BOARD_C6_EXTERNAL_ANTENNA=y"],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y", "CONFIG_ROUTELOOM_BOARD_C6_EXTERNAL_ANTENNA=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1244400, "static_free_min": 157261, "rtc_used_max": 136}
+      "budget": {"app_bin_max": 1251712, "static_free_min": 157261, "rtc_used_max": 136}
     },
     {
       "id": "bench_node-esp32c6-normal-off-off", "app": "bench_node", "target": "esp32c6",
