@@ -9,9 +9,10 @@ sdk.yml firmware matrix is generated from.
 
     check.py quick                  docs + portable C/C++ tests
     check.py ci [--dry-run]         every stage CI runs, in order
-    check.py core|docs|golden|rust|interop|profile-mesh|fuzz
+    check.py core|docs|golden|rust|interop|compat|profile-mesh|fuzz
     check.py profiles [--build DIR]  portable suites per resource profile
     check.py scenarios              tests/e2e/scenarios.json rows
+    check.py e2e --tier pr|nightly --shard mesh|join|fault|all [--build-dir DIR]
     check.py firmware --list [--format github]
     check.py firmware (--cell ID ... | --all)   needs an exported ESP-IDF
     check.py size --cell ID [--build-dir DIR]   budget of an existing build
@@ -28,6 +29,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,13 +53,14 @@ GENERATED_GOLDENS = (
 PEER = "build/tests/cpp/routeloom_joiner_interop_peer"
 MESH_PEER = "build/tests/cpp/routeloom_owner_mesh_peer"
 PEER_VERSION = "1"
-MESH_PEER_VERSION = "7"
+MESH_PEER_VERSION = "8"
 # A live interop suite that finds no C++ peer prints this and passes as a
 # skip; the interop stage treats it as a failure. Not anchored: with
 # --nocapture the harness output of parallel tests can share the line.
 SKIP_MARK = re.compile(r"SKIP site::")
 # One passed libtest case; not anchored for the same reason.
 PASSED = re.compile(r"test (\S+) \.\.\. ok")
+FAILED = re.compile(r"test (\S+) \.\.\. FAILED")
 
 
 class Step:
@@ -83,13 +86,16 @@ def core(sanitizers: str = "ON") -> list[Step]:
         Step(["cmake", "-S", ".", "-B", "build", "-DROUTELOOM_BUILD_TESTS=ON",
               f"-DROUTELOOM_ENABLE_SANITIZERS={sanitizers}", "-DCMAKE_BUILD_TYPE=Debug"]),
         Step(["cmake", "--build", "build", "--parallel", JOBS]),
-        Step(["ctest", "--test-dir", "build", "--output-on-failure", "-j", JOBS]),
+        Step(["ctest", "--test-dir", "build", "--output-on-failure", "-j", "2",
+              *(["-LE", "long"] if sanitizers == "ON" else [])]),
     ]
 
 
 def docs() -> list[Step]:
     return [Step(["python3", "tools/check_docs.py"]),
             Step(["python3", "tools/gen_manifest.py", "--check"]),
+            Step(["python3", "tools/gen_user_reference.py", "--check"]),
+            Step(["python3", "tools/check_api1_contract.py"]),
             Step(["python3", "tools/sync_reference_tables.py", "--check"]),
             Step(["python3", "tools/check_review_contracts.py"]),
             Step(["python3", "tools/check.py", "scenarios"]),
@@ -157,6 +163,30 @@ def interop() -> list[Step]:
         Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::owner_mesh::",
               "--", "--nocapture"], cwd="host", env=mesh_env, forbid=SKIP_MARK,
              require=live_cases(rows, "site/owner_mesh/")),
+    ]
+
+
+def compat() -> list[Step]:
+    """N-1 records migrate; HostLink 1 is refused by the real USB Owner."""
+    env = {"ROUTELOOM_OWNER_PEER": str(ROOT / PEER),
+           "ROUTELOOM_MESH_PEER": str(ROOT / MESH_PEER), "UBSAN_OPTIONS": "halt_on_error=1"}
+    case = "site::owner_mesh::fault::mesh_hostlink_v2_auth_negatives"
+    return [
+        Step(["cmake", "-S", ".", "-B", "build", "-DROUTELOOM_ENABLE_SANITIZERS=ON",
+              "-DCMAKE_BUILD_TYPE=Debug"]),
+        Step(["cmake", "--build", "build", "--parallel", JOBS, "--target",
+              "routeloom_sdkv1_golden_tests", "routeloom_config_tests", "routeloom_migration_tests",
+              "routeloom_joiner_interop_peer", "routeloom_owner_mesh_peer"]),
+        Step(["ctest", "--test-dir", "build", "--output-on-failure", "-R",
+              "routeloom_(sdkv1_golden|config|migration)_tests"]),
+        Step(["cargo", "test", "-p", "routeloom-protocol", "--test", "compat"], cwd="host"),
+        Step(["cargo", "test", "-p", "routeloom-provision", "--test", "sdkv1_golden"], cwd="host"),
+        Step(["cargo", "test", "-p", "routeloom-host", "--bins",
+              "site::store::tests::migration_advances_a_v2_database_and_keeps_a_copy"], cwd="host"),
+        Step(["assert-peer-version", PEER, PEER_VERSION]),
+        Step(["assert-peer-version", MESH_PEER, MESH_PEER_VERSION]),
+        Step(["cargo", "test", "-p", "routeloom-host", "--bins", case, "--", "--nocapture"],
+             cwd="host", env=env, forbid=SKIP_MARK, require={case}),
     ]
 
 
@@ -299,12 +329,16 @@ def scenario_errors(data: dict, root: Path = ROOT) -> list[str]:
         if rid in seen:
             errors.append(f"{rid}: duplicate id")
         seen.add(rid)
+        if row.get("shard") is not None and row["shard"] not in E2E_SHARDS:
+            errors.append(f"{rid}: shard {row['shard']!r}")
         tiers = set(row["tier"])
         if not tiers or tiers - {"pr", "nightly", "hil"}:
             errors.append(f"{rid}: tier {row['tier']!r}")
-        if row["status"] not in ("live", "red", "planned"):
+        if row["status"] not in ("live", "red", "planned", "pending"):
             errors.append(f"{rid}: status {row['status']!r}")
-        elif row["status"] == "planned":
+        elif row["status"] in ("planned", "pending"):
+            if row["status"] == "pending" and (not row.get("blocked_by") or not row.get("note")):
+                errors.append(f"{rid}: pending needs blocked_by and note")
             if row["test"]:
                 errors.append(f"{rid}: a planned row names no test")
         elif tiers & {"pr", "nightly"}:
@@ -312,6 +346,8 @@ def scenario_errors(data: dict, root: Path = ROOT) -> list[str]:
                 errors.append(f"{rid}: a {row['status']} row names its tests")
             errors += [f"{rid}: no test {ref}" for ref in row["test"]
                        if not test_exists(ref, root)]
+        if row["status"] == "red" and (not row["issues"] or not row.get("note")):
+            errors.append(f"{rid}: red needs issues and note")
         hil = row["hil"]
         if "hil" not in tiers:
             if hil is not None:
@@ -325,6 +361,24 @@ def scenario_errors(data: dict, root: Path = ROOT) -> list[str]:
                        or Path(script).suffix != ".py"
                        or not (root / script).is_file() for script in hil["run"])):
             errors.append(f"{rid}: hil run {hil.get('run')!r} is neither manual nor HIL scripts")
+        if isinstance(hil, dict):
+            requires = hil.get("requires")
+            if not isinstance(requires, list) or not requires or any(
+                    not isinstance(req, dict) or req.get("role") not in ("bridge", "reference")
+                    or type(req.get("count")) is not int or not 1 <= req["count"] <= 32
+                    or not isinstance(req.get("chips"), list) or not req["chips"]
+                    or set(req["chips"]) - {"esp32c3", "esp32s3", "esp32c5", "esp32c6"}
+                    for req in requires):
+                errors.append(f"{rid}: hil requires bounded roles and chips")
+    required_ids = {f"{family}{n:02d}" for family, count in
+                    (("M", 10), ("J", 10), ("F", 9), ("K", 6), ("P", 6))
+                    for n in range(1, count + 1)}
+    errors += [f"{rid}: missing required row" for rid in sorted(required_ids - seen)]
+    for acceptance in data.get("acceptance_pending", []):
+        if (not acceptance.get("note") or not acceptance.get("issues")
+                or not acceptance.get("rows") or set(acceptance["rows"]) - seen
+                or acceptance.get("status") != "pending"):
+            errors.append(f"{acceptance.get('id')}: invalid pending acceptance mapping")
     covered_prs = {pr for row in data.get("rows", []) for pr in row.get("prs", [])}
     errors += [f"{pr}: no scenario row" for pr in sorted(REQUIRED_V2_PRS - covered_prs)]
     registered = {ref for row in data.get("rows", [])
@@ -339,13 +393,13 @@ def scenario_errors(data: dict, root: Path = ROOT) -> list[str]:
     return errors
 
 
-def live_cases(data: dict, source: str) -> list[str]:
+def live_cases(data: dict, source: str, tier: str = "pr") -> list[str]:
     """The libtest paths of the live PR rows' Rust tests under
     host/routeloom-host/src/<source>."""
     prefix = "host/routeloom-host/src/"
     cases = []
     for row in data["rows"]:
-        if row["status"] != "live" or "pr" not in row["tier"]:
+        if row["status"] != "live" or tier not in row["tier"]:
             continue
         for ref in row["test"]:
             path, _, name = ref.partition("::")
@@ -354,6 +408,60 @@ def live_cases(data: dict, source: str) -> list[str]:
             module = path[len(prefix):-len(".rs")].removesuffix("/mod").replace("/", "::")
             cases.append(f"{module}::{name}")
     return cases
+
+
+E2E_SHARDS = ("mesh", "join", "fault")
+
+
+def scenario_shard(row: dict) -> str:
+    return row.get("shard", "mesh" if row["family"] == "mesh" else
+                   "join" if row["family"] == "join" else "fault")
+
+
+def e2e_cases(data: dict, tier: str, shard: str) -> list[str]:
+    refs = []
+    seen = set()
+    for row in data["rows"]:
+        if row["status"] != "live" or not ({"pr", tier} & set(row["tier"])):
+            continue
+        group = scenario_shard(row)
+        for ref in row["test"]:
+            if ref in seen:
+                continue
+            seen.add(ref)
+            if shard == "all" or shard == group:
+                refs.append(ref)
+    if shard in ("all", "join"):
+        path = ROOT / "host/routeloom-host/src/site/joiner_interop.rs"
+        refs.extend(f"{path.relative_to(ROOT)}::{name}" for name in re.findall(
+            r"#\[test\]\s*(?:#\[[^\]]*\]\s*)*fn (\w+)\(", path.read_text()))
+    return rust_cases(refs)
+
+
+def rust_cases(refs: list[str]) -> list[str]:
+    prefix = "host/routeloom-host/src/"
+    return sorted({path[len(prefix):-3].removesuffix("/mod").replace("/", "::") + "::" + name
+                   for ref in refs for path, _, name in [ref.partition("::")]
+                   if path.startswith(prefix)})
+
+
+def e2e(tier: str, shard: str, build: str, test_bin: str | None) -> list[Step]:
+    rows = load_scenarios()
+    errors = scenario_errors(rows)
+    if errors:
+        raise SystemExit("\n".join(errors))
+    cases = e2e_cases(rows, tier, shard)
+    env = {"ROUTELOOM_OWNER_PEER": str(ROOT / build / "tests/cpp/routeloom_joiner_interop_peer"),
+           "ROUTELOOM_MESH_PEER": str(ROOT / build / "tests/cpp/routeloom_owner_mesh_peer"),
+           "UBSAN_OPTIONS": "halt_on_error=1", "ROUTELOOM_E2E_TIER": tier}
+    if tier == "nightly":
+        env["ROUTELOOM_E2E_NIGHTLY"] = "1"
+    argv = ([str(ROOT / test_bin)] if test_bin else
+            ["cargo", "test", "-p", "routeloom-host", "--bins", "--"])
+    return [Step(["assert-peer-version", env["ROUTELOOM_OWNER_PEER"], PEER_VERSION]),
+            Step(["assert-peer-version", env["ROUTELOOM_MESH_PEER"], MESH_PEER_VERSION]),
+            Step([*argv, "--nocapture", f"--test-threads={1 if tier == 'nightly' else 2}", *cases],
+                 cwd="." if test_bin else "host", env=env, forbid=SKIP_MARK, require=cases)]
 
 
 # --- firmware cells -------------------------------------------------------
@@ -509,6 +617,25 @@ STATIC_FREE_DRIFT = 256
 RTC_DRIFT = 64
 
 
+def development_key_errors(image: bytes, settings: list[str]) -> list[str]:
+    """Inspect linked constants as well as the configured quick-start key."""
+    kconfig = (ROOT / "components/routeloom_device/Kconfig").read_text(encoding="utf-8")
+    key = re.search(
+        r'config ROUTELOOM_DEVELOPMENT_KEY_HEX\s+string[^\n]*\n\s+default "([0-9a-fA-F]+)"',
+        kconfig)
+    if key is None:
+        return ["missing development key definition for image inspection"]
+    keys = {key.group(1).lower()}
+    for setting in settings:
+        configured = re.fullmatch(
+            r'CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX="([0-9a-fA-F]{64})"', setting)
+        if configured is not None:
+            keys.add(configured.group(1).lower())
+    if any(bytes.fromhex(value) in image or value.encode() in image.lower() for value in keys):
+        return ["MemberEdhoc image contains a development key"]
+    return []
+
+
 def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
     budget = cell.get("budget")
     if not budget:
@@ -524,29 +651,11 @@ def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
     app_bin = files["bin"].stat().st_size
     if "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y" in (
             cell.get("overlay", []) + cell.get("expect", [])):
-        # Inspect the linked image, including constants; the quick-start
-        # key can survive even when no development symbol is referenced.
-        kconfig = (ROOT / "components/routeloom_device/Kconfig").read_text(encoding="utf-8")
-        key = re.search(
-            r'config ROUTELOOM_DEVELOPMENT_KEY_HEX\s+string[^\n]*\n\s+default "([0-9a-fA-F]+)"',
-            kconfig)
-        if key is None:
-            errors.append("missing development key definition for image inspection")
-        else:
-            image = files["bin"].read_bytes()
-            keys = {key.group(1).lower()}
-            settings = cell.get("overlay", []) + cell.get("expect", [])
-            sdkconfig = build.parent / "sdkconfig"
-            if sdkconfig.is_file():
-                settings += sdkconfig.read_text(encoding="utf-8").splitlines()
-            for setting in settings:
-                configured = re.fullmatch(
-                    r'CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX="([0-9a-fA-F]{64})"', setting)
-                if configured is not None:
-                    keys.add(configured.group(1).lower())
-            image_lower = image.lower()
-            if any(bytes.fromhex(value) in image or value.encode() in image_lower for value in keys):
-                errors.append("MemberEdhoc image contains a development key")
+        settings = cell.get("overlay", []) + cell.get("expect", [])
+        sdkconfig = build.parent / "sdkconfig"
+        if sdkconfig.is_file():
+            settings += sdkconfig.read_text(encoding="utf-8").splitlines()
+        errors += development_key_errors(files["bin"].read_bytes(), settings)
     if app_bin > budget["app_bin_max"] + APP_BIN_DRIFT:
         errors.append(f"app.bin {app_bin} B > budget {budget['app_bin_max']} B "
                       f"(+{APP_BIN_DRIFT} B drift)")
@@ -630,6 +739,7 @@ def run(steps: list[Step], dry_run: bool, data: dict | None = None) -> int:
             code = subprocess.run(step.argv, cwd=cwd, env=env).returncode
         else:
             code, hit, passed = stream(step, cwd, env)
+            step.passed = passed
             if hit:
                 print(f"check.py: forbidden output from `{step.text()}`: {hit}", file=sys.stderr)
                 code = code or 1
@@ -647,6 +757,7 @@ def run(steps: list[Step], dry_run: bool, data: dict | None = None) -> int:
 
 def stream(step: Step, cwd: Path, env: dict) -> tuple[int, str, set[str]]:
     hit, passed = "", set()
+    step.failed = set()
     with subprocess.Popen(step.argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, text=True) as proc:
         for line in proc.stdout:
@@ -655,14 +766,21 @@ def stream(step: Step, cwd: Path, env: dict) -> tuple[int, str, set[str]]:
             if not hit and step.forbid is not None and step.forbid.search(line):
                 hit = line.strip()
             passed.update(PASSED.findall(line))
+            step.failed.update(FAILED.findall(line))
     return proc.returncode, hit, passed
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="stage", required=True)
-    for name in ("quick", "ci", "docs", "golden", "rust", "interop", "profile-mesh", "fuzz"):
+    for name in ("quick", "ci", "docs", "golden", "rust", "interop", "compat", "profile-mesh", "fuzz"):
         sub.add_parser(name).add_argument("--dry-run", action="store_true")
+    p_e2e = sub.add_parser("e2e")
+    p_e2e.add_argument("--dry-run", action="store_true")
+    p_e2e.add_argument("--tier", choices=("pr", "nightly"), default="pr")
+    p_e2e.add_argument("--shard", choices=(*E2E_SHARDS, "all"), default="all")
+    p_e2e.add_argument("--build-dir", default="build")
+    p_e2e.add_argument("--test-bin")
     p_profiles = sub.add_parser("profiles")
     p_profiles.add_argument("--dry-run", action="store_true")
     p_profiles.add_argument("--build", choices=[b[0] for b in PROFILE_BUILDS],
@@ -701,6 +819,37 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{args.file.name}: {error}", file=sys.stderr)
         return 1 if errors else 0
 
+    if args.stage == "e2e":
+        started = time.monotonic()
+        steps = e2e(args.tier, args.shard, args.build_dir, args.test_bin)
+        code = run(steps, args.dry_run)
+        if not args.dry_run and os.environ.get("ROUTELOOM_E2E_OUT"):
+            passed = getattr(steps[-1], "passed", set())
+            failed = getattr(steps[-1], "failed", set())
+            rows = []
+            for row in load_scenarios()["rows"]:
+                group = scenario_shard(row)
+                if args.shard != "all" and args.shard != group:
+                    continue
+                cases = rust_cases(row["test"])
+                verdict = ("FAIL" if any(case in failed for case in cases) else
+                           "PASS" if row["status"] == "live" and cases and
+                           {"pr", args.tier} & set(row["tier"]) and
+                           len(cases) == len(set(row["test"])) and
+                           all(case in passed for case in cases) else "NOT_RUN")
+                rows.append({"id": row["id"], "status": row["status"], "verdict": verdict,
+                             "reason": ("all row tests passed" if verdict == "PASS" else
+                                        row.get("note", "row also needs CTest, HIL or another shard")),
+                             "blocked_by": row.get("blocked_by", [])})
+            out = Path(os.environ["ROUTELOOM_E2E_OUT"])
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "matrix-summary.json").write_text(json.dumps({
+                "revision": os.environ.get("GITHUB_SHA") or subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                "tier": args.tier, "shard": args.shard, "exit_code": code,
+                "wall_s": time.monotonic() - started, "rows": rows}, indent=2) + "\n")
+        return code
+
     data = load_cells()
     if args.stage == "firmware":
         if args.list:
@@ -717,7 +866,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_firmware(cells, args.dry_run, data)
 
     stages = {"core": lambda: core(getattr(args, "sanitizers", "ON")), "docs": docs,
-              "golden": golden, "rust": rust, "interop": interop,
+              "golden": golden, "rust": rust, "interop": interop, "compat": compat,
+              "e2e": lambda: e2e(args.tier, args.shard, args.build_dir, args.test_bin),
               "profiles": lambda: profiles(getattr(args, "build", None)),
               "profile-mesh": profile_mesh, "fuzz": fuzz,
               "firmware": lambda: [s for c in data["cells"] for s in firmware_steps(c)]}

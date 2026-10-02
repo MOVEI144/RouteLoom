@@ -1,0 +1,27 @@
+{
+  "request": {
+    "v": 1,
+    "request_id": "gap",
+    "method": "messages.read",
+    "params": {
+      "network": "00000000524c0001",
+      "cursor": "AQAAAABSTAABAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    }
+  },
+  "response": {
+    "v": 1,
+    "request_id": "gap",
+    "ok": false,
+    "error": {
+      "code": "CURSOR_GAP",
+      "detail": {
+        "message": "receive-log records were reclaimed ahead of this cursor",
+        "lost_from": 1,
+        "lost_to": 1,
+        "oldest_cursor": "AQAAAABSTAABAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",
+        "tail_cursor": "AQAAAABSTAABAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE"
+      },
+      "retryable": false
+    }
+  }
+}

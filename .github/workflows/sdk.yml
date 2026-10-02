@@ -52,6 +52,8 @@ jobs:
             ctest --test-dir build -N || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Install API1 schema validator
+        run: python3 -m pip install jsonschema==4.25.1
       - name: Documentation and contract tests
         run: python3 tools/check.py docs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -149,6 +151,15 @@ jobs:
         working-directory: host
         run: cargo --version
       - run: python3 tools/check.py rust
+      - name: Generate Rust API reference
+        working-directory: host
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: cargo doc --workspace --no-deps --locked
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: routeloom-rust-reference
+          path: host/target/doc
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -160,27 +171,6 @@ jobs:
             host/target/release/examples/gen_golden
             host/target/release/examples/gen_usb_golden
             host/Cargo.lock
-          retention-days: 30
-  joiner-interop:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - name: Rust toolchain (host/rust-toolchain.toml)
-        working-directory: host
-        run: cargo --version
-      - name: Live Owner E2E and multi-node Owner mesh E2E (a skip fails)
-        env:
-          ROUTELOOM_E2E_OUT: ${{ github.workspace }}/e2e-out
-        run: python3 tools/check.py interop
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: e2e-report
-          path: e2e-out/
-          if-no-files-found: error
           retention-days: 30
   profiles:
     # Portable suites per resource profile (tools/check.py PROFILE_BUILDS).
