@@ -337,7 +337,6 @@ impl Switch {
         } else if frame.len() >= 44 && frame[..4] == *b"RLD1" {
             frame[5]
         } else {
-
             return false;
         };
         if let Some(rule) = self
