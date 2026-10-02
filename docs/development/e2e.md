@@ -73,6 +73,12 @@ clock; the consumer cases cover socket framing. Nightly five/32-node and
 sleep and object variants remain with V2-15/16/18/19. No dry-run establishes
 radio or on-board acceptance.
 
+K02's Owner peers explicitly select Member security and use the default
+non-smart join policy. Its staged boot exercises consecutive link exchanges
+to the same peer: a completed exchange's retained demux row must not become
+the send leg for a later resume's R3 retries. Current-context authentication
+and the scenario's boot, freshness, status and airtime limits remain enforced.
+
 ## HIL plans
 
 ```sh

@@ -1604,8 +1604,11 @@ Status SecurityCoordinator::pump_link_tx(const MonotonicMs now) noexcept {
 Status SecurityCoordinator::installed_link(const HandshakeResult& result,
                                            const MonotonicMs now) noexcept {
   (void)now;
+  // Completion owns the live discovery reservation. Retained demux rows
+  // for older exchanges must not become send legs for this context's R3.
   for (auto& entry : member().demux) {
-    if (entry.used && entry.peer == result.peer) {
+    if (entry.used && entry.has_start && entry.peer == result.peer &&
+        entry.discovery_token == result.proof.elevation_token()) {
       if (entry.discovery_token != NeighborDiscovery::kMemberHandshakeNone &&
           deps_.discovery != nullptr) {
         deps_.discovery->complete_handshake(entry.discovery_token, result.proof, last_now_);
