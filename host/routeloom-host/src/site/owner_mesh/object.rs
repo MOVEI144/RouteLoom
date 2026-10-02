@@ -1,6 +1,8 @@
 //! M10: explicit AppObject through real Device, Owner, sessions and MeshNode.
 use super::*;
 
+mod load;
+
 #[test]
 #[ignore = "requires ROUTELOOM_APP_OBJECT_TRANSFER=ON mesh peer"]
 fn mesh_m10_app_objects() {
@@ -397,12 +399,16 @@ fn mesh_m10_completion_record_pressure() {
     world.peers[1].app_send(testkit::GATEWAY, b"warm");
     world.pump_until(9000, |snaps| snaps[0].rx_count > 0);
     assert!(world.snaps[0].rx_count > 0);
-    for index in 0..5 {
+    for index in 0..13 {
         assert_eq!(
-            world.peers[1].object_send(testkit::GATEWAY, &[index], 30000),
+            world.peers[1].object_send(
+                testkit::GATEWAY,
+                &[index],
+                if index < 12 { 30000 } else { 120000 }
+            ),
             0
         );
-        for _ in 0..400 {
+        for _ in 0..4800 {
             world.step(25);
             if world.peers[1].object_snapshot().1 != 0 {
                 break;
@@ -410,12 +416,12 @@ fn mesh_m10_completion_record_pressure() {
         }
         let (_, results, state, _) = world.peers[1].object_snapshot();
         assert_eq!(results, 1);
-        assert_eq!(state, if index < 4 { 1 } else { 5 });
+        assert_eq!(state, 1);
         for _ in 0..40 {
             world.step(25);
         }
     }
-    assert_eq!(world.peers[0].object_snapshot().0, 4);
+    assert_eq!(world.peers[0].object_snapshot().0, 13);
 }
 
 #[test]

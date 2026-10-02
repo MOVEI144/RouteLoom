@@ -421,6 +421,60 @@ void test_extension_type_transit() {
   CHECK(!wire::peek_header(bytes.view(), peek).ok());
 }
 
+void test_object_pacing_does_not_inflate_route_cost() {
+  Harness h;
+  (void)h.add(1);
+  (void)h.add(2);
+  (void)h.add(3);
+  h.link(1, 2);
+  h.link(2, 3);
+  for (int i = 0; i < 20; ++i) {
+    for (NodeId peer : {1, 2, 3}) h.step(peer);
+    ++h.now;
+  }
+  const auto cost = h.at(2)->routes().best(3).metric;
+  // MAC succeeds, while scripted authenticated accepts resolve the work.
+  h.net.silent_drop = [](const SimNetwork::Pending& packet) {
+    return packet.to == 3 && packet.frame[4] == static_cast<std::uint8_t>(FrameType::AppObjectChunk);
+  };
+  const auto enqueue = [&](std::uint64_t seq) {
+    auto header = mk_header(FrameType::AppObjectChunk, 1, 3, 1, 2,
+                            MessageId{42, seq}, wire::kFlagEndProtected);
+    header.minor = 1;
+    inject(h, 2, 1, craft_frame(h.cipher, header, payload_view()));
+  };
+  enqueue(1);
+  h.net.sights.clear();
+  std::uint64_t accepted = 0;
+  for (int i = 0; i < 4000 && accepted < 12; ++i) {
+    const auto before = h.net.sights.size();
+    h.step(2);
+    for (std::size_t j = before; j < h.net.sights.size(); ++j) {
+      const auto& sight = h.net.sights[j];
+      if (sight.from == 2 && sight.type == FrameType::AppObjectChunk) {
+        inject(h, 2, 3, craft_accept(h.cipher, 3, 2, FrameType::AppObjectChunk,
+                                     1, MessageId{42, sight.sequence}, 0, 100 + sight.sequence));
+        ++accepted;
+        if (accepted < 12) enqueue(accepted + 1);
+      }
+    }
+    ++h.now;
+  }
+  CHECK(accepted == 12);
+  h.step(2);
+  CHECK(h.at(2)->routes().best(3).metric == cost);
+  ObservationKey key{BindingGeneration{0}, ObservationDirection::Egress,
+                     RadioGeneration{0}, ChannelEpoch{0}, 2, 3};
+  if (const auto* peer = h.at(2)->telemetry_peer(3)) {
+    key.binding = peer->binding;
+    key.radio = peer->radio;
+    key.channel = peer->channel;
+  }
+  const auto* bucket = h.at(2)->telemetry_bucket(key);
+  CHECK(bucket != nullptr);
+  if (bucket != nullptr) CHECK(bucket->queue_sojourn_ms_ewma >= 50);
+}
+
 // D4-04: reserved control lane — locally generated required responses
 // (HOP_ACCEPT) preempt queued data-class work; ordinary queued traffic never
 // enters the lane.
@@ -1786,6 +1840,7 @@ int main() {
   test_drr_fairness();
   test_relay_traffic_hint();
   test_extension_type_transit();
+  test_object_pacing_does_not_inflate_route_cost();
   test_control_lane();
   test_full_control_lane_never_commits_a_forward();
   test_failed_route_advertisement_rearmed();

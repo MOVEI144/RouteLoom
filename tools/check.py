@@ -298,7 +298,7 @@ def object_mesh() -> list[Step]:
               "-DCMAKE_BUILD_TYPE=Debug", "-DROUTELOOM_APP_OBJECT_TRANSFER=ON", "-DROUTELOOM_DEDUP_PROFILE=leaf"]),
         Step(["cmake", "--build", build, "--parallel", JOBS, "--target",
               "routeloom_owner_mesh_peer", "routeloom_joiner_interop_peer"]),
-    ] + object_steps(live_cases(load_scenarios(), "site/owner_mesh/object.rs"), env,
+    ] + object_steps(live_cases(load_scenarios(), "site/owner_mesh/object"), env,
                      ["cargo", "test", "-p", "routeloom-host", "--bins", "--"], "host")
 
 
