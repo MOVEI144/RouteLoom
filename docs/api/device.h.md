@@ -89,6 +89,9 @@ typedef struct rl_dev_capabilities {
   uint16_t max_payload;
   uint16_t max_group_payload;
   uint16_t max_applied_payload;
+  uint8_t object_transfer;
+  uint8_t object_rx_slots;
+  uint16_t max_object_bytes;
 } rl_dev_capabilities_t;
 
 typedef struct rl_dev_membership {
@@ -148,6 +151,39 @@ typedef struct rl_dev_join_policy {
   uint8_t reserved;
 } rl_dev_join_policy_t;
 
+typedef struct rl_dev_object_options {
+  uint32_t struct_size;
+  uint32_t version;
+  uint32_t deadline_ms;
+  uint16_t app_tag;
+  uint8_t content_encoding;
+  uint8_t reserved;
+} rl_dev_object_options_t;
+
+/* ObjectState: 1 Delivered (digest and whole-object callback acknowledged),
+   2 Expired, 3 CancelledBeforeTx, 4 Indeterminate, 5 Failed, 6 Unsupported.
+   This is distinct from a normal message's END_RECEIVED and from APPLIED. */
+typedef struct rl_dev_object_result {
+  uint32_t struct_size;
+  uint32_t version;
+  uint32_t object_id;
+  uint16_t reason; /* rl_status_code_t */
+  uint8_t state;
+  uint8_t reserved;
+} rl_dev_object_result_t;
+
+typedef struct rl_dev_object_rx {
+  uint32_t struct_size;
+  uint32_t version;
+  rl_node_id_t source;
+  uint32_t object_id;
+  uint32_t source_boot;
+  uint32_t end_context;
+  uint16_t app_tag;
+  uint8_t content_encoding;
+  uint8_t reserved;
+} rl_dev_object_rx_t;
+
 /* Callbacks run on the Owner task; arguments are borrowed for the call.
    Any function may be NULL. on_applied_request receives every APPLIED
    request as a ticket that the application answers later — outside the
@@ -171,6 +207,9 @@ typedef struct rl_dev_observer {
   void (*on_operation)(void* user, uint32_t operation, uint16_t result);
   void (*on_applied_request)(void* user, const rl_applied_request_t* request);
   void (*on_poll)(void* user, rl_dev_t* device, rl_monotonic_ms_t now_ms);
+  void (*on_object)(void* user, const rl_dev_object_rx_t* info,
+                    const uint8_t* data, size_t size);
+  void (*on_object_result)(void* user, const rl_dev_object_result_t* result);
 } rl_dev_observer_t;
 
 void rl_dev_struct_init(void* object, size_t struct_size);
@@ -200,6 +239,15 @@ rl_status_code_t rl_dev_capabilities(rl_dev_t* device, rl_dev_capabilities_t* ou
 rl_status_code_t rl_dev_send(rl_dev_t* device, rl_node_id_t destination,
                              const uint8_t* payload, size_t payload_size,
                              const rl_dev_send_options_t* options, rl_message_id_t* out_id);
+/* Immutable send loan until on_object_result. RX loan is 4096 bytes and
+   outlives the Device; callbacks borrow it only for their duration. OFF
+   returns Unsupported. One TX object and at most object_rx_slots RX loans. */
+void rl_dev_object_options_init(rl_dev_object_options_t* options);
+rl_status_code_t rl_dev_send_object(rl_dev_t* device, rl_node_id_t destination,
+                                    const uint8_t* data, size_t size,
+                                    const rl_dev_object_options_t* options, uint32_t* out_id);
+rl_status_code_t rl_dev_cancel_object(rl_dev_t* device, uint32_t object_id);
+rl_status_code_t rl_dev_register_object_buffer(rl_dev_t* device, uint8_t* storage, size_t size);
 rl_status_code_t rl_dev_send_group(rl_dev_t* device, uint16_t group, const uint8_t* payload,
                                    size_t payload_size, const rl_group_send_options_t* options,
                                    rl_message_id_t* out_id);
