@@ -68,7 +68,8 @@ const CLIENT_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_mill
 const WIRE_HEADER_SIZE: usize = 26;
 const WIRE_CRC_SIZE: usize = 4;
 /// Cumulative grant the daemon extends to the device for its sends
-/// (DataFromMesh/DeliveryEvent/Diagnostic); topped up on CREDIT_QUERY.
+/// (DataFromMesh/DeliveryEvent/Diagnostic); returned in half-window batches,
+/// with CREDIT_QUERY recovery when a grant is lost.
 const DEVICE_TX_GRANT_FRAMES: u64 = 16;
 const DEVICE_TX_GRANT_BYTES: u64 = 65_536;
 /// Public development hostlink secret (the firmware Kconfig default) — used
@@ -223,6 +224,9 @@ struct DeviceSession {
     /// Cumulative grant we extend to the device for its sends.
     tx_grant_frames: u64,
     tx_grant_bytes: u64,
+    /// Authenticated non-control frames consumed since the last credit return.
+    rx_return_frames: u64,
+    rx_return_bytes: u64,
     /// Timestamp of the last begin() so the writer can pace handshake retries.
     last_begin_ms: u64,
 }
@@ -256,6 +260,8 @@ impl DeviceSession {
             send_credit: CumulativeCredit::default(),
             tx_grant_frames: 0,
             tx_grant_bytes: 0,
+            rx_return_frames: 0,
+            rx_return_bytes: 0,
             last_begin_ms: 0,
         }
     }
@@ -520,6 +526,8 @@ impl DeviceSession {
                 self.send_credit = CumulativeCredit::new(self.session_id);
                 self.tx_grant_frames = DEVICE_TX_GRANT_FRAMES;
                 self.tx_grant_bytes = DEVICE_TX_GRANT_BYTES;
+                self.rx_return_frames = 0;
+                self.rx_return_bytes = 0;
                 result.outbound.push(Outbound::Seal(self.grant_frame()));
                 result.auth_session = Some(self.session_id);
                 result.notes.push(format!(
@@ -611,6 +619,23 @@ impl DeviceSession {
                                 result.session_lost = true;
                                 self.queue_hello(&mut result);
                                 return result;
+                            }
+                        }
+                        if !is_control_kind(frame.kind) {
+                            self.rx_return_frames += 1;
+                            self.rx_return_bytes +=
+                                (WIRE_HEADER_SIZE + frame.body.len() + WIRE_CRC_SIZE) as u64;
+                            // Return consumed credit before the device runs dry:
+                            // waiting for QUERY lets a concurrent ingress/delivery
+                            // burst fill its bounded queue during the round trip.
+                            if self.rx_return_frames >= DEVICE_TX_GRANT_FRAMES / 2
+                                || self.rx_return_bytes >= DEVICE_TX_GRANT_BYTES / 2
+                            {
+                                self.tx_grant_frames += self.rx_return_frames;
+                                self.tx_grant_bytes += self.rx_return_bytes;
+                                self.rx_return_frames = 0;
+                                self.rx_return_bytes = 0;
+                                result.outbound.push(Outbound::Seal(self.grant_frame()));
                             }
                         }
                         result.inner = Some(inner);
@@ -4123,6 +4148,58 @@ mod tests {
             op.dispatch_state,
             send_store::DispatchState::GatewayAccepted
         );
+    }
+
+    #[test]
+    fn session_returns_consumed_credit_before_exhaustion() {
+        let mut session = DeviceSession::new();
+        let proof = complete_handshake(&mut session);
+        let mut charged_bytes = 0;
+        for counter in 0..DEVICE_TX_GRANT_FRAMES / 2 {
+            let body = seal_body(
+                &proof.key_d2h,
+                DIRECTION_DEVICE_TO_HOST,
+                counter,
+                FrameKind::DataFromMesh,
+                0,
+                0,
+                b"value",
+            );
+            let mut data = frame(FrameKind::DataFromMesh, 0, 0, body);
+            data.session = proof.session_id;
+            charged_bytes += (WIRE_HEADER_SIZE + data.body.len() + WIRE_CRC_SIZE) as u64;
+            let inbound = session.handle(&data);
+            assert!(inbound.inner.is_some());
+            if counter + 1 < DEVICE_TX_GRANT_FRAMES / 2 {
+                assert!(inbound.outbound.is_empty());
+            } else {
+                let [Outbound::Seal(grant)] = inbound.outbound.as_slice() else {
+                    panic!("half-window must return one sealed grant");
+                };
+                assert_eq!(grant.kind, FrameKind::Credit);
+                assert_eq!(grant.body[0], CREDIT_GRANT);
+                assert_eq!(
+                    u64::from_be_bytes(grant.body[1..9].try_into().unwrap()),
+                    DEVICE_TX_GRANT_FRAMES + DEVICE_TX_GRANT_FRAMES / 2
+                );
+                assert_eq!(
+                    u64::from_be_bytes(grant.body[9..17].try_into().unwrap()),
+                    DEVICE_TX_GRANT_BYTES + charged_bytes
+                );
+            }
+            // A replay must neither be consumed nor returned as new credit.
+            let replay = session.handle(&data);
+            assert!(replay.inner.is_none());
+            assert!(replay.outbound.is_empty());
+        }
+        assert_eq!(session.rx_return_frames, 0);
+        assert_eq!(session.rx_return_bytes, 0);
+        // A new authenticated session cannot inherit a partial batch.
+        session.rx_return_frames = 3;
+        session.rx_return_bytes = 123;
+        complete_handshake(&mut session);
+        assert_eq!(session.rx_return_frames, 0);
+        assert_eq!(session.rx_return_bytes, 0);
     }
 
     #[test]

@@ -44,6 +44,8 @@ Error（`code u16 || request u64 || reason`）とDeliveryEvent（`… || state u
 
 ## 4. zero-creditの回復
 
+host は認証済みの非 CONTROL frame を消費したら、初期 credit の半窓（frame または byte）ごとに消費分を累積 grant へ返す。CREDIT_QUERY は grant 喪失時の回復にも使う。
+
 通常DATA/BULKとは別にCONTROL予約を最大4frame×256B設ける。AUTH後のcredit query、grant、keepalive、close等だけ、全相手合算10frame/s burst4以下。CONTROLにCONTROL ACKを無限要求しない。初期AUTHにもさらに有界なpreauth quotaが必要。
 
 zero-credit時のqueryは500ms以上の間隔で最大3回、応答が無ければCONNECTION_STALLED。CONTROL予約で通常DATAを迂回しない。
