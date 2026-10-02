@@ -24,6 +24,7 @@ firmware hashの自己申告はattestationではない。COM番号やUSB serial�
 - transcript（121 B、big-endian）：`"RLU1TRN2" || host_nonce u64 || device_nonce u64 || min_version u8 || max_version u8 || version u8 || carrier u8 || binding 32B || node u64 || boot u64 || network u64（完全な64 bit） || capability u32 || plen u8 || principal（32 Bまで0埋め）`。carrierはUSB/serialが0、bindingは安全なchannelを結び付けるcarrier用の予約でUSBでは全0。
 - session値はすべて `HMAC-SHA-256(K, label || 0x00 || transcript)`：`key-h2d`・`key-d2h`（各32 B、方向別のframe MAC鍵）、`hello`・`auth`・`auth-ok`（先頭16 Bのtag）、`session-id`（先頭8 BのBE u64）。
 - 手順：HELLO（`host_nonce || min || max || plen || principal`）→ HelloAck（`device_nonce || version || node || boot || network || capability || hello_tag`）→ host が hello_tag を検証し AUTH（Hello＋flag AUTH、`auth_tag`）→ AUTH_OK（HelloAck＋flag AUTH、`auth_ok_tag || session_id`）。tagの比較は定数時間。
+- 起動順：所属済み gateway はローカルの保存済み所属検証と MeshNode の起動が終わるまで、正しい AUTH を受けても AUTH_OK と初期 credit を保留する。待機も既存の 5 秒の認証期限内に収め、期限後に session を活性化しない。未所属・復旧状態では参加・復旧に必要な USB を利用できる。AUTH_OK は経路や end session の再確立完了を保証せず、配送期限は別に適用する。
 - 版：機器はprotocol 2だけを受ける。範囲に2を含まないHELLOは`VERSION_UNSUPPORTED`で拒否し、protocol 1への自動fallbackはしない。hostが出した範囲はtranscriptに入るため、途中で書き換えた範囲はAUTHで失敗する。
 - frame：`counter u64 || tag 16B || inner`。`tag = HMAC-SHA-256(方向の鍵, dir u8 || counter u64 || kind u8 || flags u16 || request u64 || inner)` の先頭16 B。counterは方向ごとにsession開始時0から始まり、機器は期待値と一致しないframeを`REPLAY_REJECTED`で拒否する（sessionごとに窓を初期化）。最大値（2^64−1）は送受信せず、到達したsessionは作り直す。
 - 暗号化はしない（完全性・相互認証・replay保護のみ）。`payload_hash`（idempotencyの同一性）はSHA-256の先頭16 B。
