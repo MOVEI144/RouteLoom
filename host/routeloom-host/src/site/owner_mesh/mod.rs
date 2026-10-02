@@ -78,6 +78,7 @@ mod hfinal;
 mod join;
 mod kg;
 mod load;
+mod m08hw;
 mod membership;
 mod mesh;
 mod object;

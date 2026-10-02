@@ -1,0 +1,1 @@
+- Add real-Owner M08 contention, delayed-callback and occupied-Owner fault coverage. The stock C3 gateway terminal quota still fails the 40-admitted-message overload; production behavior, capacity and retention are unchanged.
