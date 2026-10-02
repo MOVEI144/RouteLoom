@@ -1051,6 +1051,7 @@ impl SiteAuthority {
             id.site_cert = active.clone();
             id.site_claims = claims;
         }
+        channel_plan::restore_channel(&mut id, &snapshot)?;
         let mut binding = id.site_id.to_be_bytes().to_vec();
         binding.extend_from_slice(&id.network.to_be_bytes());
         binding.extend_from_slice(&id.sak_kid);

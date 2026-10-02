@@ -376,8 +376,7 @@ impl UsbHost {
                         if let Ok(report) =
                             routeloom_protocol::host_ops::decode_channel_plan_report(&inner)
                         {
-                            let _ =
-                                service.with(|a| a.channel_plan.on_report(request, report, now));
+                            let _ = service.with(|a| a.channel_plan_report(request, report, now));
                         }
                     } else if authority_sub(&inner) == Some(SUB_AUTHORITY_UP) {
                         self.ups_seen += 1;

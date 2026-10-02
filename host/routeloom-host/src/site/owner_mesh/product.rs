@@ -3,6 +3,7 @@
 //! Member and explicit gateway delivery, both over the production Device
 //! boot path of every peer.
 
+use super::recovery::all_ready;
 use super::*;
 use crate::config::{
     config_dev_key, ConfigIssuer, ConfigLane, ConfigOutcome, ConfigRequest, ConfigStep,
@@ -549,7 +550,7 @@ fn plan_switch(world: &mut MeshWorld, new_channel: u8, epoch: u32) {
         "SAK-signed plan admitted: {report:?}"
     );
     assert_eq!(report.offered_plan, signed.plan_hash, "the offered plan");
-    let members = (world.peers.len() - 1) as u8;
+    let members = service.with(|a| a.channel_plan_required()).0 as u8;
     assert!(report.ready < members, "READY is still partial: {report:?}");
     let refused = service
         .with(|a| a.channel_plan_release(world.now))
@@ -599,15 +600,20 @@ fn plan_switch(world: &mut MeshWorld, new_channel: u8, epoch: u32) {
     let (result, _, report) = plan_settle(world);
     assert_eq!(result, 0, "commit released: {report:?}");
     assert!(report.released, "released: {report:?}");
+    let gated = world.gate.clone();
     plan_pump(world, 10_000, |snaps| {
-        snaps.iter().all(|s| {
-            s.channel == new_channel
-                && s.plan_epoch == epoch
-                && s.plan_channel == new_channel
-                && s.plan_phase == PLAN_STABLE
+        snaps.iter().enumerate().all(|(index, s)| {
+            gated[index]
+                || (s.channel == new_channel
+                    && s.plan_epoch == epoch
+                    && s.plan_channel == new_channel
+                    && s.plan_phase == PLAN_STABLE)
         })
     });
     for (index, snap) in world.snaps.iter().enumerate() {
+        if gated[index] {
+            continue;
+        }
         assert_eq!(
             (snap.channel, snap.plan_epoch, snap.plan_phase),
             (new_channel, epoch, PLAN_STABLE),
@@ -949,4 +955,65 @@ fn mesh_p03_devram_refuses_channel_plan() {
         assert_eq!(output.stdout[2], b'E', "{mode}: fatal frame tag");
         assert_eq!(&output.stdout[3..], b"CHANNEL_PLAN_MEMBER_ONLY", "{mode}");
     }
+}
+
+#[test]
+fn mesh_h7_late_join_uses_active_channel() {
+    let cap = format!("{}", USB_CAP | 0x2000);
+    let mut world = MeshWorld::start_booted(
+        "h7-late-channel",
+        Switch::new(&Topology {
+            nodes: 3,
+            edges: vec![(0, 1), (0, 2)],
+        }),
+        &[0, 0, 0],
+        false,
+        &[2],
+        &[
+            &["--cap", &cap, "--channel-plan"],
+            &["--channel-plan"],
+            &["--channel-plan", "--channel", "11"],
+        ],
+    )
+    .expect("H7 requires real Owner peers");
+    world.gate[2] = true;
+    for _ in 0..6000 {
+        world.step(10);
+        if all_ready(&world.snaps[..2]) {
+            break;
+        }
+    }
+    assert!(all_ready(&world.snaps[..2]));
+    plan_switch(&mut world, 11, 1);
+    let report = plan_status(&mut world);
+    assert_eq!((report.active_channel, report.active_epoch), (11, 1));
+    world.daemon_restart();
+    let (channel, _) = world.provision.site.service.with(|a| {
+        let package = a.site_package(ROLE_MEMBER, world.now);
+        (package.channel, package.channel_epoch)
+    });
+    assert_eq!(
+        channel,
+        (11, 1),
+        "signed join package follows the verified gateway ledger"
+    );
+    world
+        .provision
+        .site
+        .decider
+        .assign(NODE_B, Assignment::Here(Role::Relay));
+    world.gate[2] = false;
+    for _ in 0..6000 {
+        world.step(10);
+        if all_ready(&world.snaps) {
+            break;
+        }
+    }
+    assert!(
+        all_ready(&world.snaps),
+        "late member confirms: {:?}",
+        world.snaps[2]
+    );
+    assert_eq!(world.snaps[2].channel, 11);
+    super::mesh::deliver_each(&mut world, 2, 0, 20, b"late-channel-11");
 }

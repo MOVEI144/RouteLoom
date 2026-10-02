@@ -1395,7 +1395,7 @@ pub fn site_once(
             return true;
         }
         if let Ok(report) = decode_channel_plan_report(body) {
-            let _ = service.with(|a| a.channel_plan.on_report(*request, report, mono));
+            let _ = service.with(|a| a.channel_plan_report(*request, report, mono));
         }
         false
     });
