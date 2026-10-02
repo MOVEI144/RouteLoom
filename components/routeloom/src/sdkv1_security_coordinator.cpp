@@ -1460,12 +1460,12 @@ Status SecurityCoordinator::emit_link_send(const HandshakeResult& result,
   // completed leg for the peer names an exchange the peer no longer routes.
   DemuxEntry* leg = nullptr;
   for (auto& entry : member().demux) {
-    if (entry.used && ((entry.has_start && entry.quiet_retry_token == 0) ||
-                       entry.quiet_retry_token == result.token) &&
-        entry.peer == result.peer) {
+    if (!entry.used || entry.peer != result.peer) continue;
+    if (entry.quiet_retry_token == result.token) {
       leg = &entry;
       break;
     }
+    if (entry.has_start && entry.quiet_retry_token == 0) leg = &entry;
   }
   if (leg == nullptr) return Status::error(StatusCode::NotFound, "no link leg");
   if (leg->object_id == 0) {

@@ -87,6 +87,34 @@ struct SecurityCoordinatorTestAccess {
   static Status pump_link_chunks(SecurityCoordinator& coordinator, MonotonicMs now) noexcept {
     return coordinator.pump_link_tx(now);
   }
+  static Status send_overlapping_link(SecurityCoordinator& coordinator, bool quiet_first,
+                                      bool retry, MonotonicMs now) noexcept {
+    auto& demux = coordinator.member().demux;
+    demux = {};
+    auto& quiet = demux[quiet_first ? 0 : 1];
+    quiet.used = true;
+    quiet.peer = 9;
+    quiet.mac = MacAddress{{2, 0, 0, 0, 0, 9}};
+    quiet.object_id = 0x11000000;
+    quiet.txn[0] = 0x11;
+    quiet.quiet_retry_token = 77;
+    auto& fresh = demux[quiet_first ? 1 : 0];
+    fresh.used = true;
+    fresh.has_start = true;
+    fresh.peer = quiet.peer;
+    fresh.mac = quiet.mac;
+    fresh.object_id = 0x22000000;
+    fresh.txn[0] = 0x22;
+    HandshakeResult send{};
+    send.event = HandshakeEvent::Send;
+    send.scope = SecurityScope::Link;
+    send.peer = quiet.peer;
+    send.token = retry ? 77 : 78;
+    send.phase = 4;
+    send.step = retry ? 4 : 2;
+    send.message_size = 1;
+    return coordinator.emit_link_send(send, now);
+  }
   static JoinObjectSlot::ReplyOutcome acknowledge_link_prefix(
       SecurityCoordinator& coordinator, std::uint16_t received, MonotonicMs now) noexcept {
     JoinReply reply{};
@@ -2783,6 +2811,34 @@ void test_direct_join_aead_and_usb_attach_retry() {
   }
 }
 
+void test_link_retry_uses_original_transaction() {
+  current = "link_retry_uses_original_transaction";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  // A parked fresh responder and a completed M4 leg can coexist. The
+  // retry must preserve its transaction regardless of table slot order.
+  for (const bool quiet_first : {false, true}) {
+    for (const bool retry : {true, false}) {
+      f.rld1.sends.clear();
+      CHECK(SecurityCoordinatorTestAccess::send_overlapping_link(
+                coordinator, quiet_first, retry, now).ok());
+      CHECK(f.rld1.sends.size() == 1);
+      if (f.rld1.sends.size() != 1) continue;
+      autonomy::Rld1Envelope env{};
+      const auto& bytes = f.rld1.sends[0].bytes;
+      CHECK(autonomy::rld1_decode(ByteView{bytes.data(), bytes.size()}, env).ok());
+      CHECK(env.transaction_nonce[0] == (retry ? 0x11 : 0x22));
+    }
+  }
+}
+
 void test_link_chunks_wait_for_receipts() {
   current = "link_chunks_wait_for_receipts";
   Fixture f{};
@@ -3094,6 +3150,7 @@ int main() {
   test_dev_channel_failure_rebuilds_small_side();
   test_dev_revocation_blocks_membership();
   test_direct_join_aead_and_usb_attach_retry();
+  test_link_retry_uses_original_transaction();
   test_link_chunks_wait_for_receipts();
   test_end_chunks_wait_for_receipts();
   test_milestones_fresh_is_unknown();
