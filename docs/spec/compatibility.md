@@ -107,9 +107,10 @@ with shared C++/Rust golden vectors under `protocol/golden`. Normative text:
   and the APPLIED execution lease carries a 32-bit end epoch. v1 frames are
   rejected. Persisted TX counter and replay floor records moved to layout 2;
   v1 records fail closed (`IntegrityError`), so a device flashed with v1
-  firmware needs an NVS erase before running v2. The C ABI bumped
-  `RL_ABI_VERSION` to 2 (`rl_node_config_t` / `rl_security_context_t` epoch
-  and generation fields are `uint32_t`). Rationale: issue #29/#48 — a 16-bit
+  firmware needs an NVS erase before running v2. At that earlier wire transition the C ABI bumped
+  to 2 (`rl_node_config_t` / `rl_security_context_t` epoch and generation fields
+  became `uint32_t`). The current core C ABI is 3; follow §4 and the
+  [v2 migration guide](../user/migrating-v2.md). Rationale: issue #29/#48 — a 16-bit
   epoch consumed per boot wrapped after 65,535 boots and permanently locked
   the node out.
 

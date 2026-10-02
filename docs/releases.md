@@ -97,5 +97,5 @@ HostLink v1 refusal, and the real Owner's downgrade/authentication negatives.
 HostLink v1 is intentionally incompatible: it must never become ACTIVE or
 silently fall back. Mixed peers from an N-1 **SDK release** are an optional
 later-release exercise; there is no previous SDK 2.x release at v2.0.0.
-Repository security reporting settings and the reporting contact remain
+Repository security private vulnerability reporting settings remain
 maintainer-operated prerequisites, as described in [SECURITY](../SECURITY.md).
