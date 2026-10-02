@@ -634,7 +634,7 @@ fn messages_read<S: OperationStore>(
             "network must be a 16-hex string",
         ));
     };
-    let network = acl::parse_network_hex(network_text)
+    let network = acl::parse_site_network_hex(network_text)
         .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
     let from = params.get("from").and_then(Json::as_str);
     let cursor_token = params.get("cursor").and_then(Json::as_str);
@@ -1232,7 +1232,7 @@ fn messages_subscribe<S: OperationStore>(
             "network must be a 16-hex string",
         ));
     };
-    let network = acl::parse_network_hex(network_text)
+    let network = acl::parse_site_network_hex(network_text)
         .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
     let from = params.get("from").and_then(Json::as_str);
     let cursor_token = params.get("cursor").and_then(Json::as_str);
@@ -6241,6 +6241,36 @@ mod tests {
             &c,
         );
         assert!(response.contains("UNKNOWN_METHOD"));
+    }
+
+    #[test]
+    fn receive_methods_keep_full_network_acl_scope() {
+        let network = 0x3_0a1b_2c3d;
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        ingest(&log, network, 1, b"member", 100);
+        for method in ["messages.read", "messages.subscribe"] {
+            let request = format!(
+                "{{\"v\":1,\"request_id\":\"r\",\"method\":\"{method}\",\"params\":{{\"network\":\"{network:016x}\",\"from\":\"earliest\"{}}}}}",
+                if method == "messages.subscribe" { ",\"stream\":\"messages\"" } else { "" },
+            );
+            for (grant, allowed) in [(network, true), (network & 0xffff_ffff, false)] {
+                let acl = Acl::parse(&format!(
+                    "{{\"principals\":{{\"501\":{{\"networks\":{{\"{grant:016x}\":[\"READ_PAYLOAD\"]}}}}}}}}"
+                )).unwrap();
+                let c = ctx(Some(501), &acl, &log, &store, &limiter, 200);
+                let response = handle(request.as_bytes(), &c);
+                if allowed {
+                    assert!(response.contains("\"ok\":true"), "{response}");
+                    if method == "messages.read" {
+                        assert!(response.contains("\"payload_hex\":\"6d656d626572\""));
+                    }
+                } else {
+                    assert!(response.contains("AuthorizationFailed"), "{response}");
+                }
+            }
+        }
     }
 
     #[test]

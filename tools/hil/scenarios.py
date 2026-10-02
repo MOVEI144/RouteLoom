@@ -61,6 +61,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -812,9 +813,56 @@ def _selftest() -> int:
     return 0
 
 
+def matrix_plan(rid: str, rig: rig_mod.Rig, manifest: Path) -> dict:
+    """Read the shared acceptance row without opening ports or running scripts."""
+    rows = json.loads(manifest.read_text(encoding="utf-8"))["rows"]
+    matches = [row for row in rows if row["id"] == rid]
+    if len(matches) != 1 or "hil" not in matches[0]["tier"]:
+        raise ScenarioConfigError(f"{rid}: expected one HIL matrix row")
+    row = matches[0]
+    hil = row["hil"]
+    remaining = list(rig.boards.values())
+    missing = []
+    assignment = {}
+    role_counts = {}
+    for requirement in hil.get("requires", []):
+        if (requirement.get("role") not in ("bridge", "reference")
+                or type(requirement.get("count")) is not int
+                or not 1 <= requirement["count"] <= 32
+                or not isinstance(requirement.get("chips"), list)
+                or not requirement["chips"]
+                or set(requirement["chips"]) - {"esp32c3", "esp32s3", "esp32c5", "esp32c6"}):
+            raise ScenarioConfigError(f"{rid}: invalid HIL board requirement")
+        for _ in range(requirement["count"]):
+            board = next((b for b in remaining if b.role == requirement["role"]
+                          and b.chip in requirement["chips"]), None)
+            index = role_counts.get(requirement["role"], 0)
+            role_counts[requirement["role"]] = index + 1
+            role = f"{requirement['role']}:{index}"
+            if board is None:
+                missing.append(role)
+            else:
+                assignment[role] = board.name
+                remaining.remove(board)
+    scripts = hil["run"]
+    if isinstance(scripts, list):
+        root = Path(__file__).resolve().parents[2]
+        for script in scripts:
+            if Path(script).parent != Path("tools/hil") or not (root / script).is_file():
+                raise ScenarioConfigError(f"{rid}: invalid HIL script {script!r}")
+    return {"id": rid, "rig": rig.name, "rounds": hil["rounds"],
+            "status": row["status"], "pass": row["pass"], "run": scripts,
+            "boards": assignment, "missing": missing,
+            "ready": bool(hil.get("requires")) and not missing,
+            "verdict": "NOT_RUN", "reason": "dry-run: no hardware or acceptance executed"}
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run RouteLoom HIL scenarios against a rig.")
+    parser.add_argument("--dry-run", metavar="ID", help="plan a shared E2E matrix row; no I/O")
+    parser.add_argument("--manifest", type=Path,
+                        default=Path(__file__).resolve().parents[2] / "tests/e2e/scenarios.json")
     parser.add_argument("--rig", help="path to rigs.yaml (required for a run)")
     parser.add_argument("--bench", help="bench name (default: first in file)")
     parser.add_argument("--scenario", action="append",
@@ -850,6 +898,15 @@ def main(argv: Optional[list[str]] = None) -> int:
               f"(have: {', '.join(sorted(rigs))})", file=sys.stderr)
         return 2
     rig = rigs[bench_name]
+
+    if args.dry_run:
+        try:
+            plan = matrix_plan(args.dry_run, rig, args.manifest)
+        except (OSError, ValueError, KeyError, ScenarioConfigError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+        return 0 if plan["ready"] else 1
 
     selected = args.scenario or list(SCENARIOS)
     for name in selected:

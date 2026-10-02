@@ -40,7 +40,12 @@
 //   E <fail u8>                inject driver peer deletion failure (no reply)
 //   H <count u8><dst u64le>    untracked application burst through the
 //                              real runtime; reply h <accepted u8><queued u8>
+//   h <count u8><dst u64le>    tracked burst; reply h <accepted u8><queued u8>
+//                              <count u8> then status u8, session u32, seq u64
 //   N                          dump the fake-NVS image (reply: N <image>)
+//   r                          drain up to 64 application receipts; reply
+//                              r <overflow u32><count u8> then source u64,
+//                              session u32, seq u64, len u8, payload
 //   P                          power-cycle: persist the NVS image and take
 //                              the reboot marker (exit 42), like a field
 //                              power cut mid-RAM — the respawn recovers
@@ -1009,6 +1014,12 @@ class PipeByteStream final : public routeloom::usb::ByteStream {
 // the host); this tee keeps the same evidence for the snapshot.
 class TeeObserver final : public routeloom::NodeObserver {
  public:
+  struct Receipt {
+    routeloom::MessageKey key{};
+    NodeId source{0};
+    std::array<std::uint8_t, routeloom::kMaxApplicationPayload> payload{};
+    std::uint8_t length{0};
+  };
   explicit TeeObserver(routeloom::NodeObserver* next) noexcept : next_(next) {}
   void chain(routeloom::NodeObserver* next) noexcept { next_ = next; }
   void bind_device(routeloom::Device& device) noexcept { device_ = &device; }
@@ -1025,6 +1036,15 @@ class TeeObserver final : public routeloom::NodeObserver {
     rx_src_ = source;
     rx_len_ = payload.size > kAppRxKeep ? kAppRxKeep : payload.size;
     std::memcpy(rx_, payload.data, rx_len_);
+    if (receipts_size_ < receipts_.size()) {
+      Receipt& receipt = receipts_[receipts_size_++];
+      receipt.key = key;
+      receipt.source = source;
+      receipt.length = static_cast<std::uint8_t>(payload.size);
+      std::memcpy(receipt.payload.data(), payload.data, payload.size);
+    } else {
+      ++receipts_overflow_;
+    }
     if (next_ != nullptr) next_->on_message(key, source, payload);
   }
   void on_delivery(const routeloom::DeliveryResult& result) noexcept override {
@@ -1041,6 +1061,9 @@ class TeeObserver final : public routeloom::NodeObserver {
   }
 
   std::uint32_t rx_count_{0};
+  std::array<Receipt, 64> receipts_{};
+  std::size_t receipts_size_{0};
+  std::uint32_t receipts_overflow_{0};
   NodeId rx_src_{routeloom::kInvalidNodeId};
   std::uint8_t rx_[kAppRxKeep]{};
   std::size_t rx_len_{0};
@@ -1442,7 +1465,7 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
 
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--harness-version") == 0) {
-    std::fputs("7\n", stdout);
+    std::fputs("8\n", stdout);
     return 0;
   }
   using namespace routeloom;
@@ -1450,6 +1473,14 @@ int main(int argc, char** argv) {
   using namespace routeloom::sdkv1;
   using namespace routeloom::usb;
 
+  int antenna_level = -2;
+  unsigned gpio_fail_call = 0;
+  if (argc >= 4 && std::strcmp(argv[1], "--check-board-rf") == 0) {
+    antenna_level = std::atoi(argv[2]);
+    gpio_fail_call = static_cast<unsigned>(std::atoi(argv[3]));
+    argc -= 3;
+    argv += 3;
+  }
   const Setup setup = parse_argv(argc, argv);
   if (!setup.nvs_load.empty()) {
     if (!setup.flash.empty() || !setup.flash_ext.empty()) fatal("nvs-load with flash import");
@@ -1459,6 +1490,7 @@ int main(int argc, char** argv) {
   mesh_peer_seed_entropy(setup.seed);
 
   idf_stub::reset();
+  idf_stub::fail_gpio_call(gpio_fail_call);
   idf_stub::set_peer_limit(20);
   idf_stub::set_mac(setup.mac.data());
   idf_stub::set_now_us(static_cast<std::int64_t>(setup.t0) * 1000);
@@ -1536,7 +1568,26 @@ int main(int argc, char** argv) {
     config.usb_device_nonce = setup.seed ^ 0xD15EA5ED00B1E5ULL;
   }
   status = device.begin(config, now);
+  if (gpio_fail_call != 0) {
+    if (status.ok() || status.code != StatusCode::RadioFailure ||
+        std::strcmp(status.detail, "rf switch GPIO setup failed") != 0 ||
+        idf_stub::wifi_init_called() || idf_stub::log_contains("rf switch: enabled")) {
+      fatal("GPIO failure did not stop RF startup");
+    }
+    return 0;
+  }
   if (!status) boot_failed(status);
+  if (antenna_level != -2) {
+    if (!idf_stub::board_rf_before_wifi(antenna_level)) fatal("board RF startup ordering");
+    if (antenna_level < 0) {
+      if (idf_stub::log_contains("rf switch: enabled")) fatal("unexpected RF switch log");
+    } else if (!idf_stub::log_contains(antenna_level == 0
+                                         ? "rf switch: enabled, antenna: internal"
+                                         : "rf switch: enabled, antenna: external")) {
+      fatal("missing RF switch antenna log");
+    }
+    return 0;
+  }
   if (!idf_stub::log_contains(setup.devram ? "security profile: Development"
                                          : "security profile: Candidate")) {
     fatal("boot security profile is not visible");
@@ -1681,6 +1732,24 @@ int main(int argc, char** argv) {
                       setup.world_nodes, gw_tx, DeviceTestAccess::gateway(device), device,
                       events, applied);
         write_frame(Bytes{'D'});
+        break;
+      }
+      case 'r': {
+        Bytes reply{'r'};
+        put_u32(reply, observer.receipts_overflow_);
+        reply.push_back(static_cast<std::uint8_t>(observer.receipts_size_));
+        for (std::size_t i = 0; i < observer.receipts_size_; ++i) {
+          const auto& receipt = observer.receipts_[i];
+          put_u64(reply, receipt.source);
+          put_u32(reply, receipt.key.id.session);
+          put_u64(reply, receipt.key.id.sequence);
+          reply.push_back(receipt.length);
+          reply.insert(reply.end(), receipt.payload.begin(),
+                       receipt.payload.begin() + receipt.length);
+        }
+        observer.receipts_size_ = 0;
+        observer.receipts_overflow_ = 0;
+        write_frame(reply);
         break;
       }
       case 'R': {
@@ -1878,20 +1947,55 @@ int main(int argc, char** argv) {
                           static_cast<std::uint8_t>(idf_stub::peer_count())});
         break;
       }
-      case 'H': {
+      case 'H':
+      case 'h': {
         if (length != 10) fatal("bad H");
+        const bool tracked = payload[0] == 'h';
+        if (tracked) {
+          if (payload[1] > kAppTxMax) fatal("tracked burst too large");
+          for (auto& entry : app_tx) {
+            if (entry.state == DeliveryState::Empty || entry.state >= DeliveryState::Delivered)
+              entry = AppTx{};
+          }
+        }
         NodeId dst = 0;
         for (int i = 0; i < 8; ++i) dst |= static_cast<NodeId>(payload[2 + i]) << (8 * i);
         std::uint8_t accepted = 0;
+        Bytes evidence;
         for (std::uint8_t i = 0; i < payload[1]; ++i) {
           const std::uint8_t byte = i;
           SendOptions options{};
           options.lifetime_ms = 30000;
           MessageId id{};
-          if (device.send(dst, ByteView{&byte, 1}, options, id)) ++accepted;
+          const Status sent = device.send(dst, ByteView{&byte, 1}, options, id);
+          if (sent) ++accepted;
+          if (tracked) {
+            evidence.push_back(static_cast<std::uint8_t>(sent.code));
+            put_u32(evidence, id.session);
+            put_u64(evidence, id.sequence);
+            if (sent) {
+              AppTx* slot = nullptr;
+              for (auto& entry : app_tx) {
+                if (!entry.used) {
+                  slot = &entry;
+                  break;
+                }
+              }
+              if (slot == nullptr) fatal("tracked burst evidence full");
+              slot->used = true;
+              slot->id = id;
+              slot->state = device.delivery(id).state;
+              std::strncpy(slot->reason, "SENT", sizeof(slot->reason) - 1);
+            }
+          }
         }
-        write_frame(Bytes{'h', accepted, static_cast<std::uint8_t>(
-                                          runtime.node().congestion_stats().queued)});
+        Bytes reply{'h', accepted,
+                    static_cast<std::uint8_t>(runtime.node().congestion_stats().queued)};
+        if (tracked) {
+          reply.push_back(payload[1]);
+          reply.insert(reply.end(), evidence.begin(), evidence.end());
+        }
+        write_frame(reply);
         break;
       }
       case 'I':
