@@ -506,7 +506,7 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
 Status MeshNode::on_radio_tx_result(const std::uint64_t token, const bool success,
                                     const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   ++work_generation_;
   if (!physical_.active || physical_.token != token) {

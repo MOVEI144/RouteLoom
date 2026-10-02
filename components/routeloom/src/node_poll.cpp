@@ -1,11 +1,24 @@
 #include "node_internal.hpp"
+#include "routeloom/owner_pump.hpp"
 
 namespace routeloom {
 
+void MeshNode::note_deadline(const MonotonicMs at) noexcept {
+  next_poll_ms_ = std::min(next_poll_ms_, at);
+}
+
+void MeshNode::note_timer(const MonotonicMs base, const std::uint32_t delay) noexcept {
+  note_deadline(base > UINT64_MAX - delay ? UINT64_MAX : base + delay);
+}
+
 void MeshNode::process_awaiting_hop(const MonotonicMs now_ms) noexcept {
+  if (awaiting_hop_.size() == 0) return;
   saturating_add(work_stats_.expiry_slots_scanned, awaiting_hop_.capacity());
   awaiting_hop_.erase_if(
-      [&](const AwaitingHop& value) { return value.expires_at_ms <= now_ms; },
+      [&](const AwaitingHop& value) {
+        if (value.expires_at_ms > now_ms) note_deadline(value.expires_at_ms);
+        return value.expires_at_ms <= now_ms;
+      },
       [&](AwaitingHop& expired) {
         TxJob& job = expired.job;
         if (expired.busy_deferred) {
@@ -50,6 +63,15 @@ void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
       set_delivery_state(delivery, DeliveryState::Expired, "DEADLINE_EXPIRED");
       return;
     }
+    note_deadline(delivery.expires_at_ms);
+    if (delivery.order_wait) {
+      if (!paused(pause::kRetryRounds) && delivery.order_hold_until_ms > now_ms)
+        note_deadline(delivery.order_hold_until_ms);
+    } else if (!paused(pause::kRetryRounds) && delivery.next_round_at_ms > now_ms &&
+               (delivery.state == DeliveryState::WaitingForRoute ||
+                delivery.state == DeliveryState::WaitingForEndReceipt)) {
+      note_deadline(delivery.next_round_at_ms);
+    }
     // While retry rounds are paused (sleep drain or an operational pause),
     // the deliveries wait for their disposition instead of making new work.
     if (delivery.order_wait) {
@@ -88,6 +110,7 @@ void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
           } else {
             delivery.next_round_at_ms = delivery.expires_at_ms;
           }
+          note_deadline(delivery.next_round_at_ms);
           return;
         }
         if (static_cast<std::uint8_t>(delivery.round + 1U) >=
@@ -109,6 +132,7 @@ void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
       const auto status = queue_origin_data(delivery, now_ms);
       if (!status) {
         delivery.next_round_at_ms = now_ms + 100;
+        note_deadline(delivery.next_round_at_ms);
         set_delivery_state(delivery, DeliveryState::WaitingForRoute, status.detail);
       }
     }
@@ -116,21 +140,48 @@ void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
 }
 
 void MeshNode::expire_dedup(const MonotonicMs now_ms) noexcept {
+  if (dedup_.size() == 0) return;
   saturating_add(work_stats_.expiry_slots_scanned, dedup_.capacity());
-  const std::size_t expired = dedup_.erase_if(
-      [&](const DedupEntry& value) { return value.expires_at_ms <= now_ms; });
+  const std::size_t expired = dedup_.erase_if([&](const DedupEntry& value) {
+    if (value.expires_at_ms > now_ms) note_deadline(value.expires_at_ms);
+    return value.expires_at_ms <= now_ms;
+  });
   saturating_add(dedup_stats_.expired, expired);
+}
+
+bool MeshNode::deadline_supported() const noexcept {
+  // Scoped/group components and queued scheduler work retain their
+  // compatibility cadence until all their timers publish a minimum.
+  return !gateway_scoped() && group_trees_.size() == 0 && group_origins_.size() == 0 &&
+         group_streams_.size() == 0 && group_holds_.size() == 0 && !group_promote_hold_.used &&
+         scheduler_.empty();
+}
+
+MonotonicMs MeshNode::next_deadline(const MonotonicMs now_ms) const noexcept {
+  if (!started_) return UINT64_MAX;
+  if (now_ms < last_clock_ms_) return now_ms;
+  if (!deadline_complete_) {
+    const auto fallback = now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2;
+    return std::max(now_ms, std::min(next_poll_ms_, fallback));
+  }
+  return std::max(now_ms, next_poll_ms_);
 }
 
 Status MeshNode::poll(const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
   if (!started_) return Status::success();
+  if (deadline_complete_ && now_ms >= last_clock_ms_ && now_ms < next_poll_ms_) {
+    return Status::success();
+  }
+  NodeGuard guard(*this, false);
+  next_poll_ms_ = UINT64_MAX;
   last_clock_ms_ = now_ms;
   // Expired/revoked admission transactions close before anything else may
   // transmit: no new TX leaves on a dead transaction (design-q116 §7.2).
   sweep_transactions(now_ms);
-  saturating_add(work_stats_.expiry_slots_scanned, routes_.expire(now_ms));
+  if (routes_.size() != 0) {
+    saturating_add(work_stats_.expiry_slots_scanned, routes_.expire(now_ms, &next_poll_ms_));
+  }
   // P3 (03 §6/§7): decay the per-peer observation windows, release stale
   // busy feedback at its TTL, refresh effective link costs and advance the
   // route-switch hysteresis before any selection change is advertised.
@@ -168,6 +219,14 @@ Status MeshNode::poll(const MonotonicMs now_ms) noexcept {
   // calls (design-q116 §8.3): their poll() no longer runs here, and their
   // payloads/completions wait in the component event queue for take/complete.
   dispatch_next(now_ms);
+  if (!paused(pause::kBackgroundWork)) {
+    note_deadline(next_route_advertisement_ms_);
+    if (triggered_advertisement_) {
+      note_deadline(std::max(triggered_at_ms_, next_triggered_ms_));
+    }
+  }
+  if (physical_.active) note_timer(physical_.submitted_at_ms, config_.callback_watchdog_ms);
+  deadline_complete_ = deadline_supported();
   return Status::success();
 }
 

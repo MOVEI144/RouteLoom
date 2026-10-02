@@ -472,6 +472,14 @@ class SecurityCoordinator final : public BootstrapSink,
   // when none stands): the save side resolves the retained link through
   // this. Side-effect-free observation, like snapshot().
   bool first_live_peer(SecurityScope scope, NodeId& peer) const noexcept;
+  // Durable Member identity for sleep pending. Does not expose credentials.
+  bool member_context(NetworkId& network, std::uint32_t& generation) const noexcept {
+    if (mode_ != CoordinatorMode::Member || deps_.site == nullptr || !deps_.site->has_site())
+      return false;
+    network = deps_.site->site().network;
+    generation = deps_.site->site().assignment_generation;
+    return true;
+  }
   // The membership hooks over the adopted stores (dev: over the static
   // dev config plus the shared revocation gates), for the adopted
   // discovery's MembershipHooks port (the firmware initializes the

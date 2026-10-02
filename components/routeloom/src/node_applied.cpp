@@ -188,7 +188,7 @@ std::size_t MeshNode::open_applied_tickets(const MonotonicMs now_ms) const noexc
 Status MeshNode::complete_applied(const std::uint64_t ticket, const AppliedReply& reply,
                                   const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   if (static_cast<std::uint32_t>(ticket) == 0 || reply.deferred ||
       reply.size > endpoint::kAppResultDataMax ||
@@ -642,9 +642,21 @@ void MeshNode::process_applied(const MonotonicMs now_ms) noexcept {
   // Emit retries: an unacked committed result retransmits inside its window
   // and emit budget; dedup/QUERY replays share the same counters.
   applied_records_.for_each([&](AppliedRecord& record) {
+    note_deadline(record.expires_at_ms);
+    if (record.ticket == 0 && !record.acked && record.emits < kAppliedMaxEmits &&
+        now_ms < record.emit_deadline_ms) {
+      note_deadline(record.emit_deadline_ms);
+      if (now_ms < record.next_emit_ms) note_deadline(record.next_emit_ms);
+    }
     if (record.ticket == 0 && !record.acked && record.emits < kAppliedMaxEmits &&
         now_ms >= record.next_emit_ms && now_ms < record.emit_deadline_ms) {
       (void)emit_applied_result(record, now_ms);
+      if (!record.acked && record.emits < kAppliedMaxEmits) {
+        if (record.next_emit_ms > now_ms)
+          note_deadline(record.next_emit_ms);
+        else
+          note_timer(now_ms, 2);
+      }
     }
   });
 }

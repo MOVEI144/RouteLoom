@@ -105,7 +105,7 @@ class MemoryPowerStorage final : public PowerStorage {
         target.size != kPowerImageRecordSize) {
       return Status::error(StatusCode::InvalidArgument, "bad power read");
     }
-    if (read_error) {
+    if (read_error || read_error_slot == slot) {
       return Status::error(StatusCode::StorageFailure, "injected read error");
     }
     std::memcpy(target.data, slots_[slot].data(), target.size);
@@ -169,6 +169,7 @@ class MemoryPowerStorage final : public PowerStorage {
   std::size_t fail_skip_writes{0};
   int last_slot{-1};
   bool read_error{false};
+  int read_error_slot{-1};
 
  private:
   std::array<std::array<std::uint8_t, kPowerImageRecordSize>, kPowerImageSlots>
@@ -177,6 +178,10 @@ class MemoryPowerStorage final : public PowerStorage {
 
 class FakePowerPort final : public PowerPort {
  public:
+  bool matches_context(const PowerImage& image, NetworkId network) const noexcept override {
+    return context_matches && PowerPort::matches_context(image, network);
+  }
+  bool context_matches{true};
   Status capture_cache(PowerImage& image) noexcept override {
     ++capture_calls;
     if (!inject_capture) return inject_capture;
@@ -407,6 +412,32 @@ struct PowerWorld {
   }
 };
 
+void test_fixed_sleep_record_compatibility() {
+  MemoryPowerStorage storage;
+  PowerWorld w(storage);
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot, {}, 0));
+  for (unsigned i = 0; i < kPowerPeerCacheCapacity; ++i)
+    w.platform_peer(0x1020304050607000ULL + i, static_cast<std::uint8_t>(i + 1),
+                    static_cast<RouteMetric>(i + 2));
+  for (unsigned i = 0; i < kPowerPendingCapacity; ++i) {
+    std::array<std::uint8_t, kMaxApplicationPayload> payload{};
+    for (unsigned j = 0; j < payload.size(); ++j) payload[j] = static_cast<std::uint8_t>(i + j);
+    SendOptions options{};
+    options.lifetime_ms = 1000;
+    MessageId id{};
+    CHECK_OK(
+        w.node.send(0x1020304050608000ULL + i, {payload.data(), payload.size()}, options, 0, id));
+  }
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Save;
+  CHECK_OK(w.coordinator.sleep_prepare(request, 0));
+  CHECK(w.pump_until(PowerState::ReadyToSleep));
+  std::array<std::uint8_t, kPowerImageRecordSize> record{};
+  CHECK_OK(
+      storage.read(static_cast<std::uint8_t>(storage.last_slot), {record.data(), record.size()}));
+  CHECK(crc32_iso_hdlc({record.data(), record.size() - 4}) == 0xec6a432bU);
+}
+
 void test_cold_boot_and_errors() {
   MemoryPowerStorage storage;
   PowerWorld w(storage);
@@ -471,6 +502,22 @@ SleepTicket reach_ready(PowerWorld& w) {
   CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
   CHECK(w.pump_until(PowerState::ReadyToSleep));
   return w.coordinator.ticket();
+}
+
+void test_platform_context_refuses_saved_image() {
+  MemoryPowerStorage storage;
+  PowerWorld saved(storage);
+  CHECK_OK(saved.coordinator.begin(ResetCause::ColdBoot, {}, 0));
+  const SleepTicket ticket = reach_ready(saved);
+  saved.port.context_matches = false;
+  CHECK(!saved.coordinator.ticket_valid(ticket));
+  CHECK(saved.coordinator.sleep_enter(ticket, saved.now).code == StatusCode::InvalidState);
+  PowerWorld wake(storage);
+  wake.port.context_matches = false;
+  CHECK_OK(wake.coordinator.begin(ResetCause::DeepSleepWake, {1, 1, true}, 0));
+  CHECK(wake.coordinator.resume_outcome() == ResumeOutcome::CacheLost);
+  CHECK(std::find(wake.events.diagnostics.begin(), wake.events.diagnostics.end(),
+                  "SLEEP_IMAGE_CONTEXT_MISMATCH") != wake.events.diagnostics.end());
 }
 
 void test_power_stats_accumulate() {
@@ -5475,11 +5522,78 @@ void test_trusted_sleep_elapsed() {
   CHECK(remaining == 60000 - static_cast<std::uint32_t>(trusted.upper_ms));
 }
 
+void test_unread_sleep_slot_latches_recovery() {
+  for (int failed_slot = 0; failed_slot < kPowerImageSlots; ++failed_slot) {
+    MemoryPowerStorage storage;
+    PowerWorld before(storage);
+    CHECK_OK(before.coordinator.begin(ResetCause::ColdBoot, {}, 0));
+    const MessageId saved = queue_pending(before, 99, true);
+    CHECK_OK(before.coordinator.sleep_prepare(SleepRequest{}, before.now));
+    CHECK(before.pump_until(PowerState::ReadyToSleep));
+    CHECK(std::strcmp(before.node.delivery(saved).reason, "SLEEP_SAVED") == 0);
+    const auto writes = storage.write_calls;
+    storage.read_error_slot = failed_slot;
+    PowerWorld after(storage);
+    CHECK(after.coordinator.begin(ResetCause::DeepSleepWake, {10, 10, true}, 0).code ==
+          StatusCode::RecoveryRequired);
+    storage.read_error_slot = -1;
+    CHECK(after.coordinator.sleep_prepare(SleepRequest{}, 1).code == StatusCode::RecoveryRequired);
+    after.pump(1000);
+    CHECK(storage.write_calls == writes);
+    CHECK(after.events.pending_results.empty());
+    PowerWorld retry(storage);
+    CHECK_OK(retry.coordinator.begin(ResetCause::DeepSleepWake, {10, 10, true}, 0));
+    CHECK(retry.events.pending_results.size() == 1);
+    if (retry.events.pending_results.size() == 1) {
+      CHECK(retry.events.pending_results[0].first == saved);
+      CHECK(retry.events.pending_results[0].second == StatusCode::Ok);
+    }
+  }
+}
+
+void test_unread_wake_reopens_radio_without_consuming_image() {
+  MemoryPowerStorage storage;
+  PowerWorld world(storage);
+  CHECK_OK(world.coordinator.begin(ResetCause::ColdBoot, {}, 0));
+  const auto ticket = reach_ready(world);
+  CHECK_OK(world.coordinator.sleep_enter(ticket, world.now));
+  CHECK(world.port.radio_quiesced);
+  storage.read_error = true;
+  CHECK(world.coordinator.wake(ResetCause::DeepSleepWake, {10, 10, true}, world.now + 10).code ==
+        StatusCode::RecoveryRequired);
+  CHECK(!world.node.draining());
+  CHECK(!world.port.radio_quiesced);
+  CHECK(world.events.pending_results.empty());
+}
+
+void test_sleep_image_readback_failure_refuses_ticket() {
+  MemoryPowerStorage storage;
+  PowerWorld world(storage);
+  CHECK_OK(world.coordinator.begin(ResetCause::ColdBoot, {}, 0));
+  const MessageId pending = queue_pending(world, 99, true);
+  storage.read_error = true;
+  CHECK_OK(world.coordinator.sleep_prepare(SleepRequest{}, world.now));
+  world.pump(1000);
+  CHECK(world.coordinator.state() == PowerState::Running);
+  CHECK(!world.coordinator.ticket().issued);
+  CHECK(std::strcmp(world.node.delivery(pending).reason, "SLEEP_SAVED") != 0);
+  const auto writes = storage.write_calls;
+  storage.read_error = false;
+  CHECK(world.coordinator.sleep_prepare(SleepRequest{}, world.now).code ==
+        StatusCode::RecoveryRequired);
+  CHECK(storage.write_calls == writes);
+}
+
 }  // namespace
 
 int main() {
+  test_unread_sleep_slot_latches_recovery();
+  test_unread_wake_reopens_radio_without_consuming_image();
+  test_sleep_image_readback_failure_refuses_ticket();
   test_send_lifetime_ceiling();
+  test_platform_context_refuses_saved_image();
   test_power_stats_accumulate();
+  test_fixed_sleep_record_compatibility();
   test_cold_boot_and_errors();
   test_full_cycle_transition_order();
   test_ticket_invalidated_by_app_event();

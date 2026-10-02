@@ -1210,7 +1210,33 @@ void run_suite(const AeadGcm& port, bool& fail_next) {
 
 }  // namespace
 
+void suite_absolute_deadlines() {
+  for (const MonotonicMs start :
+       {MonotonicMs{1000}, MonotonicMs{UINT32_MAX - 1000}, UINT64_MAX - 1000}) {
+    Fixture<NodeSessionBank> fix{};
+    CHECK_OK(fix.configure(fix.test_port(), kSelf, start));
+    install_link(fix.bank, kPeer, 77, 88, 1);
+    const MonotonicMs due = fix.bank.next_deadline();
+    const MonotonicMs expected = start > UINT64_MAX - NodeSessionBank::kContextLifetimeMs
+                                     ? UINT64_MAX
+                                     : start + NodeSessionBank::kContextLifetimeMs;
+    CHECK(due == expected);
+    const auto scanned = fix.bank.expiry_slots_scanned();
+    for (MonotonicMs now = start + 1; now < start + 999; ++now) CHECK_OK(fix.bank.tick(now));
+    CHECK(fix.bank.expiry_slots_scanned() == scanned);
+    SessionBankEntry exported{};
+    CHECK_OK(fix.bank.export_entry(SecurityScope::Link, kPeer, exported));
+    CHECK(exported.remaining_ms == expected - (start + 998));
+    CHECK(fix.bank.tick(start).code == StatusCode::InvalidArgument);
+    CHECK(fix.bank.next_deadline() == due);
+    CHECK_OK(fix.bank.tick(due));
+    CHECK(!fix.bank.has_usable(SecurityScope::Link, kPeer));
+    CHECK(fix.bank.next_deadline() == UINT64_MAX);
+  }
+}
+
 int main() {
+  suite_absolute_deadlines();
   std::printf("sizeof SessionBankEntry=%zu SessionOverlapEntry=%zu\n", sizeof(SessionBankEntry),
               sizeof(SessionOverlapEntry));
   std::printf("sizeof NodeSessionBank=%zu GatewaySessionBank=%zu\n", sizeof(NodeSessionBank),

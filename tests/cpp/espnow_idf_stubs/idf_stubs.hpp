@@ -27,6 +27,7 @@ bool last_send_to(const std::uint8_t mac[6]) noexcept;
 unsigned del_peer_count() noexcept;
 void fail_del_peer(bool fail) noexcept;
 void fail_add_peer(bool fail) noexcept;
+void fail_wifi_stop(bool fail) noexcept;
 // Opt-in physical ESP-NOW table for the Owner mesh harness. Other stub
 // tests keep the historical permissive driver unless they set a limit.
 void set_peer_limit(std::size_t limit) noexcept;
@@ -64,7 +65,9 @@ unsigned tx_overruns() noexcept;
 // Called after every successful xQueueReceive (nullptr clears): lets a
 // test refill a queue while the Owner drains it, as the radio does.
 void set_receive_hook(void (*hook)(void* context), void* context) noexcept;
-// Ticks passed to the most recent xQueuePeek.
+// Inject an event immediately before the atomic notification wait.
+void set_notify_wait_hook(void (*hook)(void*), void* context) noexcept;
+// Ticks passed to the most recent blocking notification take (0 if signalled).
 unsigned last_peek_ticks() noexcept;
 bool log_contains(const char* text) noexcept;
 

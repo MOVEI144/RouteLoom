@@ -560,6 +560,8 @@ int main(void) {
 
   CHECK(start_node(a, 1, 11) == RL_STATUS_OK);
   CHECK(start_node(b, 2, 22) == RL_STATUS_OK);
+  rl_poll(a->context, now);
+  CHECK(rl_next_deadline(a->context, now) <= now + RL_POLL_INTERVAL_MAX_MS);
   CHECK(rl_add_neighbor(a->context, b->id, 1, now) == RL_STATUS_OK);
   CHECK(rl_add_neighbor(b->context, a->id, 1, now) == RL_STATUS_OK);
   run(300);

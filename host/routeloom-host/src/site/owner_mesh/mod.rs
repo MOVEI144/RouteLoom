@@ -79,6 +79,7 @@ mod membership;
 mod mesh;
 mod object;
 mod peer;
+mod power;
 mod product;
 mod recovery;
 mod relay_reset;

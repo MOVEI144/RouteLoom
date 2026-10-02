@@ -276,7 +276,10 @@ void MeshNode::sweep_transactions(const MonotonicMs now_ms) noexcept {
         }
       }
     }
-    if (!close) continue;
+    if (!close) {
+      note_deadline(slot.deadline_ms);
+      continue;
+    }
     if (slot.state == TxnState::Committed) slot.state = TxnState::Closing;
     // Unstarted scheduler jobs terminate through the ordinary failure path
     // so a dead forward still reports its TransitFailure evidence.

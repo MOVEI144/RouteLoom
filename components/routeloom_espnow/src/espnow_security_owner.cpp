@@ -379,6 +379,10 @@ sdkv1::SecurityCoordinator& EspNowSecurityOwner::coordinator() noexcept {
   return *reinterpret_cast<sdkv1::SecurityCoordinator*>(coordinator_box_.data());
 }
 
+const sdkv1::SecurityCoordinator& EspNowSecurityOwner::coordinator() const noexcept {
+  return *reinterpret_cast<const sdkv1::SecurityCoordinator*>(coordinator_box_.data());
+}
+
 SecurityProvider& EspNowSecurityOwner::session_provider() noexcept {
   return coordinator().session_provider();
 }
@@ -761,6 +765,28 @@ Status EspNowSecurityOwner::adopt_dev(const DevConfig& config,
            static_cast<unsigned long long>(config.node),
            static_cast<unsigned long>(config.boot));
   return Status::success();
+}
+
+MonotonicMs EspNowSecurityOwner::next_deadline(const MonotonicMs now_ms) const noexcept {
+  if (!booted_) return UINT64_MAX;
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  // Dev has no handshake, bank expiry or lifecycle poll work. Channel
+  // operations retain the compatibility cadence until their next event.
+  return tune_.active ? (now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2) : UINT64_MAX;
+#elif defined(ESP_PLATFORM)
+  // Member lifecycle and discovery still require the compatibility cadence;
+  // no slower schedule can extend this image's wait.
+  return now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2;
+#else
+  MonotonicMs due = coordinator().next_deadline(now_ms);
+  // Authority transports and channel tuning retain fallback while their
+  // pending slots do not publish a complete deadline contract.
+  if (lifecycle_live_ || tune_.active || coordinator().mode() == sdkv1::CoordinatorMode::Member) {
+    const MonotonicMs fallback = now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2;
+    if (fallback < due) due = fallback;
+  }
+  return due;
+#endif
 }
 
 void EspNowSecurityOwner::poll(const MonotonicMs now_ms) noexcept {
