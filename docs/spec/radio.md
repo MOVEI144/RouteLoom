@@ -1,12 +1,12 @@
 # 無線サブシステム：ESP-NOW / Wi-Fi LR
 
-基準仕様1.1、2026-09-17。実装契約であり実機認定ではない。[初期値JSON](../reference/radio-defaults.json)と同時に版管理する。
+基準仕様1.1、discovery の実装照合は 2026-10-02（ee9b018e）。実機認定ではない。[設計初期値JSON](../reference/radio-defaults.json)の目標と実効値を区別する。発見の現行値は §7 を参照する。
 
 ## 1. 固定する範囲
 
 | 項目 | 規約 |
 |---|---|
-| 対象 | ESP32-C3 / S3 / C5、別々のfirmware build |
+| 対象 | ESP32-C3 / S3 / C6。C5 は build 対応・実機確認待ち |
 | 基盤 | ESP-IDF v6.0.3、commit 76f5dedd9950a3012fee8fb7d5586df21fc67802 |
 | 通信 | STA未接続のESP-NOW、2.4GHz、Wi-Fi LRのみ |
 | 共通制御 | LR250。発見、Join、復旧、経路広告、HOP_ACCEPT、管理計画 |
@@ -94,15 +94,24 @@ Noise Floorや全MAC再送回数が全チップで取れると仮定しない。
 
 ## 7. 発見と早い復帰
 
-DISCOVERはLR250・1hop。既存の受信可能ノードは16slots×10msの窓でOFFERを分散し、要求nonceと応答者IDで偏りを変える。応答者は1応答/秒、burst2。要求者は3候補で早期終了可能。
+DISCOVER/OFFER は LR250・局所 1hop。近隣 link の発見と、未所属／留保した Member の site 参加探索は別の経路である。OFFER は候補であり本人性や参加許可の証拠ではない。
 
-一channelの探索滞在上限200msには切替・TX・応答を含める。予算不足なら試行を短縮し、全窓を必ず使えると仮定しない。応答がない一回だけで物理圏外を確定しない。
+| 経路 | 現行の実装値・挙動 | 正本 |
+|---|---|---|
+| 近隣発見 | OFFER は 16 slots × 10 ms（160 ms）。候補 16、近隣 32、候補 TTL 5000 ms。起動 jitter 0〜1000 ms 未満、最初の retry 500〜2000 ms から最大 60000 ms へ倍増 | `discovery.hpp` の `discovery_const`／`DiscoveryConfig`、`discovery.cpp` |
+| 近隣の lease／repair | awake lease 30000 ms、idle refresh 20000 ms、probe timeout 2000 ms。期限切れは Stale とし所属を消さない。認証済み HOP_ACCEPT の往復も lease の証拠に使う。起動時の unbound sweep は最大 8 round | `discovery.hpp`、`node_receive.cpp` |
+| ZeroTouch の site 探索 | scan channel は最大 3（既定 1/6/11）、1 窓 320 ms。proxy の OFFER は 32 slots × 10 ms。留保した site の再検証 scan は最大 15 s 間隔 | `sdkv1_join_candidates.hpp`、`sdkv1_joiner.hpp`、`sdkv1_join_relay.hpp` |
+| 賢い参加（opt-in） | `smart_join=false` が既定。ON は受信先行、listen 3000 ms／search 60000 ms が既定。boot/API/孤立で有限探索。予定 mark は最大 3、取消・単調期限・更新あり。予定と retained-site を区別し、Authority が最終認可 | `sdkv1_records.hpp` の `JoinPolicy`、`sdkv1_joiner.cpp`、`sdkv1_join_relay.cpp` |
+| deep-sleep の活動予算 | `ROUTELOOM_SLEEP_RADIO_BUDGET_MS` の絶対期限（既定 40000 ms）が discovery・参加復旧・drain と queue 済み bootstrap の driver 投入を制限する | component Kconfig、Device／ESP-NOW runtime |
 
-安全なsessionと保存相手があれば起床後はデータ本体から送る。失敗時だけ同channel予備、同channelLR発見、保存移行先、候補channelへ広げる。初回Join承認と経路修復を混同しない。
+設計 JSON の一 channel 200ms、sleepy 活動 2000ms／探索最大 2 周は短い wake の設計目標であり、現 Member の 320 ms 窓や Device の 40 s 既定とは別である。停止予約100msと未完TXの待ちを考慮する短時間 profile の認定は未完了。2000msで2周を完遂できるとも、200ms以内に全 Join が終わるとも保証しない。
 
-Deep Sleep型の既定活動予算は2000ms、探索最大2周。ただし停止予約100msおよび未完TXの最大待ちを予算に確保し、収まる操作だけ開始する。2周を常に完遂する保証ではない。driver故障時の安全停止・再起動は予算超過として記録する。
+近隣発見は最初の有効な OFFER を使う。proxy では cookie 前の組立てを拒否し、同時 relay 1 件・新規 m1 最短 2 s、組立て 1024 B／3 s を守る。近隣発見の bootstrap 組立ては別の 4 枠／5 s（[資源](resource-profiles.md)）。
 
-給電ノードの再探索は500〜2000msの乱数待ちから最大60000msへ伸ばす。孤立群は少数の探索担当を選び、全員が同時にhomeを離れない。探索担当には管理設定を変更する権限を与えない。
+安全な session と保存相手がある場合はそれを利用し、必要時に再確認と発見へ進む。route が見えること、link が認証されたこと、gateway まで届くことを分ける。失敗した探索で旧所属を勝手に消さない。
+
+未実装の設計項目：近隣 OFFER 専用の 1 応答/s・burst 2 の limiter、3 候補での比較終了、孤立群の探索担当選出、密度に応じた応答抽選。現実装の有界候補・cookie・handshake 間隔・scope 入力制限をこれらと同じ保証と扱わない。実装追加が必要な項目は別作業とし、本改訂ではコードを変更しない。
+
 
 ## 8. 再送と結果不明
 
@@ -150,7 +159,7 @@ driver処理時間に内部再送が含まれるならETXを再度掛けない�
 
 ESP-IDFの素のesp_now APIを使う。上位のespressif/esp-now componentには独自のACK・forward・送信lock・channel巡回があるため、新SDKへ丸ごと重ねない。既存試験コードのblocking waitやdata floodも踏襲しない。
 
-公開sourceを参照したことはbinary Wi-Fi driver内部を監査した意味ではない。C3/S3/C5混在、弱電界時のMAC結果と認証受理、broadcast250、peer別500、callback欠落、wake、channel移行を[受入ゲート](acceptance.md)で確認する。
+公開sourceを参照したことはbinary Wi-Fi driver内部を監査した意味ではない。C3/S3/C6 と C5 を含む混在、弱電界時のMAC結果と認証受理、broadcast250、peer別500、callback欠落、wake、channel移行を[受入ゲート](acceptance.md)で確認する。
 
 
 ## 13. 受理・混雑・探索の追加規範
@@ -161,9 +170,9 @@ DevRam／Memberでは、認証済みsessionの成立後に相手のboot epochへ
 
 初回DATAにはSDKの無条件random jitterを加えない。0〜20msはlink retryのみ。driver CCA/backoffは残る。認証・受理後のHOP_ACCEPTを、当該DATAのforwardより先に予約queueへ投入するが、外部無線による送信時刻までは保証しない。END_RECEIPT受領時点のAPI完了と最後のlink ACK送信時間は別計測。
 
-16slotsは予約TDMAではなく応答時刻の分散。DISCOVER/OFFERはRLD1 envelope全体で160B以下（`kRld1MaxTotal`、scoped OFFERは実測104B）。requesterは一度に1transaction、cold-startに0〜1000msのばらつき、失敗後500〜2000msから最大60秒へbackoffする（sleep予算が優先）。responderはglobal応答上限を守り、要求が混んだときの候補選択をrotateして一つの要求に固定しない。
+16slotsは予約TDMAではなく応答時刻の分散。DISCOVER/OFFERはRLD1 envelope全体で160B以下（`kRld1MaxTotal`、scoped OFFERは実測104B）。requesterは一度に1transaction、cold-startに0〜1000msのばらつき、失敗後500〜2000msから最大60秒へbackoffする（sleep予算が優先）。近隣発見の候補・transient 枠は有界だが、専用の global OFFER limiter と候補 rotation は未実装（§7）。
 
-高密度ではrequest nonce由来の応答抽選率を1、1/2、1/4、1/8へ抑えられるが、未認証の密度値だけで変更しない。窓を延長する場合はrequesterのdwellと明示交渉し、200msの既定滞在を黙って越えない。この適応は実RF認定までexperimental。単独cold Joinと100台同時JoinのSLOは別。
+将来の高密度 profile では request nonce 由来の応答抽選率 1、1/2、1/4、1/8 を検討する。現実装は density hint を運ぶが、この抽選を行わない。未認証の密度値だけで変更しない。将来の窓延長は requester と明示交渉する。設計上の 200ms と現 ZeroTouch の 320ms を混同しない。この適応は未実装・未認定。単独cold Joinと100台同時JoinのSLOは別。
 
 ## 14. 制御予算と資格
 

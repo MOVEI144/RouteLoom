@@ -2,7 +2,7 @@
 # Deployment is opt-in via ROUTELOOM_PAGES_ENABLED (see docs/user/pages.md).
 # docs_dir is docs/: no document file is moved or renamed for the site.
 site_name: RouteLoom 文書
-site_description: 組み込み向け適応Mesh SDK（ESP32-C3/S3/C5/C6、ESP-NOW）の設計・実装文書。SDK 2.0.0-dev（pre-release）でありRF・本番認定は未完了。
+site_description: 組み込み向け適応Mesh SDK（ESP32-C3/S3/C5/C6、ESP-NOW）の設計・実装文書。v2.0 向け開発版でありH2／H3／H4と本番認定は未完了。C5は実機確認待ち。
 site_url: https://movei144.github.io/RouteLoom/
 repo_name: MOVEI144/RouteLoom
 repo_url: https://github.com/MOVEI144/RouteLoom
@@ -64,6 +64,8 @@ nav:
     - 利用: user/guide.md
     - Security: user/security.md
     - 運用: user/operations.md
+    - Kconfig の選び方: user/configuration.md
+    - v1 → v2 移行: user/migrating-v2.md
     - Pages 公開: user/pages.md
   - API reference:
     - 案内: api/README.md

@@ -1,1 +1,0 @@
-The host dispatcher now removes retry timestamps when their send operation is reclaimed. Long-lived gateway connections retain only the bounded store's retry history, while live operations keep their retry cadence.

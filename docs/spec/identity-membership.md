@@ -20,7 +20,7 @@ NodeIDはcredentialへ結び付ける安定した機器Identity。short address�
 
 ## 4. 1hop発見、multi-hop参加
 
-1. 新規ノードが候補channelでLR250のDISCOVERを送る。
+1. 新規ノードが候補 channel で LR250 の DISCOVER を送る。賢い参加を選んだ場合は先に受信し、有限探索内で probe を送る（現行値は [radio §7](radio.md)）。
 2. 既存の受信可能な中継器が乱数窓でOFFERを返す。候補のRoot距離は認証前にはヒントだけ。
 3. 少数候補から参加proxyを選び、双方向通信を確認する。
 4. proxyは有界なbootstrap転送だけを提供し、要求を正当な承認／認証先へ運ぶ。
@@ -36,7 +36,15 @@ DISCOVERは局所1hopだけ。未認証データを全網へFloodしない。coo
 
 preauth proxyは管理先以外へ任意のpayloadを送る公開relayにはしない。authorizationが完了する前にroute広告、中継許可、service広告を受け入れない。
 
-**ゼロタッチ参加（SDK v1、EXPERIMENTAL、[sdk-v1/02 §5](../design/sdk-v1/02-zero-touch-join.md)）**：RLD1 body v3のZeroTouch class（3）は、network 0の探索を`NETWORK_REQUIRED`で拒否するCommissioning classとは**別class**の例外として、未割当機器（RLI1あり・RLS1なし、Discovering）にnetwork_hint 0のDISCOVERを許す。応答するのは`zero_touch_open`のmemberだけで、交換（BootstrapAuth phase 4〜6、chunk/reply）は下表のAuthenticating／Memberの範囲内に収まる：機器は上り（m1/m3、R1/R3）送信・下り受信、proxyはその逆で、proxyのrelay先は自分のgatewayだけ（Wire FrameType 3〜6、hopごとのlink保護）。cookie検査前に組立てmemoryを使わず、proxyの同時relayは1件、新規m1は2秒に1件、組立ては1件1024B・3秒。`protocol/semantics.json`の`zero_touch_join`がこの範囲を記録する。
+**ゼロタッチ参加（SDK v1、EXPERIMENTAL、[sdk-v1/02 §5](../design/sdk-v1/02-zero-touch-join.md)）**：ZeroTouch class（3）は legacy body v3 と smart body v4 を読む。smart probe の送信は v4、RLD1 carrier 自体は version 1 である。ZeroTouch は、network 0の探索を`NETWORK_REQUIRED`で拒否するCommissioning classとは**別class**の例外として、未割当機器（RLI1あり・RLS1なし、Discovering）にnetwork_hint 0のDISCOVERを許す。応答する proxy は policy 有効・Authority 到達可能・同じ org・site を回避していないことが必要。`zero_touch_open` が閉じていても当該 site を留保した機器の復帰には応答する。単なる member が常に proxy になるわけではない。交換（BootstrapAuth phase 4〜6、chunk/reply）は下表のAuthenticating／Memberの範囲内に収まる：機器は上り（m1/m3、R1/R3）送信・下り受信、proxyはその逆で、proxyのrelay先は自分のgatewayだけ（Wire FrameType 3〜6、hopごとのlink保護）。cookie検査前に組立て memory を使わず、proxyの同時relayは1件、新規m1は2秒に1件、組立ては1件1024B・3秒。`protocol/semantics.json`の`zero_touch_join`がこの範囲を記録する。
+
+### 賢い参加と参加予定
+
+Device の `JoinPolicy` を revision の CAS で保存し、`smart_join` を明示的に ON にする。既定は OFF。listen/search の有限時間、boot 起動、留保した site の選択を指定できる。終了した探索は再試行の受付を解放し、保持した所属を復元する。無音を未所属や自動移設と読み替えない。
+
+`join_mark` は本人の非公開の 16 B installation mark。site は `join.policy.set` の最大 3 件の予定一覧を既存 proxy policy で配布し、保存確認・取消・期限前の更新を行う。probe は nonce に結び付けた mark を使い、raw NodeId を公開しない。proxy は一覧と gateway epoch cache の新鮮さを応答直前にも確認する。予定 mark、OFFER と cookie は EDHOC／Authority の承認を代替しない。
+
+Device の公開状態は `MembershipStage`（Unprovisioned／Joining／PendingAuthority／Member／Removed／Recovery／Leaving）。上の protocol 状態と一対一の enum ではない。connectivity の Unknown を含め、所属と到達性は別に観測する。[移行と利用手順](../user/migrating-v2.md)を参照する。
 
 ## 6. 再接続
 
@@ -76,4 +84,4 @@ AUTHENTICATINGのpeer本人性はまだ未確定。ROLE承認を先取りしな�
 
 MEMBERのproxyは非memberから通常DATA/ROUTE/SERVICEを受けず、許可されたbootstrap型だけを正規認証先へ転送する。一般MEMBER間のallowlistをpreauth ingressへ適用してはいけない。preauth最大object1024B、同時1、総pool1536B、期限3秒等は[資源profile](resource-profiles.md)に従う。大きいcredentialは別profileの認定まで拒否する。
 
-REVOKEDは通常resume禁止。情報の再取得や再provisionは物理管理または別の承認済み手順とし、未知frameを口実にmembershipを消去しない。
+REVOKED は通常 resume 禁止。Member の削除後は耐久 cleanup と holdoff を経て identity-only の探索へ戻れる。Authority が失効世代より上で再承認し、対応する新 GK epoch を RRS1 の readmit に結び付けた後に通信を再開する。表の通常通信禁止を「本人の再 provision が必須」と読み替えない。未知 frame を口実に membership を消去しない。
