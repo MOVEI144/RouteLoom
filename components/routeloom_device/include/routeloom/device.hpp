@@ -308,7 +308,7 @@ class Device {
   void usb_receive(ByteView bytes, MonotonicMs now_ms) noexcept;
 
   // The only call another task may make: queues `job` for the Owner task.
-  // Busy when kPostCapacity jobs are waiting.
+  // Busy when kPostCapacity jobs are waiting or sleep handoff has begun.
   Status post(Job job, void* ctx) noexcept;
 
   Status send(NodeId destination, ByteView payload, const SendOptions& options,
@@ -491,6 +491,9 @@ class Device {
   std::array<Posted, kPostCapacity> posted_{};
   std::uint8_t posted_head_{0};
   std::uint8_t posted_count_{0};
+#if ROUTELOOM_DEVICE_SLEEP
+  bool sleep_post_blocked_{false};  // guarded by posted_lock_
+#endif
   portMUX_TYPE posted_lock_ = portMUX_INITIALIZER_UNLOCKED;
 };
 

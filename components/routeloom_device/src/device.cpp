@@ -573,6 +573,12 @@ void Device::bind_runtime(espnow::EspNowRuntime& runtime) noexcept {
 Status Device::post(const Job job, void* ctx) noexcept {
   if (job == nullptr) return Status::error(StatusCode::InvalidArgument, "post job missing");
   portENTER_CRITICAL(&posted_lock_);
+#if ROUTELOOM_DEVICE_SLEEP
+  if (sleep_post_blocked_) {
+    portEXIT_CRITICAL(&posted_lock_);
+    return Status::error(StatusCode::Busy, "sleep handoff in progress");
+  }
+#endif
   const bool full = posted_count_ == kPostCapacity;
   if (!full) {
     posted_[static_cast<std::size_t>((posted_head_ + posted_count_) % kPostCapacity)] =
@@ -641,13 +647,22 @@ Status Device::enter_sleep(const SleepTicket& ticket) noexcept {
   CallbackScope scope(in_callback_);
   portENTER_CRITICAL(&posted_lock_);
   const bool posted = posted_count_ != 0;
+  // Freeze acceptance before the final gate; no producer can leave a
+  // newly accepted job behind while the platform enters sleep.
+  if (!posted) sleep_post_blocked_ = true;
   portEXIT_CRITICAL(&posted_lock_);
   const MonotonicMs now = runtime_->now_ms();
   if (posted || !runtime_->sleep_quiescent()) (void)power_->notify_app_event(now);
   if (runtime_->radio_generation() != sleep_radio_generation_) {
     (void)power_->notify_radio_reset(now);
   }
-  return power_->sleep_enter(ticket, now);
+  const Status status = power_->sleep_enter(ticket, now);
+  if (power_->state() != PowerState::Sleeping) {
+    portENTER_CRITICAL(&posted_lock_);
+    sleep_post_blocked_ = false;
+    portEXIT_CRITICAL(&posted_lock_);
+  }
+  return status;
 }
 
 Status Device::abort_sleep() noexcept {
@@ -662,6 +677,9 @@ Status Device::wake(const ResetCause cause, const ElapsedInterval elapsed,
   if (callback_active()) return Status::error(StatusCode::Busy, "reentrant call");
   if (power_ == nullptr) return Status::error(StatusCode::Unsupported, "sleep not bound");
   CallbackScope scope(in_callback_);
+  portENTER_CRITICAL(&posted_lock_);
+  sleep_post_blocked_ = false;
+  portEXIT_CRITICAL(&posted_lock_);
   const Status status = power_->wake(cause, elapsed, now_ms);
   sleep_radio_generation_ = runtime_->radio_generation();
   return status;

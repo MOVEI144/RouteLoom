@@ -1,6 +1,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
 #include "esp_sleep.h"
 #include "idf_stubs.hpp"
@@ -75,12 +76,24 @@ class Port final : public PowerPort {
   Status configure_wake(const WakePlan&) noexcept override { return Status::success(); }
   Status enter_sleep() noexcept override {
     ++enters;
-    return Status::success();
+    if (post_at_handoff != nullptr) {
+      std::thread producer([&] {
+        handoff_post_status = post_at_handoff->post(
+            +[](Device&, void* ctx) { ++*static_cast<unsigned*>(ctx); }, &handoff_jobs_run);
+      });
+      producer.join();
+      post_at_handoff = nullptr;
+    }
+    return enter_result;
   }
   Status start_discovery(const PowerImage&) noexcept override { return Status::success(); }
   Status park{};
   unsigned aborts{0};
   unsigned enters{0};
+  Device* post_at_handoff{nullptr};
+  Status handoff_post_status{};
+  Status enter_result{};
+  unsigned handoff_jobs_run{0};
 };
 
 class PendingObserver final : public DeviceObserver {
@@ -162,6 +175,7 @@ int run_device_sleep_scenarios() {
   Storage storage;
   Port port;
   Events events(device);
+  port.post_at_handoff = &device;
   PowerCoordinator power(PowerConfig{}, runtime.node(), port, storage, events);
   const auto drive = [&](const MonotonicMs now) {
     idf_stub::set_now_us(static_cast<std::int64_t>(now) * 1000);
@@ -182,7 +196,9 @@ int run_device_sleep_scenarios() {
     CHECK(device.wake(ResetCause::DeepSleepWake, {100, 100, true}, now + 100));
     CHECK(!runtime.node().draining());
     CHECK(device.wake_info() == ResumeOutcome::ColdStart);
+    drive(now + 100);
   }
+  CHECK(port.handoff_post_status.code == StatusCode::Busy && port.handoff_jobs_run == 0);
   CHECK(port.enters == 3);
   idf_stub::set_now_us(4000000);
   CHECK(device.prepare_sleep(SleepRequest{}));
@@ -202,6 +218,15 @@ int run_device_sleep_scenarios() {
   CHECK(storage.writes == writes && runtime.node().draining());
   drive(4500);
   CHECK(storage.writes == writes && !runtime.node().draining());
+  port.park = Status::success();
+  port.enter_result = Status::error(StatusCode::RadioFailure, "entry refused");
+  idf_stub::set_now_us(5000000);
+  CHECK(device.prepare_sleep(SleepRequest{}));
+  drive(5000);
+  CHECK(device.enter_sleep(device.sleep_ticket()).code == StatusCode::RadioFailure);
+  CHECK(device.post(posted, &ran));
+  drive(5001);
+  CHECK(ran == 2);
   runtime.stop();
   espnow::EspNowRuntime pending_runtime(config, security, observer);
   CHECK(pending_runtime.initialize());
