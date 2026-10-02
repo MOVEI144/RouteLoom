@@ -184,6 +184,38 @@ python3 tools/hil/scenarios.py --rig tools/hil/rigs.yaml --bench bench-a \
 python3 tools/hil/report.py --run-dir artifacts/hil/run-1
 ```
 
+For larger forced topologies, generate source-MAC allow-lists without accessing
+hardware:
+
+```sh
+python3 tools/hil/topology.py line7 boards.csv --out artifacts/hil/line7
+```
+
+The ordered CSV columns are `name,by_id,mac,chip,app,probe_mac`. `by_id` is a
+literal `/dev/serial/by-id/…` path; `mac` is the **six-byte Wi-Fi STA MAC** used
+by ESP-NOW. `probe_mac` is the esptool `chip-id` identity: mandatory eight-byte
+EUI-64 for C6, optional for C3/S3 (defaults to `mac`). Supported chips are
+C3/C6/S3; apps are `bridge_node`, `reference_node`, `bench_node`. For example:
+
+```csv
+name,by_id,mac,chip,app,probe_mac
+gateway,/dev/serial/by-id/board-a,02:00:00:00:00:01,esp32c3,bridge_node,
+relay,/dev/serial/by-id/board-b,02:00:00:00:00:02,esp32c6,reference_node,02:00:00:ff:fe:00:00:02
+```
+
+Supply seven rows for `line7` (line order), four for `diamond` (G/R1/R2/E),
+or 2–9 for `star` (center first; seven rows use all seven boards). Every edge
+is enabled in both directions; all other senders are discarded before either
+RLD1 or Wire processing, including broadcast. `CONFIG_ROUTELOOM_HIL_RX_ALLOW_MACS`
+accepts up to eight comma-separated MACs, parses at compile time, rejects bad
+syntax at build time, and compiles away when empty. Existing `DROP_RX_MAC`
+still applies afterward; use fresh images without an old drop override.
+The output contains per-board `.sdkconfig` overlays, a flasher-compatible
+`rig.json`, and `STEPS.md` with build and manual flash commands. Preserve the
+site's role/profile overrides and provisioning. Only flash in a separately
+authorized hardware round with the existing preflight and port reservation;
+generation performs no build or flash. This simulates adjacency, not RF range.
+
 The HIL flasher requires a full flash for signed bundles. Its app-only path
 uses a local build and verifies the device's partition table first.
 
