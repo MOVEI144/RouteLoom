@@ -1456,16 +1456,16 @@ Status SecurityCoordinator::emit_link_send(const HandshakeResult& result,
                                            const MonotonicMs now) noexcept {
   // The leg holds the peer MAC, the frozen carrier (cookie source) and
   // the transaction id (drawn on our first send, echoed after). Only a
-  // live (start-carrying) leg answers: a completed leg for the same peer
-  // names the old exchange, and sending on it would key the peer's demux
-  // to an id it no longer routes.
+  // live start or the exact completed retry token answers: another
+  // completed leg for the peer names an exchange the peer no longer routes.
   DemuxEntry* leg = nullptr;
   for (auto& entry : member().demux) {
-    if (entry.used && entry.has_start &&
-        entry.peer == result.peer) {
+    if (!entry.used || entry.peer != result.peer) continue;
+    if (entry.quiet_retry_token == result.token) {
       leg = &entry;
       break;
     }
+    if (entry.has_start && entry.quiet_retry_token == 0) leg = &entry;
   }
   if (leg == nullptr) return Status::error(StatusCode::NotFound, "no link leg");
   if (leg->object_id == 0) {
@@ -1614,13 +1614,12 @@ Status SecurityCoordinator::installed_link(const HandshakeResult& result,
         deps_.discovery->complete_handshake(entry.discovery_token, result.proof, last_now_);
         entry.discovery_token = NeighborDiscovery::kMemberHandshakeNone;
       }
-      // RLRES1's initiator installs before R3 is known to reach the
-      // responder. Keep its send leg until the engine's quiet R3 retries
-      // finish; otherwise a lost first R3 strands the two ends on
-      // different context ids after a peer reset.
+      // Local install precedes confirmation at the peer. Retain the exact
+      // send token for R3 and M4 retries. A completed M4 responder leg
+      // routes late replies without blocking fresh discovery.
       entry.quiet_retry_token = member().engine.has_quiet_link_retry(result.token)
                                     ? result.token : 0;
-      entry.has_start = entry.quiet_retry_token != 0;
+      entry.has_start = result.role == HandshakeRole::Initiator && entry.quiet_retry_token != 0;
     }
   }
   return Status::success();

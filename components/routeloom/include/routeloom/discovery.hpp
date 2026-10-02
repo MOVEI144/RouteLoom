@@ -987,18 +987,19 @@ class NeighborDiscovery {
   // first OFFER. When the start round (or a sweep round) drew OFFERs from
   // two or more unbound neighbours that are not discovering themselves (no
   // DISCOVER of theirs in the dedup window: they find us on their own), one
-  // more unbound-only round follows the completed handshake; a handshake
+  // more unbound-only round follows the completed handshake. A handed-off
+  // requester also continues after binding, since another OFFER may be lost.
+  // A handshake
   // that never completes is retried by a round once the exchange bound has
-  // passed. The sweep ends at a round that binds without hearing another
-  // unbound neighbour, an empty round, the round budget, or any later
-  // ordinary discovery round (repair owns it then).
+  // passed. The sweep ends at an empty round, the round budget, or any later
+  // ordinary discovery round without a handed-off retry (repair owns it then).
   static constexpr std::uint8_t kSweepRounds = 8;
   void note_sweep_offer(const std::array<std::uint8_t, 16>& nonce, NodeId peer,
                         const MacAddress& source, MonotonicMs now_ms) noexcept;
   bool sweep_armed_{false};
   bool start_round_begun_{false};
   bool sweep_seen_{false};   // the last DISCOVER drew a second unbound peer
-  bool sweep_retry_{false};  // a handed-off handshake has not completed
+  bool sweep_retry_{false};  // a handed-off requester needs another round
   std::uint8_t sweep_rounds_{0};
   MonotonicMs sweep_due_ms_{0};  // 0 = nothing to decide
   MonotonicMs sweep_window_end_ms_{0};  // late OFFERs of the last DISCOVER

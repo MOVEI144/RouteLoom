@@ -90,6 +90,9 @@ pub(super) struct Switch {
     /// Bounded, directed loss of an authenticated Wire frame kind.
     pub(super) drop_wire: Vec<(usize, usize, u8, u32)>,
     pub(super) wire_dropped: u32,
+    /// Lose a single-frame link authentication step on a directed leg.
+    pub(super) drop_link_step: Option<(usize, usize, u8, u8)>,
+    pub(super) link_steps_dropped: u32,
     pub(super) probes_seen: u32,
     pub(super) results_seen: u32,
     pub(super) route_updates_seen: u32,
@@ -141,6 +144,8 @@ impl Switch {
             callback_delay_kind: None,
             drop_wire: Vec::new(),
             wire_dropped: 0,
+            drop_link_step: None,
+            link_steps_dropped: 0,
             probes_seen: 0,
             results_seen: 0,
             route_updates_seen: 0,
@@ -219,7 +224,7 @@ impl Switch {
         }
     }
 
-    /// Keep actual old-network carriers for C7. A's certificate is in
+    /// Keep actual old-scope carriers for C7/K1. A's certificate is in
     /// an EDHOC step 2/3 object; a large object starts in chunk zero.
     pub(super) fn c7_observe(
         &mut self,
@@ -317,6 +322,20 @@ impl Switch {
     }
 
     pub(super) fn consume_wire_loss(&mut self, from: usize, to: usize, frame: &[u8]) -> bool {
+        if let Some((source, destination, phase, step)) = self.drop_link_step {
+            if from == source
+                && to == destination
+                && frame.len() > 46
+                && frame[..4] == *b"RLD1"
+                && frame[5] == 3
+                && frame[45] == phase
+                && frame[46] == step
+            {
+                self.drop_link_step = None;
+                self.link_steps_dropped += 1;
+                return true;
+            }
+        }
         let kind = if frame.len() >= 5 && frame[..4] == *b"RL\x02\0" {
             frame[4]
         } else if frame.len() >= 44 && frame[..4] == *b"RLD1" {

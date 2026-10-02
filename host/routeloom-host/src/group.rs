@@ -1118,6 +1118,7 @@ pub fn group_loop(state: Arc<State>, outbound: mpsc::SyncSender<Outbound>) {
     let mut lane = GroupLane::default();
     loop {
         group_once(&state, &outbound, &mut lane, now_ms());
+        crate::objects::once(&state, &outbound);
         state.group_ops.wait_lane(Duration::from_millis(TICK_MS));
     }
 }

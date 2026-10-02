@@ -658,7 +658,7 @@ class SecurityCoordinator final : public BootstrapSink,
     bool initiator{false};
     keys::LinkCarrier carrier{};
     std::uint32_t discovery_token{NeighborDiscovery::kMemberHandshakeNone};
-    std::uint32_t quiet_retry_token{0};  // RLRES1 R3 may need three more sends
+    std::uint32_t quiet_retry_token{0};  // completed R3/M4 send leg owner
     // Our transaction nonce (initiator: drawn on first send; responder:
     // echoed from the inbound m1/R1). object_id is its first 4 bytes.
     std::array<std::uint8_t, 16> txn{};

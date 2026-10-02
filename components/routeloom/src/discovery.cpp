@@ -426,7 +426,8 @@ Status NeighborDiscovery::begin_discovery_filtered(const MonotonicMs now_ms,
     return Status::error(StatusCode::PeerCapacity, "no transient peer slot");
   }
   if (!sweep) {
-    if (start_round_begun_) {
+    // Repair may overlap a handed-off start; keep its bounded sweep alive.
+    if (start_round_begun_ && !sweep_retry_) {
       sweep_armed_ = false;
       sweep_due_ms_ = 0;
     }
@@ -1958,7 +1959,9 @@ Status NeighborDiscovery::complete_handshake(const std::uint32_t token,
   // Decide once the new binding's first probe has left and the late OFFERs
   // of the last DISCOVER had their chance.
   if (sweep_armed_) {
-    sweep_retry_ = false;
+    // Keep the handed-off requester's retry: another OFFER may have
+    // been lost while it authenticated. A responder completion alone
+    // must not start another round.
     sweep_due_ms_ = std::max(add_sat(now_ms, config_.backoff_min_ms), sweep_window_end_ms_);
   }
   return Status::success();

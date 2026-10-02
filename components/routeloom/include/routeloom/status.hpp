@@ -49,6 +49,7 @@ enum class StatusCode : std::uint16_t {
   // Broad Commissioning-scope discovery requires a real Network; Network 0
   // is never valid for it (02-discovery-scope.md §2.2).
   NetworkRequired,
+  TooLarge,
 };
 
 struct Status {

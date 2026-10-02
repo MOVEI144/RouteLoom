@@ -33,6 +33,7 @@
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/key_schedule.hpp"
 #include "routeloom/node.hpp"
+#include "routeloom/app_object.hpp"
 #include "routeloom/profile.hpp"
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_store.hpp"
@@ -145,6 +146,9 @@ struct DeviceCapabilities {
   bool group_send{false};      // send_group() admissible on this node now
   std::uint16_t max_payload{0};
   std::uint16_t max_group_payload{0};
+  bool object_transfer{false};
+  std::uint16_t max_object_bytes{0};
+  std::uint8_t object_rx_slots{0};
 };
 
 // --- Membership, connectivity and operations (#191, #192, #193) ------------------
@@ -297,6 +301,18 @@ class Device {
 
   Status send(NodeId destination, ByteView payload, const SendOptions& options,
               MessageId& id) noexcept;
+  void observe_object(ObjectObserver* observer) noexcept {
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+    object_observer_ = observer;
+#else
+    (void)observer;
+#endif
+  }
+  Status send_object(NodeId destination, ByteView data, const ObjectOptions& options,
+                     ObjectId& id) noexcept;
+  Status cancel_object(ObjectId id) noexcept;
+  Status register_object_buffer(MutableByteView storage) noexcept;
+
   Status send_group(GroupId group, ByteView payload, const GroupSendOptions& options,
                     MessageId& id) noexcept;
   Status cancel(const MessageId& id) noexcept;
@@ -349,12 +365,22 @@ class Device {
  private:
   friend struct ::rl_dev;
   friend struct DeviceTestAccess;
-  class Observer final : public NodeObserver {
+  class Observer final : public NodeObserver
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+                       , public ObjectObserver
+#endif
+                       {
    public:
     // Constant-initialized, so begin() holds it without a guard and an
     // image that never begins (maintenance console) links none of it.
     constexpr Observer() noexcept = default;
     void bind(Device& device) noexcept { device_ = &device; }
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+    bool object_receive_ready() const noexcept override;
+    std::size_t object_receive_slots() const noexcept override;
+    void on_object(const ObjectRxInfo& info, ByteView data) noexcept override;
+    void on_object_result(const ObjectResult& result) noexcept override;
+#endif
     void on_message(const MessageKey& key, NodeId source, ByteView payload) noexcept override;
     void on_message(const MessageKey& key, NodeId source, ByteView payload,
                     const DeliveryAssurance& assurance) noexcept override;
@@ -404,6 +430,10 @@ class Device {
 
   const char* tag_{"RouteLoomNode"};
   NodeObserver* app_{nullptr};
+#if ROUTELOOM_APP_OBJECT_TRANSFER
+  ObjectObserver* object_observer_{nullptr};
+  AppObject* object_{nullptr};
+#endif
   PollHook poll_hook_{nullptr};
   void* poll_ctx_{nullptr};
   espnow::Sdkv1Stores* stores_{nullptr};

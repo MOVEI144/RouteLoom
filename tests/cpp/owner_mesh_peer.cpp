@@ -1120,6 +1120,22 @@ class GatewayTxObserver final : public routeloom::GatewayDeliveryObserver {
   GatewayTx& tx_;
 };
 
+struct ObjectEvents final : public routeloom::ObjectObserver {
+  std::array<std::uint8_t, 4096> buffer{};
+  Bytes loan;
+  routeloom::ObjectId active_id{0};
+  Bytes received;
+  routeloom::ObjectResult result{};
+  std::uint32_t rx_count{0};
+  std::uint32_t result_count{0};
+  void on_object(const routeloom::ObjectRxInfo&, routeloom::ByteView data) noexcept override {
+    received.assign(data.data, data.data + data.size); ++rx_count;
+  }
+  void on_object_result(const routeloom::ObjectResult& value) noexcept override {
+    result = value; active_id = 0; ++result_count;
+  }
+};
+
 // Device events and operation results (the harness asserts one event per
 // change). The counters ride the fake flash image across restarts, since a
 // finished leave is reported right before the unassigned restart.
@@ -1569,6 +1585,8 @@ int main(int argc, char** argv) {
     // the post-RF entropy; the harness needs repeatability).
     config.usb_device_nonce = setup.seed ^ 0xD15EA5ED00B1E5ULL;
   }
+  ObjectEvents objects;
+  device.observe_object(&objects);
   status = device.begin(config, now);
   if (gpio_fail_call != 0) {
     if (status.ok() || status.code != StatusCode::RadioFailure ||
@@ -1618,7 +1636,7 @@ int main(int argc, char** argv) {
     rl_dev_observer_t c_observer;
     mesh_c_app_observer(&c_app, &c_observer);
     rl_dev_observer_t invalid = c_observer;
-    invalid.struct_size = sizeof(invalid) - 1;
+    invalid.struct_size = offsetof(rl_dev_observer_t, on_object) - 1;
     if (device_c_bind(device, &invalid) != nullptr) fatal("short C observer accepted");
     invalid = c_observer;
     invalid.version = RL_DEV_API_VERSION + 1;
@@ -2058,6 +2076,57 @@ int main(int argc, char** argv) {
       case 'F':
         g_cut_after_switching = true;
         break;
+      case 'o': {
+        if (length < 2) fatal("bad object RPC");
+        if (payload[1] == 0) {
+          const Status registered = setup.c_app ? Status{static_cast<StatusCode>(mesh_c_app_object_buffer(&c_app, objects.buffer.data(), objects.buffer.size())), "object C buffer"}
+              : device.register_object_buffer({objects.buffer.data(), objects.buffer.size()});
+          write_frame(Bytes{'o', static_cast<std::uint8_t>(registered.code)});
+        } else if (payload[1] == 1) {
+          if (length < 14) fatal("bad object send RPC");
+          NodeId destination = 0;
+          for (unsigned i = 0; i < 8; ++i) destination |= NodeId{payload[2 + i]} << (8 * i);
+          std::uint32_t deadline = 0;
+          for (unsigned i = 0; i < 4; ++i) deadline |= std::uint32_t{payload[10 + i]} << (8 * i);
+          if (setup.c_app && c_app.object_results != 0) objects.active_id = 0;
+          if (objects.active_id != 0) {
+            write_frame(Bytes{'o', static_cast<std::uint8_t>(StatusCode::Busy), 0, 0, 0, 0}); break;
+          }
+          objects.loan.assign(payload.begin() + 14, payload.end()); objects.result_count = 0;
+          ObjectOptions options{}; options.deadline_ms = deadline; ObjectId id = 0;
+          const Status sent = setup.c_app ? Status{static_cast<StatusCode>(mesh_c_app_object_send(&c_app, destination, objects.loan.data(), objects.loan.size(), deadline, &id)), "object C send"}
+              : device.send_object(destination, {objects.loan.data(), objects.loan.size()}, options, id);
+          if (sent) objects.active_id = id;
+          Bytes reply{'o', static_cast<std::uint8_t>(sent.code)}; put_u32(reply, id); write_frame(reply);
+        } else if (payload[1] == 2) {
+          Bytes reply{'o'}; put_u32(reply, setup.c_app ? c_app.objects : objects.rx_count);
+          put_u32(reply, setup.c_app ? c_app.object_results : objects.result_count);
+          reply.push_back(setup.c_app ? c_app.object_state : static_cast<std::uint8_t>(objects.result.state));
+          if (setup.c_app) reply.insert(reply.end(), c_app.object_data, c_app.object_data + c_app.object_size);
+          else reply.insert(reply.end(), objects.received.begin(), objects.received.end());
+          write_frame(reply);
+        } else if (payload[1] == 3) {
+          const Status cancelled = setup.c_app ? Status{static_cast<StatusCode>(mesh_c_app_object_cancel(&c_app, objects.active_id)), "object C cancel"}
+              : device.cancel_object(objects.active_id);
+          write_frame(Bytes{'o', static_cast<std::uint8_t>(cancelled.code)});
+        } else if (payload[1] == 4) {
+          if (length != 10) fatal("bad object fill RPC");
+          NodeId destination = 0;
+          for (unsigned i = 0; i < 8; ++i) destination |= NodeId{payload[2 + i]} << (8 * i);
+          const std::uint8_t ack[15] = {1, 0xff, 0xff, 0xff, 0xff, 0, 0};
+          std::uint8_t accepted = 0, refused = 0;
+          for (unsigned i = 0; i < 255; ++i) {
+            MessageId id{};
+            const auto sent = runtime.node().send_typed(FrameType::AppObjectAck, destination,
+                                                        {ack, sizeof(ack)}, 4000, now, id);
+            if (sent) ++accepted;
+            else if (sent.code == StatusCode::Busy || sent.code == StatusCode::NoCapacity ||
+                     sent.code == StatusCode::WouldBlock) ++refused;
+          }
+          write_frame(Bytes{'o', accepted, refused});
+        } else fatal("bad object subcommand");
+        break;
+      }
       case 'O': {
         if (length < 20 || length - 20 > kMaxApplicationPayload) fatal("bad O");
         NodeId next_hop = 0, dst = 0;

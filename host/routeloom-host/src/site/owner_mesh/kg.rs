@@ -111,6 +111,11 @@ fn load_world(tag: &str, nodes: usize) -> Option<MeshWorld> {
             "staged load world {tag}, ready {ready}"
         );
         if ready < nodes {
+            if nodes == 31 {
+                // JoinConfirm can precede the initial unbound-neighbour sweep.
+                // Allow its 5 s exchange budget before the next staged boot.
+                world.pump_until(5000, |_| false);
+            }
             world.gate[ready] = false;
         }
     }

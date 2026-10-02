@@ -74,7 +74,9 @@ sleep and object variants remain with V2-15/16/18/19. No dry-run establishes
 radio or on-board acceptance.
 
 K02's Owner peers explicitly select Member security and use the default
-non-smart join policy. Its staged boot exercises consecutive link exchanges
+non-smart join policy. Gated joins leave five seconds after JoinConfirm before
+opening the next peer, allowing HC6's initial unbound-neighbour sweep to run
+within the discovery exchange budget. Its staged boot exercises consecutive link exchanges
 to the same peer: a completed exchange's retained demux row must not become
 the send leg for a later resume's R3 retries. Current-context authentication
 and the scenario's boot, freshness, status and airtime limits remain enforced.
