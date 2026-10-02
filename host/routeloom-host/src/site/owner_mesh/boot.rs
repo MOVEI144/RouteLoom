@@ -211,6 +211,8 @@ fn mesh_j01_identity_only_joins_through_relay() {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     world.provision.site.decider.pending_retry_s = 5;
+    // The relay must be a confirmed proxy before the unassigned boot.
+    world.gate[1] = true;
     world.pump_until(9000, |snaps| {
         snaps[0].authority_ready && snaps[2].authority_ready && snaps[2].join_confirmed
     });
@@ -219,6 +221,8 @@ fn mesh_j01_identity_only_joins_through_relay() {
         "relay B converged: {:?}",
         world.snaps[2]
     );
+    world.gate[1] = false;
+    world.pump_until(400, |snaps| snaps[1].has_identity);
     assert!(
         world.snaps[1].has_identity && !world.snaps[1].has_site,
         "A booted identity-only: {:?}",
