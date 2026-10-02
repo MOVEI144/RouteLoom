@@ -73,7 +73,7 @@ Status MeshNode::validate_config() const noexcept {
 
 Status MeshNode::start(const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   if (started_) return Status::error(StatusCode::AlreadyExists, "node already started");
   const auto status = validate_config();
   if (!status) return status;
@@ -131,7 +131,7 @@ const MeshNode::Neighbor* MeshNode::find_neighbor(const NodeId node) const noexc
 Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metric,
                               const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   if (!started_ || neighbor == kInvalidNodeId || neighbor == config_.node || link_metric == 0 ||
       link_metric == kInfiniteRouteMetric) {
     return Status::error(StatusCode::InvalidArgument, "invalid neighbor");
@@ -232,7 +232,7 @@ void MeshNode::drop_neighbor_locked(Neighbor& record, const NodeId neighbor,
 
 Status MeshNode::remove_neighbor(const NodeId neighbor, const MonotonicMs now_ms) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   auto* record = find_neighbor(neighbor);
   if (record == nullptr) return Status::error(StatusCode::NotFound, "neighbor not found");
   drop_neighbor_locked(*record, neighbor, now_ms);
@@ -510,7 +510,7 @@ void MeshNode::set_delivery_state(Delivery& delivery, const DeliveryState state,
 Status MeshNode::set_pause(const PauseReason reason,
                            const std::uint8_t mask) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   if (reason == PauseReason::None || reason == PauseReason::SleepDrain) {
     return Status::error(StatusCode::InvalidArgument, "invalid pause reason");
   }
@@ -526,7 +526,7 @@ Status MeshNode::set_pause(const PauseReason reason,
 
 Status MeshNode::clear_pause(const PauseReason reason) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   if (reason == PauseReason::None || reason == PauseReason::SleepDrain) {
     return Status::error(StatusCode::InvalidArgument, "invalid pause reason");
   }
@@ -596,6 +596,7 @@ Status MeshNode::set_observation_source(const ObservationSource* source) noexcep
 
 Status MeshNode::set_draining(const bool draining) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  next_poll_ms_ = 0;
   sleep_draining_ = draining;
   return Status::success();
 }
@@ -624,7 +625,7 @@ Status MeshNode::settle_failed_sleep_work() noexcept {
 
 Status MeshNode::set_relay_enabled(const bool enabled) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   const bool was = relay_enabled_;
   relay_enabled_ = enabled;
   if (started_ && was && !enabled) {
@@ -637,7 +638,7 @@ Status MeshNode::set_relay_enabled(const bool enabled) noexcept {
 
 void MeshNode::revoke_routes(const NodeId peer, const MonotonicMs now_ms) noexcept {
   if (in_call_) return;  // enforcement is retried on the next RRS apply
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   if (peer == kInvalidNodeId || peer == kBroadcastNodeId) return;
   // Route updates are plain frames gated only on the neighbor record, so
   // scrubbing the table is not enough: the neighbor itself goes inactive

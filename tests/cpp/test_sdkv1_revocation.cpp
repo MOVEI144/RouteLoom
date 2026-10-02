@@ -84,9 +84,10 @@ struct FakePeerPort final : public LifecyclePeerPort {
   };
   std::vector<Sent> sent;
   bool refuse{false};
+  bool refuse_chunks{false};
   Status peer_send(const NodeId peer, const FrameType carrier,
                    const ByteView body) noexcept override {
-    if (refuse || body.data == nullptr) {
+    if (refuse || (refuse_chunks && carrier == FrameType::ObjectChunk) || body.data == nullptr) {
       return Status::error(StatusCode::WouldBlock, "peer port busy");
     }
     Sent s{};
@@ -1145,6 +1146,48 @@ void test_rrs_exchange_timeouts_and_demux() {
   std::array<std::uint8_t, kRevocationObjectMax + 1> huge{};
   CHECK(e.publish(kNodeB, 7, ByteView{huge.data(), huge.size()}, 30000).code ==
         StatusCode::InvalidArgument);
+}
+
+void test_rrs_backpressure_releases_sender() {
+  // Exercise the real lifecycle's sole TX slot before the manifest and
+  // between the manifest and chunks. A lost peer cannot block another peer.
+  for (const bool chunks_only : {false, true}) {
+    NodeFixture node{};
+    CHECK(node.provision(3, 16));
+    node.peer.sent.clear();
+    node.peer.refuse = !chunks_only;
+    node.peer.refuse_chunks = chunks_only;
+    std::array<std::uint8_t, kRrsRequestSize> request{};
+    CHECK_OK(rrs_request_encode(RrsRequest{3, 14}, request));
+    CHECK_OK(node.dispatch(LifecycleInput::PeerControl(stamp_for(kNodeB, 3), FrameType::Control,
+                                                       {request.data(), request.size()}),
+                           1000));
+    CHECK_OK(node.dispatch(LifecycleInput::Poll(), 1001));
+    CHECK_OK(node.dispatch(LifecycleInput::Poll(), 1000 + rrs_const::kFetchWindowMs));
+    node.peer.refuse = node.peer.refuse_chunks = false;
+    node.peer.sent.clear();
+    CHECK_OK(node.dispatch(LifecycleInput::PeerControl(stamp_for(kNodeC, 3), FrameType::Control,
+                                                       {request.data(), request.size()}),
+                           17000));
+    CHECK_OK(node.dispatch(LifecycleInput::Poll(), 17001));
+    CHECK(std::any_of(node.peer.sent.begin(), node.peer.sent.end(), [](const auto& sent) {
+      return sent.peer == kNodeC && sent.carrier == FrameType::ControlObject;
+    }));
+  }
+  // Late recovery still schedules the total deadline before the ACK timeout.
+  FakePeerPort port;
+  FakeObjectSink sink;
+  RrsExchange exchange(port, sink);
+  const auto object = revocation_object(revocation_set(16));
+  CHECK_OK(exchange.publish(kNodeB, 7, object.view(), 0));
+  port.refuse = true;
+  exchange.poll(0);
+  port.refuse = false;
+  exchange.poll(rrs_const::kFetchWindowMs - 1);
+  CHECK(exchange.busy());
+  CHECK(exchange.next_deadline() == rrs_const::kFetchWindowMs);
+  exchange.poll(rrs_const::kFetchWindowMs);
+  CHECK(!exchange.busy());
 }
 
 void test_owns_rrs_chunk_demux() {
@@ -3381,6 +3424,7 @@ int main() {
   test_link_failure_and_recovery();
   test_rrs_exchange_roundtrip();
   test_rrs_exchange_timeouts_and_demux();
+  test_rrs_backpressure_releases_sender();
   test_owns_rrs_chunk_demux();
   test_reentry_is_busy_and_changelss();
   test_gossip_line_propagates();

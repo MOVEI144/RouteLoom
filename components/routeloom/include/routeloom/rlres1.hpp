@@ -277,6 +277,7 @@ class Engine {
              Output& out) noexcept;
 
   // Pops one session whose deadline has passed (initiators must fall back).
+  MonotonicMs next_deadline() const noexcept;
   bool next_expired(MonotonicMs now, ExpiredSession& out) noexcept;
   void abort(Role role, NodeId peer, Purpose purpose) noexcept;
   void abort_peer(NodeId peer) noexcept;  // RRS1 revocation of `peer`

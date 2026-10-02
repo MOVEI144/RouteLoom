@@ -1,0 +1,23 @@
+{
+  "format": "routeloom-wire-v1-golden",
+  "name": "broadcast_route_update",
+  "comment": "Scoped ROUTE_UPDATE, GroupLink protection (C++ wire codec)",
+  "type": 32,
+  "flags": 0,
+  "delivery": 0,
+  "delivery_round": 0,
+  "hop_remaining": 1,
+  "network": 1,
+  "origin": 2,
+  "destination": 18446744073709551615,
+  "previous_hop": 2,
+  "next_hop": 18446744073709551615,
+  "session": 101,
+  "sequence": 7,
+  "remaining_deadline_ms": 5000,
+  "original_lifetime_ms": 5000,
+  "link_epoch": 1,
+  "end_epoch": 1,
+  "payload_hex": "01000100000000000000000200000001000000000000000000000000",
+  "encoded_hex": "524c0200200000000100001c000000010000000000000002ffffffffffffffff0000000000000002ffffffffffffffff00000065000000000000000700001388000013880000000100000001000000000000000000000000a3f245913d7f2e5913bd57235d09d89a839731c1f6bde6d73b272e62b6010a7fb75d81285d9e0c7f939323d3"
+}

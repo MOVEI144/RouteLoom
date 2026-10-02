@@ -167,10 +167,12 @@ class SessionBank {
   // The caller serializes this with all bank entries and callbacks.
   void clear() noexcept;
 
-  // The Owner calls this before every operation batch: subtracts elapsed
-  // time from all lifetimes (saturating; entries at 0 are wiped), drops
-  // expired demands. A backwards `now` is refused and changes nothing.
+  // Internal lifetimes are absolute low32 monotonic deadlines, resolved
+  // against last_tick_ before it advances. Exported/RTC entries still carry
+  // remaining_ms. Idle ticks visit no slots; backwards time is refused.
   Status tick(MonotonicMs now) noexcept;
+  MonotonicMs next_deadline() const noexcept { return next_expiry_; }
+  std::uint64_t expiry_slots_scanned() const noexcept { return expiry_slots_scanned_; }
 
   // Current GK epoch (monotonic; a decrease is a site change and must go
   // through reset_membership, never a quiet accept).
@@ -355,6 +357,12 @@ class SessionBank {
   mutable std::size_t hash_hint_next_{0};
   bool configured_{false};
   MonotonicMs last_tick_{0};
+  MonotonicMs next_expiry_{UINT64_MAX};
+  std::uint64_t expiry_slots_scanned_{0};
+  std::uint32_t remaining(std::uint32_t deadline) const noexcept {
+    return deadline - static_cast<std::uint32_t>(last_tick_);
+  }
+  std::uint32_t expires_after(std::uint32_t duration) noexcept;
   std::uint32_t install_serial_{0};
   std::uint32_t lru_clock_{0};
   mutable bool in_port_{false};

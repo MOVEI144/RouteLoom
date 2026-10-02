@@ -50,8 +50,9 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "routeloom/sdkv1_store.hpp"
+#include "routeloom/power.hpp"
 #include "routeloom/sdkv1_lifecycle_store.hpp"
+#include "routeloom/sdkv1_store.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
@@ -120,6 +121,18 @@ class BlobNamespace {
   // is the explicit deprovision primitive, never an implicit recovery —
   // only the maintenance console's deprovision verb erases store keys.
   virtual Status blob_erase(const char* key) noexcept = 0;
+};
+
+// The registered PowerImage record, unchanged, in rlsec/rlpower (p0/p1).
+// Absence and read failure remain distinct so unread pendings fail closed.
+class BlobPowerStorage final : public PowerStorage {
+ public:
+  explicit BlobPowerStorage(BlobNamespace& blobs) noexcept : blobs_(blobs) {}
+  Status read(std::uint8_t slot, MutableByteView target) noexcept override;
+  Status write(std::uint8_t slot, ByteView data) noexcept override;
+
+ private:
+  BlobNamespace& blobs_;
 };
 
 // The read-back contract above for one key into a slot view of

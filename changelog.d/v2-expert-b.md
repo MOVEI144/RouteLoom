@@ -1,0 +1,1 @@
+RRS1 gossip now releases its single sender after the existing 15-second fetch window, including when the peer port refuses a manifest or chunks. An unreachable peer can no longer block distribution to other peers indefinitely.

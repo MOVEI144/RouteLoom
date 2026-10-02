@@ -733,6 +733,7 @@ pub(super) struct MeshPeer {
     pub(super) nvs_save: std::path::PathBuf,
     pub(super) t0: u64,
     pub(super) booted: bool,
+    pub(super) asleep: bool,
     /// Clean lifecycle reboots (exit 42) respawned so far.
     pub(super) reboots: u32,
     pub(super) switching_cuts: u32,
@@ -797,6 +798,7 @@ impl MeshPeer {
             nvs_save: nvs_save.to_path_buf(),
             t0,
             booted: false,
+            asleep: false,
             reboots: 0,
             switching_cuts: 0,
             nvs_fail_next: None,
@@ -955,6 +957,51 @@ impl MeshPeer {
         let mut payload = vec![0u8; length];
         self.stdout.read_exact(&mut payload).expect("peer alive");
         Some(payload)
+    }
+
+    pub(super) fn deadline(&mut self) -> u64 {
+        self.send(b"d");
+        let reply = self.recv().expect("deadline reply");
+        assert_eq!(reply.len(), 9);
+        assert_eq!(reply[0], b'd');
+        get_u64(&reply, &mut 1)
+    }
+
+    // (status, power state, ticket, security parked, sleeps, wakes, RTC saved).
+    pub(super) fn sleep(
+        &mut self,
+        op: u8,
+        now: u64,
+        duration: u64,
+    ) -> (u8, u8, bool, bool, u64, u64, bool, u32) {
+        let mut command = vec![b's', op];
+        command.extend_from_slice(&now.to_le_bytes());
+        command.extend_from_slice(&duration.to_le_bytes());
+        self.send(&command);
+        let reply = self.recv().expect("sleep reply");
+        assert_eq!(reply.len(), 26);
+        assert_eq!(reply[0], b's');
+        if reply[1] == 0 && op == 1 {
+            self.asleep = true;
+        }
+        if reply[1] == 0 && op == 2 {
+            self.asleep = false;
+        }
+        let mut pos = 5;
+        (
+            reply[1],
+            reply[2],
+            reply[3] != 0,
+            reply[4] != 0,
+            get_u64(&reply, &mut pos),
+            get_u64(&reply, &mut pos),
+            {
+                let saved = reply[pos] != 0;
+                pos += 1;
+                saved
+            },
+            get_u32(&reply, &mut pos),
+        )
     }
 
     /// Sends the tick command; `finish_tick` reads its reply.

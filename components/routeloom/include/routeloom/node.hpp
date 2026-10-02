@@ -826,6 +826,9 @@ class MeshNode {
   DeliveryResult delivery(const MessageId& id) const noexcept;
 
   Status poll(MonotonicMs now_ms) noexcept;
+  // Idle nodes publish the advertisement timer. Work whose component has
+  // no deadline contract retains the bounded 2 ms compatibility cadence.
+  MonotonicMs next_deadline(MonotonicMs now_ms) const noexcept;
   Status on_radio_receive(NodeId peer, ByteView frame, const RadioRxMetadata& metadata,
                           MonotonicMs now_ms) noexcept;
   // M1 telemetry entry point (m1-completion/02-telemetry.md §2.3): same
@@ -1362,7 +1365,7 @@ class MeshNode {
   // the image and no taken component event dangles past teardown.
   Status quiesce_for_sleep() noexcept {
     if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-    NodeGuard guard(in_call_);
+    NodeGuard guard(*this);
     if (physical_.active) {
       const NodeId peer = physical_.job.peer;
       const MessageId message = physical_.job.ack.key.id;
@@ -2206,7 +2209,10 @@ class MeshNode {
 
   // --- ExpectedReply admission machinery (issue #117) ----------------------
   struct NodeGuard {
-    explicit NodeGuard(bool& flag) noexcept : flag_(flag) { flag_ = true; }
+    explicit NodeGuard(MeshNode& node, bool invalidate = true) noexcept : flag_(node.in_call_) {
+      flag_ = true;
+      if (invalidate) node.next_poll_ms_ = 0;
+    }
     ~NodeGuard() noexcept { flag_ = false; }
     NodeGuard(const NodeGuard&) = delete;
     NodeGuard& operator=(const NodeGuard&) = delete;
@@ -2473,6 +2479,9 @@ class MeshNode {
 
   void process_awaiting_hop(MonotonicMs now_ms) noexcept;
   void process_delivery_timeouts(MonotonicMs now_ms) noexcept;
+  bool deadline_supported() const noexcept;
+  void note_deadline(MonotonicMs at) noexcept;
+  void note_timer(MonotonicMs base, std::uint32_t delay) noexcept;
   void expire_dedup(MonotonicMs now_ms) noexcept;
   void schedule_route_advertisements(MonotonicMs now_ms) noexcept;
   void schedule_sequence_requests(MonotonicMs now_ms) noexcept;
@@ -2808,6 +2817,7 @@ class MeshNode {
   // during dispatch) is the single exempt entry — it only fills the pending
   // submit-identity slot the same dispatch consumes.
   bool in_call_{false};
+  bool deadline_complete_{true};
   // Admission transactions and deferred component events (issue #117).
   std::array<TxnSlot, kAdmissionTransactionsMax> txn_slots_{};
   std::array<EventSlot, kComponentEventsMax> event_slots_{};
@@ -3007,6 +3017,7 @@ class MeshNode {
   SessionStats session_stats_{};
   // Latest wall time seen on the event path; observation timestamps use it
   // where the call site (e.g. delivery-state transitions) has no clock.
+  MonotonicMs next_poll_ms_{0};
   MonotonicMs last_clock_ms_{0};
   std::uint32_t work_generation_{0};
   std::uint32_t rx_generation_{0};

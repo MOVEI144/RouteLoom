@@ -193,7 +193,7 @@ class RouteTable {
   // its previous-incarnation state is stale but fresh ads must not be held.
   void invalidate_next_hop(NodeId next_hop, MonotonicMs now_ms, bool hold = true) noexcept;
   // Returns the slots the expiry pass visited (Owner work evidence).
-  std::size_t expire(MonotonicMs now_ms) noexcept;
+  std::size_t expire(MonotonicMs now_ms, MonotonicMs* deadline = nullptr) noexcept;
   // Capacity preemption for direct-neighbor admission (issue #50): releases
   // the entry with the smallest armed tombstone_expires_at_ms, dropping its
   // feasibility state early. Returns false when nothing is armed — normal
@@ -223,7 +223,7 @@ class RouteTable {
   // hold elapsed, repairs committed selections that lost validity, and
   // tracks newly qualifying alternatives. Driven by the owner's poll plus
   // every mutating table operation.
-  void evaluate(MonotonicMs now_ms) noexcept;
+  void evaluate(MonotonicMs now_ms, MonotonicMs* deadline = nullptr) noexcept;
 
   RouteSelection best(NodeId destination) const noexcept;
   // Cutover RouteState (04 §7): the lease expiry of the current
@@ -329,7 +329,8 @@ class RouteTable {
   std::uint32_t tombstone_dwell_ms() const noexcept { return tombstone_dwell_ms_; }
 
   template <typename Fn>
-  void for_each_selected_change(Fn fn, MonotonicMs now_ms) noexcept {
+  void for_each_selected_change(Fn fn, MonotonicMs now_ms,
+                                MonotonicMs* deadline = nullptr) noexcept {
     entries_.for_each([&](Entry& entry) {
       const auto selection = select(entry);
       const bool changed = selection.valid != entry.last_selected.valid ||
@@ -345,6 +346,8 @@ class RouteTable {
           selection.metric < entry.last_selected.metric;
       if (pure_improvement && entry.improvement_ad_ms != 0 &&
           now_ms - entry.improvement_ad_ms < kImprovementAdGapMs) {
+        if (deadline != nullptr)
+          *deadline = std::min(*deadline, entry.improvement_ad_ms + kImprovementAdGapMs);
         return;
       }
       if (pure_improvement) entry.improvement_ad_ms = now_ms;

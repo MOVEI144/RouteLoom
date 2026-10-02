@@ -54,17 +54,22 @@ using routeloom_test::TestSecurity;
 
 constexpr NetworkId kNet = 1;
 
-// Overrides both new hooks with exactly the default behaviour and counts the
-// calls: proves the node/wire path really consults them while every byte
-// stays identical.
+// Keeps the default unicast hooks and delegates group epochs to TestSecurity.
+// Counts both epoch paths to prove the node/wire consults the appropriate
+// provider hook while every byte stays identical.
 class ConfiguredEpochSecurity final : public SecurityProvider {
  public:
   std::uint32_t tx_epoch_calls{0};
+  std::uint32_t tx_group_link_epoch_calls{0};
 
   bool ready() const noexcept override { return inner_.ready(); }
   Status tx_epoch(SecurityScope, NodeId, std::uint32_t&) noexcept override {
     ++tx_epoch_calls;
     return Status::success();
+  }
+  Status tx_group_link_epochs(std::uint32_t& boot, std::uint32_t& g) noexcept override {
+    ++tx_group_link_epoch_calls;
+    return inner_.tx_group_link_epochs(boot, g);
   }
   ContextState context_state(SecurityScope, NodeId) const noexcept override {
     return ContextState::Ready;
@@ -457,8 +462,8 @@ void test_v1_k10_golden_vectors_unchanged() {
     plain.payload_size = payload.size();
     std::copy(payload.begin(), payload.end(), plain.payload.begin());
 
-    // Through the provider-epoch path with (1) inherited defaults and (2)
-    // explicit default-behaving hooks: both reproduce the golden bytes.
+    // Through the provider-epoch path with (1) TestSecurity's hooks and (2)
+    // explicit unicast/group hooks: both reproduce the golden bytes.
     TestSecurity inherited;
     wire::EncodedFrame out1{};
     CHECK_OK(wire::encode_new(plain, inherited, out1));
@@ -467,7 +472,10 @@ void test_v1_k10_golden_vectors_unchanged() {
     wire::EncodedFrame out2{};
     CHECK_OK(wire::encode_new(plain, hooked, out2));
     CHECK(same(encoded, out2));
-    CHECK(hooked.tx_epoch_calls == ((plain.header.flags & wire::kFlagEndProtected) != 0 ? 2U : 1U));
+    const bool group_link = plain.header.next_hop == kBroadcastNodeId;
+    CHECK(hooked.tx_epoch_calls ==
+          (group_link ? 0U : ((plain.header.flags & wire::kFlagEndProtected) != 0 ? 2U : 1U)));
+    CHECK(hooked.tx_group_link_epoch_calls == (group_link ? 1U : 0U));
 
     const std::string fwd_hex = json_value(text, "fwd_encoded_hex");
     if (!fwd_hex.empty()) {

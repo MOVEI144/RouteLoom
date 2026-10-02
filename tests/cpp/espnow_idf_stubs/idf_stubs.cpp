@@ -27,6 +27,9 @@
 #include "nvs_flash.h"
 
 namespace {
+uint32_t notification_count = 0;
+void (*notification_hook)(void*) = nullptr;
+void* notification_context = nullptr;
 
 unsigned g_gpio_calls = 0;
 unsigned g_gpio_fail_call = 0;
@@ -42,6 +45,7 @@ unsigned g_send_count = 0;
 unsigned g_del_peer_count = 0;
 bool g_fail_del_peer = false;
 bool g_fail_add_peer = false;
+bool g_fail_wifi_stop = false;
 constexpr std::size_t kPeerTableMax = 32;
 std::uint8_t g_peer_macs[kPeerTableMax][6] = {};
 std::size_t g_peer_count = 0;
@@ -97,11 +101,15 @@ void reset() noexcept {
   g_rf_ready_at_wifi = false;
   g_antenna_at_wifi = -1;
   g_now_us = 0;
+  notification_count = 0;
+  notification_hook = nullptr;
+  notification_context = nullptr;
   g_channel = 6;
   g_send_count = 0;
   g_del_peer_count = 0;
   g_fail_del_peer = false;
   g_fail_add_peer = false;
+  g_fail_wifi_stop = false;
   g_peer_count = 0;
   g_peer_limit = 0;
   g_send_cb = nullptr;
@@ -169,6 +177,7 @@ bool last_send_to(const std::uint8_t mac[6]) noexcept {
 unsigned del_peer_count() noexcept { return g_del_peer_count; }
 void fail_del_peer(const bool fail) noexcept { g_fail_del_peer = fail; }
 void fail_add_peer(const bool fail) noexcept { g_fail_add_peer = fail; }
+void fail_wifi_stop(const bool fail) noexcept { g_fail_wifi_stop = fail; }
 void set_peer_limit(const std::size_t limit) noexcept { g_peer_limit = limit; }
 std::size_t peer_count() noexcept { return g_peer_count; }
 
@@ -528,7 +537,7 @@ esp_err_t esp_wifi_set_bandwidth(const wifi_interface_t ifx,
 }
 
 esp_err_t esp_wifi_start(void) { return ESP_OK; }
-esp_err_t esp_wifi_stop(void) { return ESP_OK; }
+esp_err_t esp_wifi_stop(void) { return g_fail_wifi_stop ? ESP_FAIL : ESP_OK; }
 
 esp_err_t esp_wifi_set_channel(const uint8_t primary,
                                const wifi_second_chan_t second) {
@@ -561,3 +570,28 @@ esp_err_t esp_wifi_set_max_tx_power(const int8_t power) {
   (void)power;
   return ESP_OK;
 }
+
+void xTaskNotifyGive(TaskHandle_t task) {
+  if (task != nullptr) ++notification_count;
+}
+uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t ticks) {
+  if (notification_hook != nullptr) {
+    const auto hook = notification_hook;
+    notification_hook = nullptr;
+    hook(notification_context);
+  }
+  if (ticks != 0) g_last_peek_ticks = notification_count == 0 ? ticks : 0;
+  const uint32_t count = notification_count;
+  if (clear)
+    notification_count = 0;
+  else if (notification_count != 0)
+    --notification_count;
+  return count;
+}
+
+namespace idf_stub {
+void set_notify_wait_hook(void (*hook)(void*), void* context) noexcept {
+  notification_hook = hook;
+  notification_context = context;
+}
+}  // namespace idf_stub

@@ -1,8 +1,9 @@
-// Test-only FreeRTOS stand-in (issue #117 host regression test): single
-// thread, so critical sections are no-ops and handles are plain pointers.
+// Test-only FreeRTOS stand-in: critical sections synchronize external
+// producers with the Owner, and handles are plain pointers.
 #pragma once
 
 #include <stdint.h>
+#include <mutex>
 
 typedef int BaseType_t;
 typedef unsigned int UBaseType_t;
@@ -19,10 +20,8 @@ typedef void *QueueHandle_t;
 #define pdMS_TO_TICKS(ms) ((TickType_t)(((uint64_t)(ms) * configTICK_RATE_HZ) / 1000U))
 #define tskNO_AFFINITY (-1)
 
-typedef struct {
-  int dummy;
-} portMUX_TYPE;
+using portMUX_TYPE = std::recursive_mutex;
 #define portMUX_INITIALIZER_UNLOCKED \
-  { 0 }
-#define portENTER_CRITICAL(mux) ((void)0)
-#define portEXIT_CRITICAL(mux) ((void)0)
+  {}
+#define portENTER_CRITICAL(mux) ((mux)->lock())
+#define portEXIT_CRITICAL(mux) ((mux)->unlock())

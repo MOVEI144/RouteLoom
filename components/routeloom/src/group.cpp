@@ -64,7 +64,7 @@ constexpr std::size_t kGroupReportMinEncoded =
 Status MeshNode::set_group_membership(const GroupId* groups,
                                       const std::size_t count) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   if (count > kGroupMembershipMax || (count > 0 && groups == nullptr)) {
     return Status::error(StatusCode::InvalidArgument, "GROUP_MEMBERSHIP_TOO_MANY");
   }
@@ -227,7 +227,7 @@ Status MeshNode::send_group(const GroupId group, const ByteView payload,
                             const GroupSendOptions& options, const MonotonicMs now_ms,
                             MessageId& id) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
+  NodeGuard guard(*this);
   last_clock_ms_ = now_ms;
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   ++work_generation_;

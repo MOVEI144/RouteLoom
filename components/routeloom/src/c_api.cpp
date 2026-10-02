@@ -653,8 +653,10 @@ void rl_poll(rl_context_t* context, const rl_monotonic_ms_t now_ms) {
 
 rl_monotonic_ms_t rl_next_deadline(const rl_context_t* context,
                                    const rl_monotonic_ms_t now_ms) {
-  (void)context;
-  return now_ms + RL_POLL_INTERVAL_MAX_MS;
+  const auto ceiling =
+      now_ms > UINT64_MAX - RL_POLL_INTERVAL_MAX_MS ? UINT64_MAX : now_ms + RL_POLL_INTERVAL_MAX_MS;
+  if (context == nullptr || !context->node.started()) return ceiling;
+  return std::max(now_ms, std::min(ceiling, context->node.next_deadline(now_ms)));
 }
 
 void rl_on_radio_receive(rl_context_t* context, const rl_node_id_t peer,

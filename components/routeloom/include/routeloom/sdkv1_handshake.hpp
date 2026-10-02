@@ -327,6 +327,7 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   // Timeouts, retransmits, RLRES1 expiry. Refuses Busy while a result is
   // pending (drain take_result first).
   Status poll(MonotonicMs now) noexcept;
+  MonotonicMs next_deadline(MonotonicMs now) const noexcept;
   // Pops the pending result (NotFound when empty).
   Status take_result(HandshakeResult& out) noexcept;
   // A successful transport admission of responder m4 permits the final

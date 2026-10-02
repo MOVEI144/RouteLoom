@@ -1,11 +1,14 @@
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <thread>
 
 #include "routeloom/aead_gcm.hpp"
+#include "routeloom/espnow_power.hpp"
 #include "routeloom/espnow_security_owner.hpp"
 #include "routeloom/psa_aead_gcm.hpp"
 #include "routeloom/psa_edhoc_aead.hpp"
@@ -118,7 +121,11 @@ esp_err_t nvs_commit(nvs_handle_t) { return ESP_ERR_INVALID_STATE; }
 namespace routeloom {
 struct DeviceTestAccess {
   static void attach_runtime(Device& device, espnow::EspNowRuntime& runtime) noexcept {
-    device.runtime_ = &runtime;
+    device.bind_runtime(runtime);
+  }
+  static PowerEvents& sleep_events(Device& device) noexcept {
+    device.observer().bind(device);
+    return device.observer();
   }
   static void member_gateway_image(Device& device, espnow::Sdkv1Stores& stores) noexcept {
     device.stores_ = &stores;
@@ -405,6 +412,18 @@ void test_member_root_mapping(bool flat) {
   CHECK(runtime.node().started());
   CHECK(owner.session_provider().security_profile() == SecurityProfile::Candidate);
   const NodeConfig& node = runtime.node().config();
+  EspNowPowerPort power_port(runtime);
+  power_port.bind_owner(owner);
+  PowerImage image{};
+  CHECK(power_port.capture_cache(image));
+  CHECK(image.network == stores.site.site().network);
+  CHECK(image.config_revision == stores.site.site().assignment_generation);
+  CHECK(power_port.matches_context(image, node.network));
+  image.network ^= (1ULL << 32U);
+  CHECK(!power_port.matches_context(image, node.network));
+  image.network ^= (1ULL << 32U);
+  ++image.config_revision;
+  CHECK(!power_port.matches_context(image, node.network));
   if (flat) {
     CHECK(node.group_roots[0] == site_record().gateways[0] &&
           node.group_roots[1] == site_record().gateways[1]);
@@ -536,6 +555,31 @@ void test_device_post_bound() {
   runtime.stop();
 }
 
+void test_device_post_during_runtime_publication() {
+  idf_stub::reset();
+  routeloom_test::TestSecurity security;
+  routeloom_test::CapturingObserver observer;
+  EspNowRuntime runtime(radio_config(), security, observer);
+  CHECK(runtime.initialize());
+  Device device;
+  std::atomic<bool> go{false};
+  std::array<Status, Device::kPostCapacity> results{};
+  PostLog log{};
+  PostJob job{&log, 7, false};
+  std::thread producer([&] {
+    while (!go.load(std::memory_order_acquire)) {
+    }
+    for (auto& result : results) result = device.post(record_job, &job);
+  });
+  go.store(true, std::memory_order_release);
+  DeviceTestAccess::attach_runtime(device, runtime);
+  producer.join();
+  for (const auto& result : results) CHECK(result);
+  device.step(kStart);
+  CHECK(log.count == Device::kPostCapacity);
+  runtime.stop();
+}
+
 void test_device_begin_clears_key_on_failure() {
   Device device;
   DeviceConfig config{};
@@ -545,6 +589,14 @@ void test_device_begin_clears_key_on_failure() {
   for (const std::uint8_t byte : config.dev_psk) CHECK(byte == 0);
 }
 
+void bind_device_sleep_runtime(routeloom::Device& device,
+                               routeloom::espnow::EspNowRuntime& runtime) noexcept {
+  routeloom::DeviceTestAccess::attach_runtime(device, runtime);
+}
+routeloom::PowerEvents& device_sleep_events(routeloom::Device& device) noexcept {
+  return routeloom::DeviceTestAccess::sleep_events(device);
+}
+int run_device_sleep_scenarios();
 void test_dev_profile_survives_radio_failure() {
   idf_stub::reset();
   Stores stores{};
@@ -591,7 +643,9 @@ int main() {
   test_member_root_mapping(true);
   test_connectivity_uses_granted_gateway_role();
   test_member_adoption_restores_group_capability();
+  failures += run_device_sleep_scenarios();
   test_device_post_bound();
+  test_device_post_during_runtime_publication();
   test_device_begin_clears_key_on_failure();
   test_dev_profile_survives_radio_failure();
   return failures == 0 ? 0 : 1;

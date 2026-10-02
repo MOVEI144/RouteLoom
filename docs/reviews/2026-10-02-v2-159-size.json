@@ -1,0 +1,274 @@
+{
+  "cell": "reference_node-esp32c3-normal-off-off",
+  "esp_idf_version": "6.0.3",
+  "esp_idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
+  "build_jobs": 2,
+  "unit": "bytes",
+  "measurement": "ESP-IDF size.json linker section accounting; boot heap estimate is not a runtime measurement",
+  "before": {
+    "source_sha": "8d3e40b75fa2bb1adc9cdaa4ad280da75db0cf6c",
+    "size": {
+      "version": "1.2",
+      "total_size": 1147464,
+      "layout": [
+        {
+          "name": "Flash Code",
+          "total": 0,
+          "used": 930880,
+          "free": 0,
+          "parts": {
+            ".text": {
+              "size": 930880
+            }
+          }
+        },
+        {
+          "name": "DRAM",
+          "total": 321296,
+          "used": 257644,
+          "free": 63652,
+          "parts": {
+            ".bss": {
+              "size": 178456
+            },
+            ".text": {
+              "size": 65848
+            },
+            ".data": {
+              "size": 13340
+            }
+          }
+        },
+        {
+          "name": "Flash Data",
+          "total": 0,
+          "used": 131204,
+          "free": 0,
+          "parts": {
+            ".rodata": {
+              "size": 130676
+            },
+            ".appdesc": {
+              "size": 256
+            },
+            ".init_array": {
+              "size": 252
+            },
+            ".tdata": {
+              "size": 16
+            },
+            ".tbss": {
+              "size": 4
+            }
+          }
+        },
+        {
+          "name": "RTC SLOW",
+          "total": 8192,
+          "used": 6480,
+          "free": 1712,
+          "parts": {
+            ".data": {
+              "size": 6392
+            },
+            ".force_slow": {
+              "size": 36
+            },
+            ".rtc_reserved": {
+              "size": 24
+            },
+            ".text": {
+              "size": 20
+            },
+            ".rtc_noinit": {
+              "size": 8
+            }
+          }
+        }
+      ]
+    },
+    "ram_report": {
+      "cell": "reference_node-esp32c3-normal-off-off",
+      "target": "esp32c3",
+      "app": "reference_node",
+      "memory": [
+        {
+          "name": "DRAM",
+          "total": 321296,
+          "used": 257644,
+          "free": 63652,
+          "parts": {
+            ".bss": 178456,
+            ".text": 65848,
+            ".data": 13340
+          }
+        },
+        {
+          "name": "RTC SLOW",
+          "total": 8192,
+          "used": 6480,
+          "free": 1712,
+          "parts": {
+            ".data": 6392,
+            ".force_slow": 36,
+            ".rtc_reserved": 24,
+            ".text": 20,
+            ".rtc_noinit": 8
+          }
+        }
+      ],
+      "guard": {
+        "memory_type": "DRAM",
+        "static_bss": 178456,
+        "static_data": 13340,
+        "free": 63652,
+        "min_free": 19456,
+        "passed": true
+      },
+      "boot_heap": {
+        "offset": 16272,
+        "radio_peak": 27428,
+        "reserve": 8192,
+        "static_free": 63652,
+        "estimate": 52496
+      }
+    }
+  },
+  "after": {
+    "source_sha": "52368f2e14ce56f951927093093d8ce2a4d5e09e",
+    "size": {
+      "version": "1.2",
+      "total_size": 1147468,
+      "layout": [
+        {
+          "name": "Flash Code",
+          "total": 0,
+          "used": 930884,
+          "free": 0,
+          "parts": {
+            ".text": {
+              "size": 930884
+            }
+          }
+        },
+        {
+          "name": "DRAM",
+          "total": 321296,
+          "used": 257644,
+          "free": 63652,
+          "parts": {
+            ".bss": {
+              "size": 178456
+            },
+            ".text": {
+              "size": 65848
+            },
+            ".data": {
+              "size": 13340
+            }
+          }
+        },
+        {
+          "name": "Flash Data",
+          "total": 0,
+          "used": 131204,
+          "free": 0,
+          "parts": {
+            ".rodata": {
+              "size": 130676
+            },
+            ".appdesc": {
+              "size": 256
+            },
+            ".init_array": {
+              "size": 252
+            },
+            ".tdata": {
+              "size": 16
+            },
+            ".tbss": {
+              "size": 4
+            }
+          }
+        },
+        {
+          "name": "RTC SLOW",
+          "total": 8192,
+          "used": 6480,
+          "free": 1712,
+          "parts": {
+            ".data": {
+              "size": 6392
+            },
+            ".force_slow": {
+              "size": 36
+            },
+            ".rtc_reserved": {
+              "size": 24
+            },
+            ".text": {
+              "size": 20
+            },
+            ".rtc_noinit": {
+              "size": 8
+            }
+          }
+        }
+      ]
+    },
+    "ram_report": {
+      "cell": "reference_node-esp32c3-normal-off-off",
+      "target": "esp32c3",
+      "app": "reference_node",
+      "memory": [
+        {
+          "name": "DRAM",
+          "total": 321296,
+          "used": 257644,
+          "free": 63652,
+          "parts": {
+            ".bss": 178456,
+            ".text": 65848,
+            ".data": 13340
+          }
+        },
+        {
+          "name": "RTC SLOW",
+          "total": 8192,
+          "used": 6480,
+          "free": 1712,
+          "parts": {
+            ".data": 6392,
+            ".force_slow": 36,
+            ".rtc_reserved": 24,
+            ".text": 20,
+            ".rtc_noinit": 8
+          }
+        }
+      ],
+      "guard": {
+        "memory_type": "DRAM",
+        "static_bss": 178456,
+        "static_data": 13340,
+        "free": 63652,
+        "min_free": 19456,
+        "passed": true
+      },
+      "boot_heap": {
+        "offset": 16272,
+        "radio_peak": 27428,
+        "reserve": 8192,
+        "static_free": 63652,
+        "estimate": 52496
+      }
+    }
+  },
+  "delta": {
+    "idf_total_size": 4,
+    "flash_code": 4,
+    "dram_used": 0,
+    "dram_bss": 0,
+    "dram_data": 0,
+    "rtc_slow_used": 0
+  }
+}
