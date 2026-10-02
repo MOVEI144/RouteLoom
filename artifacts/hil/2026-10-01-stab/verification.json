@@ -1,0 +1,48 @@
+{
+  "source_sha": "5fca34e26f69282536cda77be36efd979dfbee14",
+  "gcc_sanitizers_debug": {
+    "passed": 104,
+    "failed": 0
+  },
+  "clang18_sanitizers_on": {
+    "passed": 103,
+    "failed": 0
+  },
+  "clang18_sanitizers_off": {
+    "passed": 103,
+    "failed": 0
+  },
+  "rust_1_85": {
+    "passed": 1073,
+    "failed": 0,
+    "ignored": 1,
+    "live_owner_mesh": true,
+    "fmt": "pass",
+    "clippy": "pass"
+  },
+  "python": {
+    "passed": 175
+  },
+  "meshviz": {
+    "passed": 252,
+    "skipped": 28,
+    "reason": "GUI dependencies PySide6 / pyqtgraph unavailable"
+  },
+  "selfcheck": {
+    "firmware_cells_passed": 49,
+    "result": "PASS"
+  },
+  "docs": {
+    "passed": 1677
+  },
+  "review_contracts": {
+    "passed": 181
+  },
+  "manifest_check": "pass",
+  "reference_tables_check": "pass",
+  "scenarios_check": "pass",
+  "additional_hil_config_builds": [
+    "MemberEdhoc endpoint MIGRATION=2 HIL_DROP_RX_MAC=relay",
+    "MemberEdhoc bridge MIGRATION=0 USB_NODE_STATUS=n CAPABILITY=0x867"
+  ]
+}

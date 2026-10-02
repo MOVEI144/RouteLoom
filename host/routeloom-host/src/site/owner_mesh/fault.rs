@@ -532,9 +532,6 @@ fn mesh_hostlink_v2_auth_negatives() {
 /// delivery inside 15 s (vt).
 #[test]
 fn mesh_gateway_reset_reauthenticates_and_delivers() {
-    // The compatibility boot plan: the TX_ACCEPTED count below holds for
-    // its attach order. After a simultaneous boot the first sends after
-    // the reset may report QUEUED while the end-to-end session re-forms.
     let plan = staggered_boot(3);
     let Some(mut world) = MeshWorld::start_plan("m06g", Switch::direct(), &plan, false) else {
         return; // no C++ peers: skip (ignore-equivalent)
@@ -572,33 +569,55 @@ fn mesh_gateway_reset_reauthenticates_and_delivers() {
         "stale session broke the new one"
     );
 
-    // Host → A through the new session: 10/10, each reported with the
-    // registered TX_ACCEPTED id.
-    let resumed_at = world.now;
+    // Host → A through the new session: 10/10. QUEUED and TX_ACCEPTED are
+    // intermediate snapshots; each wire request must finish Delivered.
+    let initial_rx = world.snaps[1].rx_count;
+    let mut requests = Vec::new();
     for index in 0..10_u64 {
         let rx = world.snaps[1].rx_count;
         let mut body = (0x0600_u64 + index).to_be_bytes().to_vec();
         body.extend_from_slice(&NODE_A.to_be_bytes());
         body.extend_from_slice(b"m06g-down");
-        world.usb_host.queue_data(FrameKind::DataToMesh, body);
+        requests.push(world.usb_host.queue_data(FrameKind::DataToMesh, body));
         world.pump_until(1200, |snaps| snaps[1].rx_count > rx);
         assert!(world.snaps[1].rx_count > rx, "delivery {index} reached A");
         if index == 0 {
             assert!(
-                world.now - resumed_at <= 15_000,
+                world.now - cut_at <= 15_000,
                 "first delivery after the reset"
             );
         }
     }
-    let accepted = world
-        .usb_host
-        .deliveries
-        .iter()
-        .filter(|(_, reason)| *reason == reasons::REASON_TX_ACCEPTED)
-        .count();
-    assert!(
-        accepted >= 10,
-        "TX_ACCEPTED ids: {:?}",
-        world.usb_host.deliveries
+    let until = world.now + 5_000;
+    while world.now < until
+        && requests.iter().any(|request| {
+            !world
+                .usb_host
+                .outcomes
+                .iter()
+                .any(|(r, state, _, _)| r == request && *state == Some(DELIVERY_DELIVERED))
+        })
+    {
+        world.step(25);
+    }
+    for request in requests {
+        let terminal: Vec<_> = world
+            .usb_host
+            .outcomes
+            .iter()
+            .filter(|(r, state, _, _)| *r == request && state.is_none_or(|s| (7..=11).contains(&s)))
+            .collect();
+        assert!(
+            !terminal.is_empty()
+                && terminal
+                    .iter()
+                    .all(|(_, state, _, _)| { *state == Some(DELIVERY_DELIVERED) }),
+            "request {request} finished Delivered: {terminal:?}"
+        );
+    }
+    assert_eq!(
+        world.snaps[1].rx_count - initial_rx,
+        10,
+        "exactly ten deliveries"
     );
 }

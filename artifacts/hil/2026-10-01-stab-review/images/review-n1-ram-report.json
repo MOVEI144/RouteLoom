@@ -1,0 +1,46 @@
+{
+  "cell": "local",
+  "target": "esp32c3",
+  "app": "bridge_node",
+  "memory": [
+    {
+      "name": "DRAM",
+      "total": 321296,
+      "used": 283576,
+      "free": 37720,
+      "parts": {
+        ".bss": 220792,
+        ".text": 49348,
+        ".data": 13436
+      }
+    },
+    {
+      "name": "RTC SLOW",
+      "total": 8192,
+      "used": 6480,
+      "free": 1712,
+      "parts": {
+        ".data": 6392,
+        ".force_slow": 36,
+        ".rtc_reserved": 24,
+        ".text": 20,
+        ".rtc_noinit": 8
+      }
+    }
+  ],
+  "guard": {
+    "memory_type": "DRAM",
+    "static_bss": 220792,
+    "static_data": 13436,
+    "free": 37720,
+    "min_free": 27648,
+    "passed": true
+  },
+  "boot_heap": {
+    "offset": 12558,
+    "radio_peak": 27452,
+    "reserve": 12288,
+    "static_free": 37720,
+    "estimate": 22826
+  }
+}

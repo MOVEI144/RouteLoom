@@ -1,0 +1,7 @@
+[ 39%] Built target routeloom_edhoc_third_party
+[ 97%] Built target routeloom_core
+[100%] Building CXX object tests/cpp/CMakeFiles/routeloom_espnow_runtime_tests.dir/__/__/components/routeloom_espnow/src/espnow_runtime.cpp.o
+[100%] Linking CXX executable routeloom_espnow_runtime_tests
+[100%] Built target routeloom_espnow_runtime_tests
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/v2-stab-b/tests/cpp/test_espnow_runtime.cpp:1402: EspNowRuntimeTestAccess::hil_rx_frames(runtime) == 0
+test_espnow_runtime: 1 failure(s)

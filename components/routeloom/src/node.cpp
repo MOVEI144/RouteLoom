@@ -191,7 +191,9 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   // profile arms share this storage and every member's idle value is zero
   // (kInvalidNodeId == 0), so one reset serves either profile.
   record->tree = Neighbor::TreeRoles{};
-  record->pull_answer_pending = false;
+  // A fresh binding must exchange the current self/gateway records even
+  // when an old indirect gateway route suppresses the bootstrap pull.
+  record->pull_answer_pending = gateway_scoped();
   record->active = true;
   // Direct route to the neighbor itself, seeded at the last-seen generation
   // (0 for a brand-new peer); it upgrades as soon as its self record arrives.

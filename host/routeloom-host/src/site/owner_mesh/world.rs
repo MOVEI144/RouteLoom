@@ -853,7 +853,9 @@ impl MeshWorld {
             .service
             .with(|a| a.drop_gateway_relays(testkit::GATEWAY, self.now));
         self.provision.usb.close();
+        let daemon = self.usb_host.daemon.take();
         self.usb_host = UsbHost::new(&self.hostlink_dir);
+        self.usb_host.daemon = daemon;
         self.usb_incarnation += 1;
         let incarnation = self.usb_incarnation;
         let join = UsbSiteAdapter::new(testkit::GATEWAY, incarnation);
@@ -980,6 +982,7 @@ impl MeshWorld {
         for (from, tick) in ticks.iter().enumerate() {
             let Some(tick) = tick else { continue };
             for tx in &tick.tx {
+                self.switch.radio_bytes += tx.bytes.len() as u64;
                 self.switch.c7_observe(from, tx.dst_mac, &tx.bytes, b_mac);
                 if tx.dst_mac == BROADCAST_MAC {
                     self.callbacks[from].push((self.now, 1));

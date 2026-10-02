@@ -65,23 +65,25 @@ class CellList(unittest.TestCase):
         build = check.core()[1]
         self.assertLessEqual(int(build.argv[-1]), 8)
 
+    def test_c6_antenna_variants_cover_measured_image_size(self):
+        # Both antenna paths link the GPIO driver and must fit its measured footprint.
+        cells = {cell["id"]: cell for cell in check.load_cells()["cells"]}
+        for name in ("experimental-c6-reference_node-devram",
+                     "reference_node-esp32c6-normal-off-external_antenna"):
+            with self.subTest(cell=name):
+                self.assertGreaterEqual(cells[name]["budget"]["app_bin_max"]
+                                        + check.APP_BIN_DRIFT, 1246032)
+
     def test_cells_cover_every_app_and_target_with_a_budget(self):
         data = check.load_cells()
         cells = data["cells"]
-        # 37 cells of the pre-v2 matrix, the 5 C6 cells made required, bench C6,
-        # the C3 gateway-128 and endpoint cells, two release (-Os) comparisons,
-        # the C3/C6 Member maintenance images, the example and the
-        # component-only external consumer (52); V2-08 moved the LegacyFixture
-        # cells onto DevRam and Member, keeping one compatibility cell, and
-        # added the Member channel-plan gateway and participant (50); V2-10
-        # removed that compatibility cell with LegacyFixture itself (49).
-        # V2-17 added the C and standalone-gateway examples and the external
-        # consumer on S3, C5 and C6 (54).
-        self.assertEqual(len(cells), 54)
+        # Every app/target and feature branch, including C6 external antenna selection.
+        self.assertEqual(len(cells), 55)
         self.assertTrue({
             "bridge_node-esp32c3-normal-off-maintenance_member",
             "reference_node-esp32c6-normal-off-maintenance_member",
             "bridge_node-esp32c6-normal-off-maintenance_member",
+            "reference_node-esp32c6-normal-off-external_antenna",
         } <= {cell["id"] for cell in cells})
         for cell in cells:
             self.assertTrue((ROOT / check.cell_dir(cell)).is_dir(), cell["id"])
@@ -147,13 +149,12 @@ class CellList(unittest.TestCase):
 
     def test_workflow_runs_every_ci_stage(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        for stage in ("core --sanitizers", "docs", "golden", "rust", "interop",
+        for stage in ("core --sanitizers", "docs", "golden", "rust",
                       "profiles --build", "profile-mesh", "fuzz"):
             self.assertIn(f"python3 tools/check.py {stage}", workflow)
 
     def test_ci_requires_e2e_report_artifact(self):
-        workflow = WORKFLOW.read_text(encoding="utf-8")
-        artifact = workflow.split("name: e2e-report", 1)[1].split("retention-days:", 1)[0]
+        artifact = (ROOT / ".github/workflows/e2e.yml").read_text().split("name: e2e-${{ matrix.shard }}", 1)[1].split("retention-days:", 1)[0]
         self.assertIn("if-no-files-found: error", artifact)
 
     def test_ci_dry_run_lists_every_stage_and_cell(self):
@@ -499,11 +500,11 @@ class Scenarios(unittest.TestCase):
                       check.scenario_errors(self.data))
 
     def test_planned_and_hil_rows(self):
-        self.rows("M08")[0]["test"] = self.rows("M01")[0]["test"]
+        self.rows("M10")[0]["test"] = self.rows("M01")[0]["test"]
         self.rows("M05")[0]["hil"]["run"] = ["tools/hil/no_such_script.py"]
         self.rows("M03")[0]["hil"] = {"rounds": ["H0"], "run": "manual"}
         errors = check.scenario_errors(self.data)
-        self.assertIn("M08: a planned row names no test", errors)
+        self.assertIn("M10: a planned row names no test", errors)
         self.assertIn("M05: hil run ['tools/hil/no_such_script.py'] is neither manual nor "
                       "HIL scripts", errors)
         self.assertIn("M03: hil set on a row without the hil tier", errors)
@@ -513,6 +514,34 @@ class Scenarios(unittest.TestCase):
         self.assertTrue(any("M05: hil run" in error
                             for error in check.scenario_errors(self.data)))
 
+    def test_hil_requirements_and_acceptance_mapping_are_checked(self):
+        self.rows("M06")[0]["hil"]["requires"][0]["count"] = 0
+        self.data["acceptance_pending"][0]["rows"] = ["missing"]
+        errors = check.scenario_errors(self.data)
+        self.assertIn("M06: hil requires bounded roles and chips", errors)
+        self.assertIn("V1-F04: invalid pending acceptance mapping", errors)
+
+    def test_pending_row_needs_a_wait_reason(self):
+        row = self.rows("F08")[0]
+        row.pop("blocked_by")
+        self.assertIn("F08: pending needs blocked_by and note", check.scenario_errors(self.data))
+
+    def test_shards_keep_all_live_cases_and_exclude_pending_and_red(self):
+        cases = [set(check.e2e_cases(self.data, "pr", shard)) for shard in check.E2E_SHARDS]
+        self.assertEqual(set.union(*cases), set(check.e2e_cases(self.data, "pr", "all")))
+        self.assertFalse(any(a & b for i, a in enumerate(cases) for b in cases[i + 1:]))
+        self.assertTrue(any("cpp_joiner_removed_rediscovers" in c for c in cases[1]))
+        self.assertTrue(any("mesh_j08_k1b_isolated_miss_recovers" in c for c in cases[0]))
+        self.assertTrue(any("mesh_j08_k1b_pull_answers_dropped" in c for c in cases[2]))
+        all_cases = set.union(*cases)
+        self.assertIn("site::owner_mesh::consumer::mesh_k01_display_direct_smoke", all_cases)
+        for row_id in ("K01", "K01-D", "K03"):
+            for case in check.rust_cases(self.rows(row_id)[0]["test"]):
+                self.assertNotIn(case, all_cases)
+        self.assertIn("site::owner_mesh::kg::mesh_k05_cursor_replay_gap_and_epoch_change",
+                      all_cases)
+        self.assertIn("site::owner_mesh::mesh::mesh_line_three_hops_delivers", all_cases)
+
     def test_interop_requires_every_live_pr_case(self):
         steps = [s for s in check.interop() if s.require is not None]
         self.assertEqual(len(steps), 2)
@@ -520,9 +549,12 @@ class Scenarios(unittest.TestCase):
                       steps[0].require)
         self.assertIn("site::owner_mesh::mesh::mesh_direct_converges_and_delivers",
                       steps[1].require)
-        # The red three-hop row is ignored by the suite, not required.
-        self.assertNotIn("site::owner_mesh::mesh::mesh_line_three_hops_delivers",
-                         steps[1].require)
+        self.assertIn("site::owner_mesh::mesh::mesh_line_three_hops_delivers",
+                      steps[1].require)
+        for profile in ("member", "devram"):
+            for hops in (2, 3, 4):
+                self.assertIn(f"site::owner_mesh::end::mesh_end_{profile}_{hops}_hops_deliver",
+                              steps[1].require)
 
     def test_profile_mesh_requires_every_mixed_case(self):
         step = check.profile_mesh()[-1]
@@ -556,6 +588,7 @@ class Scenarios(unittest.TestCase):
             step = check.Step([sys.executable, "-c", script], require=require)
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 self.assertEqual(check.run([step], dry_run=False), expect, require)
+            self.assertEqual(step.failed, {"site::b"})
         empty = check.Step([sys.executable, "-c", "print('running 0 tests')"], require=[])
         err = io.StringIO()
         with redirect_stdout(io.StringIO()), redirect_stderr(err):

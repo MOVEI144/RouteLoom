@@ -1,0 +1,119 @@
+{
+  "cycles": [
+    {
+      "cycle": 0,
+      "released_wall": 1790818033.412,
+      "bound_s": {
+        "3": 4.43,
+        "1": 5.03
+      },
+      "first_delivery_s": 6.346,
+      "delivered": 9,
+      "pass_timing": true
+    },
+    {
+      "cycle": 1,
+      "released_wall": 1790818052.357,
+      "bound_s": {
+        "1": 2.426,
+        "3": 28.58
+      },
+      "first_delivery_s": 30.886,
+      "delivered": 5,
+      "pass_timing": false
+    },
+    {
+      "cycle": 2,
+      "released_wall": 1790818091.939,
+      "bound_s": {
+        "1": 2.324,
+        "3": 23.671
+      },
+      "first_delivery_s": 26.055,
+      "delivered": 6,
+      "pass_timing": false
+    },
+    {
+      "cycle": 3,
+      "released_wall": 1790818127.697,
+      "bound_s": {
+        "3": 2.25,
+        "1": 2.951
+      },
+      "first_delivery_s": 4.6,
+      "delivered": 8,
+      "pass_timing": true
+    },
+    {
+      "cycle": 4,
+      "released_wall": 1790818143.934,
+      "bound_s": {
+        "1": 2.255,
+        "3": 28.803
+      },
+      "first_delivery_s": 30.378,
+      "delivered": 5,
+      "pass_timing": false
+    },
+    {
+      "cycle": 5,
+      "released_wall": 1790818182.395,
+      "bound_s": {
+        "1": 4.575,
+        "3": 22.707
+      },
+      "first_delivery_s": 24.283,
+      "delivered": 6,
+      "pass_timing": false
+    },
+    {
+      "cycle": 6,
+      "released_wall": 1790818215.901,
+      "bound_s": {
+        "3": 2.646,
+        "1": 24.103
+      },
+      "first_delivery_s": 37.273,
+      "delivered": 4,
+      "pass_timing": false
+    },
+    {
+      "cycle": 7,
+      "released_wall": 1790818260.087,
+      "bound_s": {
+        "3": 4.222,
+        "1": 6.129
+      },
+      "first_delivery_s": 8.345,
+      "delivered": 8,
+      "pass_timing": false
+    },
+    {
+      "cycle": 8,
+      "released_wall": 1790818281.476,
+      "bound_s": {
+        "3": 1.915,
+        "1": 24.096
+      },
+      "first_delivery_s": 35.025,
+      "delivered": 4,
+      "pass_timing": false
+    },
+    {
+      "cycle": 9,
+      "released_wall": 1790818323.394,
+      "bound_s": {
+        "1": 2.446,
+        "3": 3.651
+      },
+      "first_delivery_s": 4.906,
+      "delivered": 10,
+      "pass_timing": true
+    }
+  ],
+  "passes_both_timing": 3,
+  "delivered": 65,
+  "sends": 100,
+  "forced_path_verified": true,
+  "accepted": 100
+}

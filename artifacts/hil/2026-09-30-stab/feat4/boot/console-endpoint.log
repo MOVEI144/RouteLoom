@@ -1,0 +1,25 @@
+[2026-09-30T12:15:22.299+00:00] !! opened
+[2026-09-30T12:15:29.708+00:00] I (872) RouteLoomRef: sdkv1 identity: node=3 kid=72b2282f385b2d8I (9882) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-30T12:15:29.708+00:00] W (9882) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-30T12:15:29.708+00:00] I (9884) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:15:29.708+00:00] W (9888) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:15:35.716+00:00] I (15889) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:15:35.716+00:00] W (15890) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:15:36.917+00:00] W (17184) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:15:51.935+00:00] W (32184) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1
+[2026-09-30T12:15:54.538+00:00] I (34684) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:15:54.538+00:00] W (34685) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:16:01.748+00:00] I (41917) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:16:01.748+00:00] W (41918) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:16:06.954+00:00] W (47184) RouteLoomRef: channel plan: no bound neighbour, listening on channel 6
+[2026-09-30T12:16:12.562+00:00] I (52857) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-30T12:16:12.562+00:00] W (52858) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-30T12:16:20.173+00:00] I (60465) RouteLoom: stack hwm rl_owner 10392 B
+[2026-09-30T12:16:20.173+00:00] I (60466) RouteLoom: owner polls=15497 empty=15465 rxq_max=1 max_us rx=340 bootstrap=13442 node=1665 security=689018
+[2026-09-30T12:16:20.173+00:00] I (60469) RouteLoom: owner expiry_slots=2107184 hop_accept_expired=0
+[2026-09-30T12:16:20.173+00:00] I (60475) RouteLoom: HIL HEAP free=159848 largest=143360 min=159456 B
+[2026-09-30T12:16:20.173+00:00] I (60481) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=4 busy=0 quarantined=0 fenced=0 tx_ok=27 tx_failed=2 stale=0 send_errors=0 last_error=0x0 rx=16 rx_other_channel=0
+[2026-09-30T12:16:20.373+00:00] I (60497) RouteLoom: HIL DISCOVERY candidates=0 neighbors=0 capacity=0 auth=0 stale=0 probes=0 send_failures=1 kind_rejects=0
+[2026-09-30T12:16:20.373+00:00] I (60508) RouteLoom: HIL ROUTE peer=1 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:16:20.373+00:00] I (60515) RouteLoom: HIL ROUTE peer=2 phase=-1 via=0 metric=0 generation=0 seq=0
+[2026-09-30T12:16:21.975+00:00] W (62185) RouteLoomRef: channel plan: no bound neighbour, listening on channel 1

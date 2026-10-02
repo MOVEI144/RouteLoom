@@ -679,10 +679,10 @@ def validate(root: Path) -> dict:
         ids = semantic["frame_numeric_ids"]
         test(
             "zero_touch_join_contract",
-            f"kZtDiscoverBodySize = {zt['rld1_body_v3']['discover_body_bytes']};" in zt_hpp
-            and f"kZtOfferBodySize = {zt['rld1_body_v3']['offer_body_bytes']};" in zt_hpp
-            and f"kZtBodyVersion = {zt['rld1_body_v3']['body_version']};" in zt_hpp
-            and f"kZtClass = {zt['rld1_body_v3']['scope_class']};" in zt_hpp
+            f"kZtDiscoverBodySize = {zt['rld1_body_v4']['discover_body_bytes']};" in zt_hpp
+            and f"kZtOfferBodySize = {zt['rld1_body_v4']['offer_body_bytes']};" in zt_hpp
+            and f"kZtBodyVersion = {zt['rld1_body_v4']['body_version']};" in zt_hpp
+            and f"kZtClass = {zt['rld1_body_v4']['scope_class']};" in zt_hpp
             and f"kJoinMessageMax = {zt['join_message_max_bytes']};" in zt_hpp
             and f"kRelayHeaderSize = {zt2['relay_header_bytes']};" in zt_hpp
             and f"RELAY_HEADER_SIZE: usize = {zt2['relay_header_bytes']};" in jr_rs
@@ -857,6 +857,26 @@ def validate(root: Path) -> dict:
                 f"{app}-esp32c3-normal-off-maintenance_on" in ci_cells,
                 "each factory console branch must compile in the fixed-IDF matrix",
             )
+        board_rf = (root / "components/routeloom_espnow/src/espnow_board_config.cpp").read_text(
+            encoding="utf-8")
+        c6_board = next(board for board in boards["boards"] if board["chip"] == "esp32c6")
+        for name, key in (("kRfSwitchEnableGpio", "rf_switch_enable_gpio"),
+                          ("kAntennaSelectGpio", "antenna_select_gpio")):
+            gpio = re.search(r"\b" + name + r"\s*=\s*GPIO_NUM_(\d+);", board_rf)
+            test("rf_switch:" + key, gpio is not None and int(gpio.group(1)) == c6_board[key],
+                 "C6 RF switch GPIOs must match boards.json")
+        rf_call = device.index("status = espnow::initialize_board_rf();")
+        test("rf_switch:before_wifi",
+             rf_call < device.index("status = runtime.initialize();")
+             and "#if CONFIG_IDF_TARGET_ESP32C6" in device[rf_call - 40:rf_call]
+             and "if (!status) return status;" in device[rf_call:rf_call + 100],
+             "only C6 configures its antenna path, and GPIO errors stop Wi-Fi startup")
+        kconfig = (root / "components/routeloom_device/Kconfig").read_text(encoding="utf-8")
+        antenna = kconfig.split("config ROUTELOOM_BOARD_C6_EXTERNAL_ANTENNA", 1)[1].split(
+            "    config ", 1)[0]
+        test("rf_switch:internal_default",
+             "default n" in antenna and "depends on IDF_TARGET_ESP32C6" in antenna,
+             "external antenna selection is C6-only and opt-in")
         for board in boards["boards"]:
             if "gpio_d0_to_d10" not in board:
                 test(

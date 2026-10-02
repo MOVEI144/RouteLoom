@@ -219,6 +219,15 @@ Status EspNowSecurityOwner::LifecycleRuntimePort::erase_site_trust() noexcept {
   }
   const Status policy = owner.stores_->proxy_policy().erase();
   if (!policy) return policy;
+  // The journaled removal (Holdoff, then the UnassignedReady watermark)
+  // is the one record of a removal. A recovery join that found the
+  // removal wrote RLV1 Blocked first so traffic stayed stopped until the
+  // journal held the intent; left standing it would refuse the readmit
+  // that the notice path allows after the same holdoff.
+  if (owner.stores_->local_revocation().has_record()) {
+    const Status cleared = owner.stores_->local_revocation().clear();
+    if (!cleared) return cleared;
+  }
   // RLS1 is erased by the lifecycle's Site step next, RLI1 stays
   // (device-level per 04 §6.4), and this step wipes the site-bound
   // intake policy and the RAM view (GK scope + discovery membership).
@@ -1096,13 +1105,14 @@ void EspNowSecurityOwner::apply_proxy_policy(const ByteView tail) noexcept {
     record.generation = set.generation;
     record.zero_touch_open = set.zero_touch_open;
     record.content = set.content;
+    record.expected = set.expected;
     const Status committed = store.commit(record);
     const Status readback = store.load(site_id, stored, has);
     if (!readback) coordinator().set_proxy_policy(site_id, false);
     if (!committed || !readback) status = sdkv1::ProxyPolicyStatus::StorageFailed;
   }
   if (status == sdkv1::ProxyPolicyStatus::Applied && has) {
-    coordinator().set_proxy_policy(site_id, stored.zero_touch_open);
+    coordinator().set_proxy_policy(site_id, stored.zero_touch_open, &stored.expected, runtime_->now_ms());
   }
   std::array<std::uint8_t, sdkv1::kProxyPolicyAckSize> ack{};
   if (!sdkv1::proxy_policy_ack_encode(status, has ? stored.generation : 0, ack)) return;

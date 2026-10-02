@@ -1,0 +1,11 @@
+{
+  "identity": {
+    "chip": "esp32c3",
+    "mac": "94:a9:90:7a:26:ac",
+    "log": "flash-bridge-preflight.log",
+    "flash_bytes": 4194304
+  },
+  "app_sha256": "e0e4c40ae97abe2bcfb1af1f5c6f26566a47975ec48c9a4387b1c77e93ca0ce6",
+  "app_bytes": 1268240,
+  "bundle": "hil-stab-final-br-bridge_node-esp32c3"
+}

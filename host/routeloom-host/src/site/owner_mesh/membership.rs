@@ -152,7 +152,21 @@ fn mesh_j06_closed_policy_stops_offers_until_reopened() {
 /// 20/20.
 #[test]
 fn mesh_j05_revoked_node_returns_with_the_same_node_id() {
-    let Some(mut world) = MeshWorld::start("j05", Switch::direct()) else {
+    j05_revoke_and_return("j05", false);
+}
+
+/// J05 (b), revoke-ordering variant: B is off the air for 8 s around the
+/// revoke, so G applies the RRS1 first and cancels B's RemovalNotice. B
+/// learns its removal from the recovery join instead; the removal it
+/// records is the same holdoff as the notice path, and B returns at
+/// generation 2 after it.
+#[test]
+fn mesh_j05_revoke_learned_by_recovery_join_returns() {
+    j05_revoke_and_return("j05-iso", true);
+}
+
+fn j05_revoke_and_return(tag: &str, isolate_b: bool) {
+    let Some(mut world) = MeshWorld::start(tag, Switch::direct()) else {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     world.provision.site.decider.pending_retry_s = 5;
@@ -177,6 +191,11 @@ fn mesh_j05_revoked_node_returns_with_the_same_node_id() {
         .link
         .revoke(NODE_B, 1, RemovalReason::Removed, "j05-revoke")
         .expect("revoke commits");
+    if isolate_b {
+        world.switch.isolate(2);
+        world.pump_until(320, |_| false); // 8 s
+        world.switch.heal(2);
+    }
     world.pump_until(24_000, |snaps| snaps[2].phase == PHASE_HOLDOFF);
     assert_eq!(
         world.snaps[2].phase, PHASE_HOLDOFF,
@@ -321,5 +340,222 @@ fn mesh_f01_f02_policy_record_faults() {
         world.peers[2].switching_cuts,
         cuts + 2,
         "both power cuts respawned B from its saved image"
+    );
+}
+
+/// J02d/J03: the actual Owner stores/applies the scheduled-device TLV,
+/// cancellation keeps candidates light, then reopening admits each once.
+#[test]
+fn mesh_j02_expected_list_cancel_then_join() {
+    expected_cohort(false);
+}
+
+#[test]
+fn mesh_j03_smart_join_under_reply_loss() {
+    expected_cohort(true);
+}
+
+fn expected_cohort(faults: bool) {
+    let Some(mut world) = MeshWorld::start_identity_only(
+        if faults { "j03-loss" } else { "j02-list" },
+        Switch::new(&Topology {
+            nodes: 4,
+            edges: vec![(0, 2), (2, 1), (2, 3)],
+        }),
+        &[1, 3],
+    ) else {
+        return;
+    };
+    world.gate[1] = true;
+    world.gate[3] = true;
+    let marks = [world.peers[1].join_mark(), world.peers[3].join_mark()];
+    for index in [1, 3] {
+        world
+            .provision
+            .site
+            .decider
+            .assign(world.peers[index].node, Assignment::Here(Role::Relay));
+    }
+    for index in [1, 3] {
+        world.peers[index].smart_join_policy(true, false, 60000);
+        world.peers[index].power_cut();
+    }
+    world.step(25);
+    world.pump_until(3000, |s| s[0].authority_ready && s[2].authority_ready);
+    let set = |world: &MeshWorld, count| {
+        world
+            .provision
+            .site
+            .service
+            .with(|a| {
+                a.update_policy(&PolicyPatch {
+                    expected: Some(crate::site::ExpectedJoins {
+                        marks: match count {
+                            0 => [[0; 16]; 3],
+                            1 => [marks[0], [0; 16], [0; 16]],
+                            _ => [marks[0], marks[1], [0; 16]],
+                        },
+                        count,
+                        ttl_s: 300,
+                    }),
+                    ..PolicyPatch::default()
+                })
+                .map(|_| a.policy().policy_generation)
+            })
+            .0
+            .expect("list durable")
+    };
+    let canceled = set(&world, 0);
+    until_applied(&mut world, 30000);
+    assert_eq!(radio(&world).distributed, Some(canceled));
+    world.gate[1] = false;
+    world.gate[3] = false;
+    world.pump_until(2600, |_| false);
+    for index in [1, 3] {
+        assert_eq!(world.snaps[index].j_m1, 0, "canceled list: no EDHOC");
+        assert_eq!(decider_requests_for(&world, world.peers[index].node), 0);
+    }
+    world.gate[1] = true;
+    world.gate[3] = true;
+    let scheduled = set(&world, if faults { 1 } else { 2 });
+    assert!(scheduled > canceled);
+    until_applied(&mut world, 30000);
+    assert_eq!(radio(&world).distributed, Some(scheduled));
+    if faults {
+        world.switch.drop_wire_kind(2, 1, 2, 1); // OFFER
+        world.switch.drop_wire_kind(2, 1, 5, 1); // first EDHOC M2 chunk
+    }
+    for index in [1, 3] {
+        world.peers[index].power_cut();
+    }
+    world.step(25);
+    world.gate[1] = false;
+    world.gate[3] = false;
+    world.pump_until(2400, |s| {
+        let ready = |index: usize| {
+            s[index].mode == MODE_MEMBER
+                && s[index].phase == PHASE_ACTIVE
+                && s[index].authority_ready
+                && s[index].join_confirmed
+        };
+        ready(1) && (faults || ready(3))
+    });
+    if faults {
+        assert_eq!(world.switch.wire_dropped, 2, "both reply losses fired");
+        assert_eq!(
+            world.snaps[3].j_m1, 0,
+            "unscheduled candidate never starts EDHOC"
+        );
+        assert!(!world.snaps[3].has_site);
+    }
+    assert_eq!(
+        world.snaps[2].proxy_relays_started,
+        if faults { 1 } else { 2 },
+        "one full relay per expected device"
+    );
+    for index in if faults { vec![1] } else { vec![1, 3] } {
+        assert_eq!(
+            world.snaps[index].mode, MODE_MEMBER,
+            "scheduled candidate joined: {:?}",
+            world.snaps[index]
+        );
+        assert_eq!(
+            world.snaps[index].j_attempts, 1,
+            "one pre-authentication attempt per search"
+        );
+        assert!(
+            world.snaps[index].authority_ready
+                && world.snaps[index].join_confirmed
+                && world.snaps[index].phase == PHASE_ACTIVE,
+            "ready before delivery: {:?}",
+            world.snaps
+        );
+        deliver_each(
+            &mut world,
+            index,
+            0,
+            if faults { 1 } else { 20 },
+            b"smart-cohort",
+        );
+    }
+}
+
+/// J02/J03: compare a simultaneous expected/unexpected boot cohort on
+/// the same radio and time window, including all mesh transmission bytes.
+#[test]
+fn mesh_j02_simultaneous_boot_reduces_full_joins_and_radio_bytes() {
+    let measure = |smart| {
+        let mut world = MeshWorld::start_identity_only(
+            if smart {
+                "j02-cohort-smart"
+            } else {
+                "j02-cohort-legacy"
+            },
+            Switch::new(&Topology {
+                nodes: 4,
+                edges: vec![(0, 2), (2, 1), (2, 3)],
+            }),
+            &[1, 3],
+        )
+        .expect("J02 requires the real Owner mesh peer");
+        world.gate[1] = true;
+        world.gate[3] = true;
+        let mark = world.peers[1].join_mark();
+        for (index, assignment) in [
+            (1, Assignment::Here(Role::Relay)),
+            (3, Assignment::Elsewhere),
+        ] {
+            world
+                .provision
+                .site
+                .decider
+                .assign(world.peers[index].node, assignment);
+            world.peers[index].join_policy_mode(smart, true, false, 60000);
+        }
+        world.step(25);
+        world.pump_until(3000, |s| s[0].authority_ready && s[2].authority_ready);
+        world
+            .provision
+            .site
+            .service
+            .with(|a| {
+                a.update_policy(&PolicyPatch {
+                    expected: Some(crate::site::ExpectedJoins {
+                        marks: [mark, [0; 16], [0; 16]],
+                        count: 1,
+                        ttl_s: 300,
+                    }),
+                    ..PolicyPatch::default()
+                })
+            })
+            .0
+            .expect("list durable");
+        until_applied(&mut world, 30000);
+        assert_eq!(radio(&world).applied, radio(&world).proxies);
+        let bytes_before = world.switch.radio_bytes;
+        for index in [1, 3] {
+            world.peers[index].power_cut();
+        }
+        world.step(25);
+        world.gate[1] = false;
+        world.gate[3] = false;
+        world.pump_until(2400, |_| false);
+        assert!(world.snaps[1].authority_ready && world.snaps[1].join_confirmed);
+        assert!(!world.snaps[3].has_site);
+        (
+            world.snaps[2].proxy_relays_started,
+            world.switch.radio_bytes - bytes_before,
+            world.snaps[3].j_attempts,
+        )
+    };
+    let legacy = measure(false);
+    let smart = measure(true);
+    eprintln!("J02 simultaneous cohort: legacy={legacy:?}; smart={smart:?} (full relays, radio bytes, unexpected attempts)");
+    assert!(legacy.0 >= 2);
+    assert_eq!(smart.0, 1);
+    assert_eq!(smart.2, 0);
+    assert!(
+        smart.1 < legacy.1,
+        "radio bytes decrease: legacy={legacy:?}; smart={smart:?}"
     );
 }

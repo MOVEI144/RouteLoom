@@ -285,6 +285,12 @@ class SessionBank {
   static constexpr std::size_t end_capacity() noexcept { return kEndCapacity; }
   std::size_t live_count(SecurityScope scope) const noexcept;
   bool has_usable(SecurityScope scope, NodeId peer) const noexcept;
+  // Confirmation under the exact current context, never an RX overlap.
+  bool has_authenticated_rx(SecurityScope scope, NodeId peer, std::uint32_t context_id) const noexcept {
+    const SessionBankEntry* entry = find_current(scope, peer);
+    return entry != nullptr && entry_usable(*entry) && entry->rx_cid == context_id &&
+           entry->rx_bitmap != 0;
+  }
   // Verified peer summary for the Owner's AuthenticatedPeerView: true
   // with the installed generation/role when a usable entry for (scope,
   // peer) stands. Only engine installs set nonzero claims, so a hit

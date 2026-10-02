@@ -1,0 +1,1 @@
+{"v":1,"request_id":"ctl-4145218","ok":true,"result":{"report":{"age_ms":481,"phase":0,"active_channel":6,"active_epoch":0,"ready":0,"released":false,"cooldown_ms":0,"gateway_now_ms":469380,"ledger_sequence":0,"offered_plan_hex":"0000000000000000000000000000000000000000000000000000000000000000"},"last":{"action":"status","result":"ok","detail":0},"busy":true,"required":2}}

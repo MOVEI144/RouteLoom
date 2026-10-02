@@ -1,0 +1,10 @@
+[2026-09-30T23:32:00.840+00:00] I (300478) RouteLoom: owner polls=74332 empty=73969 rxq_max=1 max_us rx=3956 bootstrap=14510 node=3391 security=689138
+[2026-09-30T23:32:00.840+00:00] I (300487) RouteLoom: HIL HEAP free=159416 largest=143360 min=158548 B
+[2026-09-30T23:32:00.840+00:00] I (300494) RouteLoom: HIL RADIO wifi_channel=6 committed=6 generation=0 busy=0 quarantined=0 fenced=0 tx_ok=126 tx_failed=0 stale=0 send_errors=0 last_error=0x0 rx=292 rx_other_channel=0
+[2026-09-30T23:32:00.840+00:00] I (300521) RouteLoom: HIL ROUTE peer=1 phase=5 via=1 metric=1 generation=35 seq=1
+[2026-09-30T23:32:00.840+00:00] I (300528) RouteLoom: HIL ROUTE peer=2 phase=5 via=2 metric=1 generation=62 seq=1
+[2026-09-30T23:33:00.719+00:00] I (360479) RouteLoom: owner polls=88880 empty=88393 rxq_max=1 max_us rx=128876 bootstrap=14510 node=14953 security=689138
+[2026-09-30T23:33:00.719+00:00] I (360489) RouteLoom: HIL HEAP free=159140 largest=143360 min=158496 B
+[2026-09-30T23:33:00.919+00:00] I (360495) RouteLoom: HIL RADIO wifi_channel=1 committed=1 generation=1 busy=0 quarantined=0 fenced=0 tx_ok=149 tx_failed=33 stale=0 send_errors=0 last_error=0x0 rx=351 rx_other_channel=0
+[2026-09-30T23:33:00.919+00:00] I (360523) RouteLoom: HIL ROUTE peer=1 phase=5 via=0 metric=0 generation=0 seq=0
+[2026-09-30T23:33:00.919+00:00] I (360530) RouteLoom: HIL ROUTE peer=2 phase=7 via=0 metric=0 generation=0 seq=0

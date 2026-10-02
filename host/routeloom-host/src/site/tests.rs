@@ -2420,7 +2420,7 @@ fn closed_policy_pends_without_asking() {
         pending_retry_after_s: 120,
         ..JoinPolicy::default()
     };
-    service.with(|a| a.set_policy(policy)).0.unwrap();
+    service.with(|a| a.set_policy(policy.snapshot())).0.unwrap();
     let mut bad = policy;
     bad.decision_timeout_ms = 100;
     assert_eq!(
@@ -6066,15 +6066,15 @@ fn policy_set_versions_content_changes() {
         zero_touch_open: false,
         ..JoinPolicy::default()
     };
-    service.with(|a| a.set_policy(policy)).0.unwrap();
+    service.with(|a| a.set_policy(policy.snapshot())).0.unwrap();
     assert_eq!(service.with(|a| a.policy()).0.policy_generation, 1);
 
     // A no-op set is not a new version.
-    service.with(|a| a.set_policy(policy)).0.unwrap();
+    service.with(|a| a.set_policy(policy.snapshot())).0.unwrap();
     assert_eq!(service.with(|a| a.policy()).0.policy_generation, 1);
 
     policy.decision_mode = DecisionMode::Closed;
-    service.with(|a| a.set_policy(policy)).0.unwrap();
+    service.with(|a| a.set_policy(policy.snapshot())).0.unwrap();
     assert_eq!(service.with(|a| a.policy()).0.policy_generation, 2);
 
     let body = service.with(|a| a.policy_json()).0;
@@ -6106,6 +6106,30 @@ fn policy_encoding_roundtrips_generation() {
     let decoded = JoinPolicy::decode(&full[..8]).unwrap();
     assert_eq!(decoded.policy_generation, 0);
     assert!(!decoded.zero_touch_open);
+}
+
+/// Expected marks remain private and bounded through the persisted policy codec.
+#[test]
+fn expected_join_policy_boundaries() {
+    let mut policy = JoinPolicy {
+        expected: super::ExpectedJoins {
+            marks: [[1; 16], [2; 16], [3; 16]],
+            count: 3,
+            ttl_s: 300,
+        },
+        ..JoinPolicy::default()
+    };
+    assert!(policy.validate().is_ok());
+    assert_eq!(JoinPolicy::decode(&policy.encode()).unwrap(), policy);
+    assert!(!format!("{:?}", policy.expected).contains("marks"));
+    let mut bytes = policy.encode();
+    bytes[14] = 2; // unknown expected-list version
+    assert!(JoinPolicy::decode(&bytes).is_none());
+    policy.expected.count = 4;
+    assert!(policy.validate().is_err());
+    policy.expected.count = 3;
+    policy.expected.marks[2] = policy.expected.marks[1];
+    assert!(policy.validate().is_err());
 }
 
 /// #194: the neutral name keeps stored mode byte 0. Rows written before

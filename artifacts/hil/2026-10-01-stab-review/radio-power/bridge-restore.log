@@ -1,0 +1,72 @@
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00:
+Connecting...
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:7a:26:ac
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+Configuring flash size...
+Flash will be erased from 0x00040000 to 0x0020ffff...
+Compressed 1900544 bytes to 813406...
+Writing at 0x0004bfcc ╸                                2.0% 16.00kB/794.34kB [0s] 
+Writing at 0x00057f3b ━                                4.0% 32.00kB/794.34kB [0s] 
+Writing at 0x0005ee2a ━╸                               6.0% 48.00kB/794.34kB [1s] 
+Writing at 0x00068028 ━━                               8.1% 64.00kB/794.34kB [1s] 
+Writing at 0x0006dc10 ━━━                             10.1% 80.00kB/794.34kB [2s] 
+Writing at 0x00073aec ━━━╸                            12.1% 96.00kB/794.34kB [2s] 
+Writing at 0x00079cd2 ━━━━                            14.1% 112.00kB/794.34kB [3s] 
+Writing at 0x0007f6fa ━━━━╸                           16.1% 128.00kB/794.34kB [3s] 
+Writing at 0x00085569 ━━━━━                           18.1% 144.00kB/794.34kB [4s] 
+Writing at 0x0008b910 ━━━━━━                          20.1% 160.00kB/794.34kB [4s] 
+Writing at 0x00091490 ━━━━━━╸                         22.2% 176.00kB/794.34kB [5s] 
+Writing at 0x0009703f ━━━━━━━                         24.2% 192.00kB/794.34kB [5s] 
+Writing at 0x0009d03a ━━━━━━━╸                        26.2% 208.00kB/794.34kB [6s] 
+Writing at 0x000a2860 ━━━━━━━━                        28.2% 224.00kB/794.34kB [6s] 
+Writing at 0x000a8553 ━━━━━━━━━                       30.2% 240.00kB/794.34kB [7s] 
+Writing at 0x000ae0c2 ━━━━━━━━━╸                      32.2% 256.00kB/794.34kB [7s] 
+Writing at 0x000b3a79 ━━━━━━━━━━                      34.2% 272.00kB/794.34kB [7s] 
+Writing at 0x000b932f ━━━━━━━━━━╸                     36.3% 288.00kB/794.34kB [7s] 
+Writing at 0x000bee3b ━━━━━━━━━━━                     38.3% 304.00kB/794.34kB [8s] 
+Writing at 0x000c49a5 ━━━━━━━━━━━━                    40.3% 320.00kB/794.34kB [8s] 
+Writing at 0x000caa47 ━━━━━━━━━━━━╸                   42.3% 336.00kB/794.34kB [8s] 
+Writing at 0x000d07f5 ━━━━━━━━━━━━━                   44.3% 352.00kB/794.34kB [8s] 
+Writing at 0x000d627e ━━━━━━━━━━━━━╸                  46.3% 368.00kB/794.34kB [8s] 
+Writing at 0x000dbd6c ━━━━━━━━━━━━━━╸                 48.3% 384.00kB/794.34kB [8s] 
+Writing at 0x000e1b88 ━━━━━━━━━━━━━━━                 50.4% 400.00kB/794.34kB [8s] 
+Writing at 0x000e7bc2 ━━━━━━━━━━━━━━━╸                52.4% 416.00kB/794.34kB [8s] 
+Writing at 0x000edcd0 ━━━━━━━━━━━━━━━━                54.4% 432.00kB/794.34kB [8s] 
+Writing at 0x000f469c ━━━━━━━━━━━━━━━━╸               56.4% 448.00kB/794.34kB [8s] 
+Writing at 0x000fa516 ━━━━━━━━━━━━━━━━━╸              58.4% 464.00kB/794.34kB [8s] 
+Writing at 0x00100312 ━━━━━━━━━━━━━━━━━━              60.4% 480.00kB/794.34kB [9s] 
+Writing at 0x001062e0 ━━━━━━━━━━━━━━━━━━╸             62.4% 496.00kB/794.34kB [9s] 
+Writing at 0x0010c9ce ━━━━━━━━━━━━━━━━━━━             64.5% 512.00kB/794.34kB [9s] 
+Writing at 0x00112891 ━━━━━━━━━━━━━━━━━━━╸            66.5% 528.00kB/794.34kB [9s] 
+Writing at 0x00118770 ━━━━━━━━━━━━━━━━━━━━╸           68.5% 544.00kB/794.34kB [9s] 
+Writing at 0x0011e404 ━━━━━━━━━━━━━━━━━━━━━           70.5% 560.00kB/794.34kB [9s] 
+Writing at 0x00123f0b ━━━━━━━━━━━━━━━━━━━━━╸          72.5% 576.00kB/794.34kB [9s] 
+Writing at 0x00129a85 ━━━━━━━━━━━━━━━━━━━━━━          74.5% 592.00kB/794.34kB [9s] 
+Writing at 0x0012f8b2 ━━━━━━━━━━━━━━━━━━━━━━╸         76.5% 608.00kB/794.34kB [9s] 
+Writing at 0x001361ce ━━━━━━━━━━━━━━━━━━━━━━━╸        78.6% 624.00kB/794.34kB [9s] 
+Writing at 0x0013bf49 ━━━━━━━━━━━━━━━━━━━━━━━━        80.6% 640.00kB/794.34kB [9s] 
+Writing at 0x001420d3 ━━━━━━━━━━━━━━━━━━━━━━━━╸       82.6% 656.00kB/794.34kB [10s] 
+Writing at 0x001484a9 ━━━━━━━━━━━━━━━━━━━━━━━━━       84.6% 672.00kB/794.34kB [10s] 
+Writing at 0x0014e743 ━━━━━━━━━━━━━━━━━━━━━━━━━╸      86.6% 688.00kB/794.34kB [10s] 
+Writing at 0x001544ea ━━━━━━━━━━━━━━━━━━━━━━━━━━╸     88.6% 704.00kB/794.34kB [10s] 
+Writing at 0x0015a245 ━━━━━━━━━━━━━━━━━━━━━━━━━━━     90.6% 720.00kB/794.34kB [10s] 
+Writing at 0x0015f745 ━━━━━━━━━━━━━━━━━━━━━━━━━━━╸    92.7% 736.00kB/794.34kB [10s] 
+Writing at 0x00164f02 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━    94.7% 752.00kB/794.34kB [10s] 
+Writing at 0x0016a5bc ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   96.7% 768.00kB/794.34kB [10s] 
+Writing at 0x001708da ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸  98.7% 784.00kB/794.34kB [10s] 
+Writing at 0x00210000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100.0% 794.34kB/794.34kB [10s] 
+Wrote 1900544 bytes (813406 compressed) at 0x00040000 in 11.8 seconds (1288.4 kbit/s).
+Verifying written data...
+Hash of data verified.
+
+Staying in bootloader.

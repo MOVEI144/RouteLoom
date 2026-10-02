@@ -1,0 +1,26 @@
+{
+  "wall_unix": 1790824695.5236385,
+  "ports": [
+    {
+      "role": "bridge",
+      "pinned_path": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00",
+      "resolved_path": "/dev/ttyACM1",
+      "exists": true,
+      "users": []
+    },
+    {
+      "role": "relay",
+      "pinned_path": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00",
+      "resolved_path": "/dev/ttyACM3",
+      "exists": true,
+      "users": []
+    },
+    {
+      "role": "endpoint",
+      "pinned_path": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00",
+      "resolved_path": "/dev/ttyACM2",
+      "exists": true,
+      "users": []
+    }
+  ]
+}

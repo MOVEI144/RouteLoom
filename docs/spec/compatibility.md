@@ -30,7 +30,7 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 | Mesh wire major | 2 | `ROUTELOOM_WIRE_MAJOR` / `WIRE_MAJOR` | `components/routeloom/include/routeloom/wire.hpp` | never changes within SDK 2.x; other majors are rejected |
 | Mesh wire minor | 0 | `ROUTELOOM_WIRE_MINOR` / `WIRE_MINOR` | `components/routeloom/include/routeloom/wire.hpp` | emitted by this build; decode accepts any minor of major 2 (forward-compatible additions only) |
 | RLD1 carrier | 1 | `ROUTELOOM_RLD1_VERSION` / `RLD1_VERSION` | `components/routeloom/include/routeloom/autonomy_wire.hpp` | classified once by magic+version |
-| RLD1 ZeroTouch body | 3 | `ROUTELOOM_RLD1_ZT_BODY` / `RLD1_ZT_BODY` | `components/routeloom/include/routeloom/sdkv1_join_transport.hpp` | unknown body versions are dropped |
+| RLD1 ZeroTouch body | 4 | `ROUTELOOM_RLD1_ZT_BODY` / `RLD1_ZT_BODY` | `components/routeloom/include/routeloom/sdkv1_join_transport.hpp` | smart probes use 4; legacy 3 remains readable; other versions are dropped |
 | HostLink (RLU1) protocol | 2 | `ROUTELOOM_HOSTLINK_PROTOCOL` / `HOSTLINK_PROTOCOL` | `components/routeloom/include/routeloom/usb_codec.hpp` | strict equality; bound into the HELLO transcript |
 | HostOps schema | 1 | `ROUTELOOM_HOSTOPS_SCHEMA` / `HOSTOPS_SCHEMA` | `components/routeloom/include/routeloom/usb_host_ops.hpp` | subcommands and capability bits are additive |
 | HostOps join relay schema | 2 | `ROUTELOOM_HOSTOPS_JOIN_RELAY_SCHEMA` / `HOSTOPS_JOIN_RELAY_SCHEMA` | `components/routeloom/include/routeloom/usb_host_ops.hpp` | only subcommands 0x60-0x63 use it |
@@ -40,6 +40,8 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 
 | Persisted format | Version | C / Rust name | Defined in | Unknown-version behavior |
 |---|---|---|---|---|
+| Proxy policy record | 2 | `ROUTELOOM_STORE_PROXY_POLICY_FORMAT` / `STORE_PROXY_POLICY_FORMAT` | `components/routeloom/src/sdkv1_records.cpp` | format 1 reads without an expected list; format 2 stores the bounded list; others refused |
+| Device join policy record | 2 | `ROUTELOOM_STORE_JOIN_POLICY_FORMAT` / `STORE_JOIN_POLICY_FORMAT` | `components/routeloom/src/sdkv1_records.cpp` | format 1 reads with legacy defaults; format 2 adds finite smart search; others refused |
 | Authority ledger format | 1 | `ROUTELOOM_STORE_AUTHORITY_LEDGER_FORMAT` / `STORE_AUTHORITY_LEDGER_FORMAT` | `components/routeloom/src/authority.cpp` | unknown format rejected |
 | Authority ledger (device) | 1 | `ROUTELOOM_STORE_AUTHORITY_LEDGER` / `STORE_AUTHORITY_LEDGER` | `components/routeloom/include/routeloom/authority.hpp` | unknown version reported Unsupported, never applied |
 | Config journal format (device) | 2 | `ROUTELOOM_STORE_CONFIG_JOURNAL_FORMAT` / `STORE_CONFIG_JOURNAL_FORMAT` | `components/routeloom/src/config.cpp` | format 1 is readable; writes use format 2 |

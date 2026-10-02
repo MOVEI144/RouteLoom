@@ -386,6 +386,10 @@ class MigrationAgent final : public MigrationFrameSink,
   // zero-touch re-join scans channels), the live reconcile waits instead
   // of pulling the radio back to the active record.
   void hold_reconcile(bool held) noexcept { reconcile_held_ = held; }
+  // Ask every bound peer for its newest signed plan state (the stranded
+  // scout request, 04 §9.2), at most once per snapshot request period. A
+  // served commit newer than ours is adopted through the real verifier.
+  void request_newest_state(MonotonicMs now_ms) noexcept;
 
   // --- authority (Manual) issuance -------------------------------------------
   // Ledger-commit the plan through the real MigrationAuthority path, then

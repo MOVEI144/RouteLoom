@@ -634,7 +634,7 @@ fn messages_read<S: OperationStore>(
             "network must be a 16-hex string",
         ));
     };
-    let network = acl::parse_network_hex(network_text)
+    let network = acl::parse_site_network_hex(network_text)
         .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
     let from = params.get("from").and_then(Json::as_str);
     let cursor_token = params.get("cursor").and_then(Json::as_str);
@@ -1232,7 +1232,7 @@ fn messages_subscribe<S: OperationStore>(
             "network must be a 16-hex string",
         ));
     };
-    let network = acl::parse_network_hex(network_text)
+    let network = acl::parse_site_network_hex(network_text)
         .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
     let from = params.get("from").and_then(Json::as_str);
     let cursor_token = params.get("cursor").and_then(Json::as_str);
@@ -6244,6 +6244,36 @@ mod tests {
     }
 
     #[test]
+    fn receive_methods_keep_full_network_acl_scope() {
+        let network = 0x3_0a1b_2c3d;
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        ingest(&log, network, 1, b"member", 100);
+        for method in ["messages.read", "messages.subscribe"] {
+            let request = format!(
+                "{{\"v\":1,\"request_id\":\"r\",\"method\":\"{method}\",\"params\":{{\"network\":\"{network:016x}\",\"from\":\"earliest\"{}}}}}",
+                if method == "messages.subscribe" { ",\"stream\":\"messages\"" } else { "" },
+            );
+            for (grant, allowed) in [(network, true), (network & 0xffff_ffff, false)] {
+                let acl = Acl::parse(&format!(
+                    "{{\"principals\":{{\"501\":{{\"networks\":{{\"{grant:016x}\":[\"READ_PAYLOAD\"]}}}}}}}}"
+                )).unwrap();
+                let c = ctx(Some(501), &acl, &log, &store, &limiter, 200);
+                let response = handle(request.as_bytes(), &c);
+                if allowed {
+                    assert!(response.contains("\"ok\":true"), "{response}");
+                    if method == "messages.read" {
+                        assert!(response.contains("\"payload_hex\":\"6d656d626572\""));
+                    }
+                } else {
+                    assert!(response.contains("AuthorizationFailed"), "{response}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn messages_read_requires_acl_grant() {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
@@ -9363,6 +9393,43 @@ mod tests {
             &handle(group_line("group.send", &params).as_bytes(), &old_c),
             "AuthorizationFailed",
         );
+    }
+
+    #[test]
+    fn expected_join_policy_api_accepts_marks_and_bounds_ttl() {
+        use crate::site::{store::MemoryStore, testkit, SiteService};
+        let site = SiteService::new(testkit::authority(Box::new(MemoryStore::default()), 1_000));
+        let acl =
+            Acl::parse("{\"principals\":{\"501\":{\"networks\":{\"*\":[\"MEMBERSHIP_ADMIN\"]}}}}")
+                .unwrap();
+        let (_, log, store, limiter) = test_env();
+        let c = ApiContext {
+            site: Some(&site),
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+        };
+        for (ttl, accepted) in [(0, false), (86401, false), (1, true), (86400, true)] {
+            let request = group_line(
+                "join.policy.set",
+                &format!("{{\"expected_devices\":[],\"expected_ttl_s\":{ttl}}}"),
+            );
+            let response = handle(request.as_bytes(), &c);
+            let parsed = routeloom_json::parse(&response).unwrap();
+            assert_eq!(parsed.get("result").is_some(), accepted, "{response}");
+        }
+        let request = group_line(
+            "join.policy.set",
+            r#"{"expected_devices":["01010101010101010101010101010101"],"expected_ttl_s":300}"#,
+        );
+        let response = handle(request.as_bytes(), &c);
+        assert!(
+            routeloom_json::parse(&response)
+                .unwrap()
+                .get("result")
+                .is_some(),
+            "{response}"
+        );
+        assert!(!response.contains("01010101010101010101010101010101"));
+        assert_eq!(site.with(|a| a.policy().expected.count).0, 1);
     }
 
     #[test]

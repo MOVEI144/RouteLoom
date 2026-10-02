@@ -1,0 +1,36 @@
+[2026-09-30T16:39:06.427+00:00] !! opened
+[2026-09-30T16:39:06.628+00:00] I (870) RouteLoomRef: sdkv1 identity: node=3 kid=72b2282f385b2d8I (2632) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T16:39:06.628+00:00] I (2634) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T16:39:08.831+00:00] I (5022) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T16:39:08.831+00:00] I (5024) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T16:39:09.032+00:00] I (5030) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T16:39:09.232+00:00] I (5348) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T16:39:09.232+00:00] I (5350) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T16:39:09.232+00:00] I (5355) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T16:39:09.632+00:00] I (5674) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T16:39:09.632+00:00] I (5676) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T16:39:09.632+00:00] I (5681) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T16:39:09.833+00:00] I (6000) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T16:39:09.833+00:00] I (6002) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T16:39:14.038+00:00] I (10114) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T16:39:14.038+00:00] I (10116) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T16:39:14.038+00:00] I (10122) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T16:39:14.439+00:00] I (10440) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T16:39:14.439+00:00] I (10442) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T16:39:14.439+00:00] I (10447) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T16:39:14.639+00:00] I (10766) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T16:39:14.639+00:00] I (10768) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T16:39:14.639+00:00] I (10773) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T16:39:15.039+00:00] I (11092) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T16:39:15.039+00:00] I (11094) RouteLoomRef: join mode=1 state=14 error=0
+[2026-09-30T16:39:24.253+00:00] I (20302) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T16:39:24.253+00:00] I (20304) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T16:39:24.253+00:00] I (20310) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T16:39:24.453+00:00] I (20628) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T16:39:24.453+00:00] I (20630) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T16:39:24.453+00:00] I (20635) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T16:39:24.853+00:00] I (20954) RouteLoomRef: join mode=1 state=2 error=0
+[2026-09-30T16:39:24.853+00:00] I (20956) RouteLoomRef: join mode=1 state=3 error=0
+[2026-09-30T16:39:24.853+00:00] I (20961) RouteLoomRef: join mode=1 state=4 error=0
+[2026-09-30T16:39:25.254+00:00] I (21280) RouteLoomRef: join mode=1 state=5 error=0
+[2026-09-30T16:39:25.254+00:00] I (21282) RouteLoomRef: join mode=1 state=14 error=0

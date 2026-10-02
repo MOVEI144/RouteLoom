@@ -70,6 +70,17 @@ static void check_boundaries(mesh_c_app_t* app) {
   rl_dev_struct_init(&membership, sizeof(membership));
   count(app, rl_dev_membership(app->device, &membership) == RL_STATUS_OK &&
                  membership.node == rl_dev_node_id(app->device));
+  /* API 1's original 32-byte policy prefix stays writable without touching the tail. */
+  rl_dev_join_policy_t policy;
+  uint32_t revision;
+  rl_dev_struct_init(&policy, sizeof(policy));
+  policy.struct_size = offsetof(rl_dev_join_policy_t, smart_join);
+  policy.smart_join = 0xA5;
+  count(app, rl_dev_join_policy(app->device, &policy, &revision) == RL_STATUS_OK &&
+                 policy.smart_join == 0xA5);
+  count(app, rl_dev_set_join_policy(app->device, &policy, revision, &revision) == RL_STATUS_OK);
+  --policy.struct_size;
+  count(app, rl_dev_join_policy(app->device, &policy, &revision) == RL_STATUS_INVALID_ARGUMENT);
   rl_dev_send_options_init(&options);
   options.version = RL_ABI_VERSION;
   count(app, rl_dev_send(app->device, 1, &byte, 1, &options, &id) ==

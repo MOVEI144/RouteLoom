@@ -1,0 +1,26 @@
+[2026-10-01T01:50:52.868+00:00] I (2481) PROBE: begin node=2 phase=0 ch=6 lr500=0 protocol=15 power=40
+[2026-10-01T01:51:03.894+00:00] I (13451) PROBE: result node=2 peer=1 phase=0 ch=6 lr500=0 admitted=20 errors=0 ok=20 fail=0 rx=12
+[2026-10-01T01:51:03.894+00:00] I (13451) PROBE: result node=2 peer=3 phase=0 ch=6 lr500=0 admitted=20 errors=0 ok=0 fail=20 rx=12
+[2026-10-01T01:51:22.926+00:00] I (32491) PROBE: begin node=2 phase=1 ch=1 lr500=0 protocol=15 power=40
+[2026-10-01T01:51:37.353+00:00] I (46871) PROBE: result node=2 peer=1 phase=1 ch=1 lr500=0 admitted=20 errors=0 ok=20 fail=0 rx=17
+[2026-10-01T01:51:37.353+00:00] I (46871) PROBE: result node=2 peer=3 phase=1 ch=1 lr500=0 admitted=20 errors=0 ok=0 fail=20 rx=17
+[2026-10-01T01:51:52.881+00:00] I (62491) PROBE: begin node=2 phase=2 ch=1 lr500=0 protocol=15 power=8
+[2026-10-01T01:52:08.510+00:00] I (78031) PROBE: result node=2 peer=1 phase=2 ch=1 lr500=0 admitted=20 errors=0 ok=0 fail=20 rx=16
+[2026-10-01T01:52:08.511+00:00] I (78031) PROBE: result node=2 peer=3 phase=2 ch=1 lr500=0 admitted=20 errors=0 ok=0 fail=20 rx=0
+[2026-10-01T01:52:22.939+00:00] I (92491) PROBE: begin node=2 phase=3 ch=6 lr500=0 protocol=15 power=8
+[2026-10-01T01:52:34.463+00:00] I (104011) PROBE: result node=2 peer=1 phase=3 ch=6 lr500=0 admitted=20 errors=0 ok=20 fail=0 rx=15
+[2026-10-01T01:52:34.463+00:00] I (104011) PROBE: result node=2 peer=3 phase=3 ch=6 lr500=0 admitted=20 errors=0 ok=0 fail=20 rx=13
+[2026-10-01T01:52:52.895+00:00] I (122491) PROBE: begin node=2 phase=4 ch=1 lr500=1 protocol=15 power=40
+[2026-10-01T01:53:02.811+00:00] I (132351) PROBE: result node=2 peer=1 phase=4 ch=1 lr500=1 admitted=20 errors=0 ok=16 fail=4 rx=14
+[2026-10-01T01:53:02.811+00:00] I (132351) PROBE: result node=2 peer=3 phase=4 ch=1 lr500=1 admitted=20 errors=0 ok=0 fail=20 rx=0
+[2026-10-01T01:53:22.948+00:00] I (152491) PROBE: begin node=2 phase=5 ch=6 lr500=1 protocol=15 power=40
+[2026-10-01T01:53:30.661+00:00] I (160191) PROBE: result node=2 peer=1 phase=5 ch=6 lr500=1 admitted=20 errors=0 ok=20 fail=0 rx=13
+[2026-10-01T01:53:30.662+00:00] I (160191) PROBE: result node=2 peer=3 phase=5 ch=6 lr500=1 admitted=20 errors=0 ok=0 fail=20 rx=11
+[2026-10-01T01:53:52.898+00:00] I (182491) PROBE: begin node=2 phase=6 ch=1 lr500=1 protocol=15 power=8
+[2026-10-01T01:54:03.616+00:00] I (193181) PROBE: result node=2 peer=1 phase=6 ch=1 lr500=1 admitted=20 errors=0 ok=0 fail=20 rx=14
+[2026-10-01T01:54:03.616+00:00] I (193181) PROBE: result node=2 peer=3 phase=6 ch=1 lr500=1 admitted=20 errors=0 ok=0 fail=20 rx=0
+[2026-10-01T01:54:22.948+00:00] I (212491) PROBE: begin node=2 phase=7 ch=6 lr500=1 protocol=15 power=8
+[2026-10-01T01:54:30.859+00:00] I (220421) PROBE: result node=2 peer=1 phase=7 ch=6 lr500=1 admitted=20 errors=0 ok=20 fail=0 rx=13
+[2026-10-01T01:54:30.859+00:00] I (220421) PROBE: result node=2 peer=3 phase=7 ch=6 lr500=1 admitted=20 errors=0 ok=0 fail=20 rx=12
+[2026-10-01T01:54:50.892+00:00] I (240491) PROBE: done
+[2026-10-01T01:54:50.892+00:00] I (240491) main_task: Returned from app_main()
