@@ -9366,6 +9366,43 @@ mod tests {
     }
 
     #[test]
+    fn expected_join_policy_api_accepts_marks_and_bounds_ttl() {
+        use crate::site::{store::MemoryStore, testkit, SiteService};
+        let site = SiteService::new(testkit::authority(Box::new(MemoryStore::default()), 1_000));
+        let acl =
+            Acl::parse("{\"principals\":{\"501\":{\"networks\":{\"*\":[\"MEMBERSHIP_ADMIN\"]}}}}")
+                .unwrap();
+        let (_, log, store, limiter) = test_env();
+        let c = ApiContext {
+            site: Some(&site),
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+        };
+        for (ttl, accepted) in [(0, false), (86401, false), (1, true), (86400, true)] {
+            let request = group_line(
+                "join.policy.set",
+                &format!("{{\"expected_devices\":[],\"expected_ttl_s\":{ttl}}}"),
+            );
+            let response = handle(request.as_bytes(), &c);
+            let parsed = routeloom_json::parse(&response).unwrap();
+            assert_eq!(parsed.get("result").is_some(), accepted, "{response}");
+        }
+        let request = group_line(
+            "join.policy.set",
+            r#"{"expected_devices":["01010101010101010101010101010101"],"expected_ttl_s":300}"#,
+        );
+        let response = handle(request.as_bytes(), &c);
+        assert!(
+            routeloom_json::parse(&response)
+                .unwrap()
+                .get("result")
+                .is_some(),
+            "{response}"
+        );
+        assert!(!response.contains("01010101010101010101010101010101"));
+        assert_eq!(site.with(|a| a.policy().expected.count).0, 1);
+    }
+
+    #[test]
     fn site_channel_plan_signs_for_an_admin_only() {
         use crate::site::{store::MemoryStore, testkit, SiteService};
         use routeloom_provision::sdkv1::channel_plan::{issue, plan_encode, ChannelPlan};

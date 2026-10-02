@@ -420,6 +420,8 @@ fn policy_set<S: OperationStore>(
             "decision_mode",
             "decision_timeout_ms",
             "pending_retry_after_s",
+            "expected_devices",
+            "expected_ttl_s",
         ],
     )?;
     let service = service(ctx)?;
@@ -482,7 +484,8 @@ fn policy_set<S: OperationStore>(
             .get("expected_ttl_s")
             .and_then(Json::as_u64)
             .and_then(|v| u32::try_from(v).ok())
-            .ok_or_else(|| invalid("expected_ttl_s is required"))?;
+            .filter(|v| (1..=86400).contains(v))
+            .ok_or_else(|| invalid("expected_ttl_s must be 1..=86400"))?;
         let mut expected = crate::site::ExpectedJoins {
             count: entries.len() as u8,
             ttl_s,
