@@ -242,9 +242,14 @@ HandshakeEngine::HandshakeEngine(ResumeCache2& cache, HandshakeSessionSink& sink
       aead_(aead),
       credentials_(*this) {}
 
-HandshakeEngine::~HandshakeEngine() noexcept { secure_clear(dev_policy_.psk); }
+HandshakeEngine::~HandshakeEngine() noexcept {
+  assert(!crypto_.pending());
+  end_edhoc_flight();
+  secure_clear(dev_policy_.psk);
+}
 
 Status HandshakeEngine::configure(const MonotonicMs now) noexcept {
+  if (crypto_.pending()) return Status::error(StatusCode::Busy, "handshake crypto loan active");
   if (entered_) return Status::error(StatusCode::Busy, "handshake re-entered");
   const EnterGuard guard(entered_);
   if (random_ == nullptr) return Status::error(StatusCode::InvalidArgument, "handshake random");
@@ -272,6 +277,7 @@ Status HandshakeEngine::configure(const MonotonicMs now) noexcept {
 
 Status HandshakeEngine::configure_dev(const DevResumePolicy& policy,
                                       const MonotonicMs now) noexcept {
+  if (crypto_.pending()) return Status::error(StatusCode::Busy, "handshake crypto loan active");
   if (entered_) return Status::error(StatusCode::Busy, "handshake re-entered");
   const EnterGuard guard(entered_);
   if (random_ == nullptr) return Status::error(StatusCode::InvalidArgument, "handshake random");
@@ -625,24 +631,33 @@ Status HandshakeEngine::MemberCredentials::peer(const edhoc::Role role, const By
   const Status matched =
       join_credential_check(staged_view, CertType::Member, kid, decoded);
   if (!matched) return matched;
-  CarrierRecord* record = self.find_record_by_token(flight.owner_token);
-  if (record == nullptr) {
-    return Status::error(StatusCode::InvalidState, "session peer orphan");
-  }
+  const CarrierRecord* record =
+      self.crypto_.asynchronous() ? nullptr : self.find_record_by_token(flight.owner_token);
+  const NodeId peer = self.crypto_.asynchronous()
+                          ? self.crypto_peer_
+                          : (record == nullptr ? kInvalidNodeId : record->peer);
+  const HandshakeLocal& local = self.crypto_.asynchronous() ? self.crypto_local_ : self.local_;
   PeerCertClaims claims{};
-  if (!self.verifier_.verify_peer(staged_view, record->peer, claims)) {
+  if (self.crypto_.asynchronous()) {
+    const auto& context = self.crypto_peer_context_;
+    CertClaims unused{};
+    bool verified = false;
+    if (context.verifier == nullptr || decoded.issuer != context.site_id ||
+        decoded.network != context.network ||
+        !cert_verify(staged_view, context.sak, unused, verified, *context.verifier) || !verified) {
+      return Status::error(StatusCode::AuthenticationFailed, "session peer chain");
+    }
+    claims.node = decoded.subject;
+    claims.generation = decoded.assignment_generation;
+    claims.role = decoded.role;
+    claims.site_epoch = decoded.site_epoch;
+  } else if (record == nullptr || !self.verifier_.verify_peer(staged_view, peer, claims)) {
     return Status::error(StatusCode::AuthenticationFailed, "session peer chain");
   }
   if (claims.node != decoded.subject || claims.role != decoded.role ||
       claims.generation != decoded.assignment_generation ||
-      claims.site_epoch != decoded.site_epoch) {
-    return Status::error(StatusCode::AuthenticationFailed, "session peer claims disagree");
-  }
-  // The §5.3 m2 row: sub names the expected peer, the credential is
-  // issued for our adopted network/site, the role is a known member
-  // mask (cert_decode already enforces nonzero + mask).
-  if (decoded.subject != record->peer || decoded.network != self.local_.network ||
-      decoded.site_epoch != self.local_.site_epoch) {
+      claims.site_epoch != decoded.site_epoch || decoded.subject != peer ||
+      decoded.network != local.network || decoded.site_epoch != local.site_epoch) {
     return Status::error(StatusCode::AuthenticationFailed, "session peer binding");
   }
   ScopeDigest cert_digest{};
@@ -802,6 +817,11 @@ bool HandshakeEngine::reserve_resume_use(const rlres1::Purpose purpose,
 // --- Records and results ---
 
 void HandshakeEngine::end_edhoc_flight() noexcept {
+  if (crypto_.pending()) {
+    crypto_.cancel();
+    return;
+  }
+  clear_crypto_stage();
   edhoc_.end();
   secure_clear(edhoc_flight_.local_cred.privkey);
   secure_clear(edhoc_flight_.local_cred.cred);
@@ -1438,28 +1458,37 @@ Status HandshakeEngine::begin_edhoc(CarrierRecord& record, const MonotonicMs now
     }
     edhoc_flight_.intent_bytes = encoded;
     edhoc_flight_.intent_set = true;
-    std::array<std::uint8_t, kMaxMessageBytes> m1{};
-    std::size_t m1_size = 0;
-    const Status composed = edhoc_.compose_message_1(MutableByteView{m1.data(), m1.size()},
-                                                    m1_size);
-    if (!composed || m1_size == 0 || m1_size > record.last_tx.size()) {
-      end_edhoc_flight();
-      secure_clear(m1);
-      return Status::error(StatusCode::ProtocolError, "handshake m1 oversized");
-    }
-    std::memcpy(record.last_tx.data(), m1.data(), m1_size);
-    record.last_tx_size = m1_size;
-    record.last_phase = 4;
-    record.last_step = 1;
-    record.state = RecordState::EdhocWaitM2;
-    record.retransmit_at = now + kEdhocRetransmitMs;
-    record.retransmits = 0;
-    const Status sent =
-        emit_send(record, 4, 1, ByteView{m1.data(), m1_size}, record.scope == SecurityScope::Link);
-    secure_clear(m1);
-    return sent;
+    return initiator_compose_m1(record, now);
   }
   return Status::success();
+}
+
+Status HandshakeEngine::initiator_compose_m1(CarrierRecord& record,
+                                             const MonotonicMs now) noexcept {
+  std::array<std::uint8_t, kMaxMessageBytes> m1{};
+  std::size_t m1_size = 0;
+  const Status composed =
+      crypto_call(CryptoOp::Compose1, ByteView{}, MutableByteView{m1.data(), m1.size()}, m1_size);
+  if (composed.code == StatusCode::WouldBlock || composed.code == StatusCode::Busy) {
+    return Status::success();
+  }
+  if (!composed || m1_size == 0 || m1_size > record.last_tx.size()) {
+    end_edhoc_flight();
+    secure_clear(m1);
+    return Status::error(StatusCode::ProtocolError, "handshake m1 oversized");
+  }
+  std::memcpy(record.last_tx.data(), m1.data(), m1_size);
+  record.last_tx_size = m1_size;
+  record.last_phase = 4;
+  record.last_step = 1;
+  record.state = RecordState::EdhocWaitM2;
+  record.retransmit_at = now + kEdhocRetransmitMs;
+  record.retransmits = 0;
+  const Status sent =
+      emit_send(record, 4, 1, ByteView{m1.data(), m1_size}, record.scope == SecurityScope::Link);
+  secure_clear(m1);
+  clear_crypto_stage();
+  return sent;
 }
 
 // --- Inbound ---
@@ -1665,83 +1694,101 @@ Status HandshakeEngine::responder_begin_m1(CarrierRecord& record,
     park_m1(record, message);  // begin queued us (backstop): park instead
     return Status::success();
   }
-  const Status processed = edhoc_.process_message_1(message);
-    std::uint32_t cid_i = 0;
-    const Status cid_ok = processed.ok() ? read_peer_cid(cid_i) : processed;
-    if (!processed || !cid_ok.ok() || !edhoc_flight_.intent_set) {
-      drop_record(record);
-      return Status::success();
-    }
-    edhoc_flight_.cid_peer = cid_i;
-    // Cheap gates on the UNAUTHENTICATED Intent (agreement, not trust):
-    // the exchange must name this carrier, or it is not ours. Caps are
-    // NOT gated here: the received bits are selection hints, and the
-    // authenticated State confirms agreement at m3 (P4 §5.1/§5.3).
-    SessionIntent intent{};
-    std::array<std::uint8_t, 32> binding{};
-    const Status bound = build_binding(record.scope, record.carrier, record.mac_i, record.mac_r,
-                                       record.peer, local_.self, record.exchange_id, binding);
-    if (!bound) {
-      drop_record(record);
-      return Status::success();
-    }
-    Status intent_ok = session_intent_decode(
-        ByteView{edhoc_flight_.intent_bytes.data(), edhoc_flight_.intent_bytes.size()}, intent);
-    if (intent_ok.ok()) {
-      const std::uint8_t want_purpose = record.scope == SecurityScope::EndToEnd
-                                            ? kSessionPurposeEnd
-                                            : kSessionPurposeLink;
-      if (intent.purpose != want_purpose || intent.binding != binding) {
-        intent_ok = Status::error(StatusCode::ProtocolError, "intent binding");
-      }
-    }
-    if (!intent_ok.ok()) {
-      drop_record(record);
-      return Status::success();
-    }
-    // State_R: our disclosed epochs/caps (compose() sends these). Caps
-    // repeat the frozen OFFER word, like the initiator's Intent repeats
-    // the frozen DISCOVER word.
-    SessionState state_r{};
-    state_r.purpose = record.scope == SecurityScope::EndToEnd ? kSessionPurposeEnd
-                                                              : kSessionPurposeLink;
-    state_r.profile = kSessionProfileMember;
-    state_r.site_epoch = local_.site_epoch;
-    state_r.rs_epoch = local_.rs_epoch;
-    state_r.gk_epoch = local_.gk_epoch;
-    state_r.boot = local_.boot;
-    state_r.caps =
-        record.scope == SecurityScope::Link ? record.carrier.capability_r : 0;
-    std::array<std::uint8_t, kSessionStateBytes> state_r_bytes{};
-    if (!session_state_encode(state_r, state_r_bytes).ok()) {
-      drop_record(record);
-      return Status::success();
-    }
-    edhoc_flight_.state_r_bytes = state_r_bytes;
-    edhoc_flight_.state_r_set = true;
-    std::array<std::uint8_t, kMaxMessageBytes> m2{};
-    std::size_t m2_size = 0;
-    const Status composed =
-        edhoc_.compose_message_2(MutableByteView{m2.data(), m2.size()}, m2_size);
-    if (!composed || m2_size == 0 || m2_size > big_tx_.size()) {
-      drop_record(record);
-      secure_clear(m2);
-      return Status::success();
-    }
-    std::memcpy(big_tx_.data(), m2.data(), m2_size);
-    big_tx_size_ = m2_size;
-    big_tx_owner_ = record.token;
-    sha256(message, edhoc_flight_.m1_hash);
-    edhoc_flight_.m1_seen = true;
-    record.state = RecordState::EdhocWaitM3;
-    const Status sent =
-        emit_send(record, 4, 2, ByteView{m2.data(), m2_size}, false);
-    secure_clear(m2);
-    return sent;
+  return responder_continue_m1(record, message, now);
+}
+
+Status HandshakeEngine::responder_continue_m1(CarrierRecord& record, const ByteView message,
+                                              const MonotonicMs now) noexcept {
+  (void)now;
+  const Status processed =
+      crypto_call(CryptoOp::Process1, message, MutableByteView{}, crypto_output_size_);
+  if (processed.code == StatusCode::WouldBlock || processed.code == StatusCode::Busy) {
+    return Status::success();
   }
+  std::uint32_t cid_i = 0;
+  const Status cid_ok = processed.ok() ? read_peer_cid(cid_i) : processed;
+  if (!processed || !cid_ok.ok() || !edhoc_flight_.intent_set) {
+    drop_record(record);
+    return Status::success();
+  }
+  edhoc_flight_.cid_peer = cid_i;
+  // Cheap gates on the UNAUTHENTICATED Intent (agreement, not trust):
+  // the exchange must name this carrier, or it is not ours. Caps are
+  // NOT gated here: the received bits are selection hints, and the
+  // authenticated State confirms agreement at m3 (P4 §5.1/§5.3).
+  SessionIntent intent{};
+  std::array<std::uint8_t, 32> binding{};
+  const Status bound = build_binding(record.scope, record.carrier, record.mac_i, record.mac_r,
+                                     record.peer, local_.self, record.exchange_id, binding);
+  if (!bound) {
+    drop_record(record);
+    return Status::success();
+  }
+  Status intent_ok = session_intent_decode(
+      ByteView{edhoc_flight_.intent_bytes.data(), edhoc_flight_.intent_bytes.size()}, intent);
+  if (intent_ok.ok()) {
+    const std::uint8_t want_purpose =
+        record.scope == SecurityScope::EndToEnd ? kSessionPurposeEnd : kSessionPurposeLink;
+    if (intent.purpose != want_purpose || intent.binding != binding) {
+      intent_ok = Status::error(StatusCode::ProtocolError, "intent binding");
+    }
+  }
+  if (!intent_ok.ok()) {
+    drop_record(record);
+    return Status::success();
+  }
+  // State_R: our disclosed epochs/caps (compose() sends these). Caps
+  // repeat the frozen OFFER word, like the initiator's Intent repeats
+  // the frozen DISCOVER word.
+  SessionState state_r{};
+  state_r.purpose =
+      record.scope == SecurityScope::EndToEnd ? kSessionPurposeEnd : kSessionPurposeLink;
+  state_r.profile = kSessionProfileMember;
+  state_r.site_epoch = local_.site_epoch;
+  state_r.rs_epoch = local_.rs_epoch;
+  state_r.gk_epoch = local_.gk_epoch;
+  state_r.boot = local_.boot;
+  state_r.caps = record.scope == SecurityScope::Link ? record.carrier.capability_r : 0;
+  std::array<std::uint8_t, kSessionStateBytes> state_r_bytes{};
+  if (!session_state_encode(state_r, state_r_bytes).ok()) {
+    drop_record(record);
+    return Status::success();
+  }
+  edhoc_flight_.state_r_bytes = state_r_bytes;
+  edhoc_flight_.state_r_set = true;
+  std::array<std::uint8_t, kMaxMessageBytes> m2{};
+  std::size_t m2_size = 0;
+  const Status composed =
+      crypto_call(CryptoOp::Compose2, ByteView{}, MutableByteView{m2.data(), m2.size()}, m2_size);
+  if (composed.code == StatusCode::WouldBlock || composed.code == StatusCode::Busy) {
+    return Status::success();
+  }
+  if (!composed || m2_size == 0 || m2_size > big_tx_.size()) {
+    drop_record(record);
+    secure_clear(m2);
+    return Status::success();
+  }
+  std::memcpy(big_tx_.data(), m2.data(), m2_size);
+  big_tx_size_ = m2_size;
+  big_tx_owner_ = record.token;
+  if (crypto_.asynchronous())
+    edhoc_flight_.m1_hash = crypto_input_hash_;
+  else
+    sha256(message, edhoc_flight_.m1_hash);
+  edhoc_flight_.m1_seen = true;
+  record.state = RecordState::EdhocWaitM3;
+  const Status sent = emit_send(record, 4, 2, ByteView{m2.data(), m2_size}, false);
+  secure_clear(m2);
+  clear_crypto_stage();
+  return sent;
+}
 
 Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeRx& rx,
                                          const ByteView message, const MonotonicMs now) noexcept {
+  if (crypto_stage_active_ && !crypto_replaying_ && record != nullptr &&
+      record->token == crypto_token_) {
+    return Status::error(StatusCode::Busy, "handshake crypto computing");
+  }
   if (rx.step == 1) {
     // Responder-new, or a duplicate m1 (resend cached m2/m4 without
     // touching libedhoc). Unknown claimants match only an equally
@@ -1824,7 +1871,11 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
         !edhoc_flight_.active || edhoc_flight_.owner_token != record->token) {
       return Status::success();
     }
-    const Status processed = edhoc_.process_message_2(message);
+    const Status processed =
+        crypto_call(CryptoOp::Process2, message, MutableByteView{}, crypto_output_size_);
+    if (processed.code == StatusCode::WouldBlock || processed.code == StatusCode::Busy) {
+      return Status::success();
+    }
     std::uint32_t cid_r = 0;
     const Status cid_ok = processed.ok() ? read_peer_cid(cid_r) : processed;
     if (!processed || !cid_ok.ok()) {
@@ -1859,7 +1910,10 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
     std::array<std::uint8_t, kMaxMessageBytes> m3{};
     std::size_t m3_size = 0;
     const Status composed =
-        edhoc_.compose_message_3(MutableByteView{m3.data(), m3.size()}, m3_size);
+        crypto_call(CryptoOp::Compose3, ByteView{}, MutableByteView{m3.data(), m3.size()}, m3_size);
+    if (composed.code == StatusCode::WouldBlock || composed.code == StatusCode::Busy) {
+      return Status::success();
+    }
     if (!composed || m3_size == 0 || m3_size > big_tx_.size()) {
       return emit_failed(*record, StatusCode::ProtocolError);
     }
@@ -1875,6 +1929,7 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
     record->retransmits = 0;
     const Status sent = emit_send(*record, 4, 3, ByteView{m3.data(), m3_size}, false);
     secure_clear(m3);
+    clear_crypto_stage();
     return sent;
   }
   if (rx.step == 3) {
@@ -1909,7 +1964,11 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
       return emit_send(*record, 4, 4, ByteView{big_tx_.data(), big_tx_size_}, false);
     }
     if (record->state != RecordState::EdhocWaitM3) return Status::success();
-    const Status processed = edhoc_.process_message_3(message);
+    const Status processed =
+        crypto_call(CryptoOp::Process3, message, MutableByteView{}, crypto_output_size_);
+    if (processed.code == StatusCode::WouldBlock || processed.code == StatusCode::Busy) {
+      return Status::success();
+    }
     if (!processed || !edhoc_flight_.state_i_set || !edhoc_flight_.confirm_i_set ||
         !edhoc_flight_.peer_verified) {
       return emit_failed(*record, StatusCode::AuthenticationFailed);
@@ -1923,20 +1982,27 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
     std::array<std::uint8_t, kMaxMessageBytes> m4{};
     std::size_t m4_size = 0;
     const Status composed =
-        edhoc_.compose_message_4(MutableByteView{m4.data(), m4.size()}, m4_size);
+        crypto_call(CryptoOp::Compose4, ByteView{}, MutableByteView{m4.data(), m4.size()}, m4_size);
+    if (composed.code == StatusCode::WouldBlock || composed.code == StatusCode::Busy) {
+      return Status::success();
+    }
     if (!composed || m4_size == 0 || m4_size > big_tx_.size()) {
       return emit_failed(*record, StatusCode::ProtocolError);
     }
     std::memcpy(big_tx_.data(), m4.data(), m4_size);
     big_tx_size_ = m4_size;
     big_tx_owner_ = record->token;
-    sha256(message, edhoc_flight_.m3_hash);
+    if (crypto_.asynchronous())
+      edhoc_flight_.m3_hash = crypto_input_hash_;
+    else
+      sha256(message, edhoc_flight_.m3_hash);
     edhoc_flight_.m3_seen = true;
     record->state = RecordState::EdhocM4Pending;
     record->retransmit_at = now + kEdhocRetransmitMs;
     record->retransmits = 0;
     const Status sent = emit_send(*record, 4, 4, ByteView{m4.data(), m4_size}, false);
     secure_clear(m4);
+    clear_crypto_stage();
     return sent;
   }
   if (rx.step == 4) {
@@ -1944,7 +2010,11 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
         !edhoc_flight_.active || edhoc_flight_.owner_token != record->token) {
       return Status::success();
     }
-    const Status processed = edhoc_.process_message_4(message);
+    const Status processed =
+        crypto_call(CryptoOp::Process4, message, MutableByteView{}, crypto_output_size_);
+    if (processed.code == StatusCode::WouldBlock || processed.code == StatusCode::Busy) {
+      return Status::success();
+    }
     if (!processed || !edhoc_flight_.confirm_r_set) {
       return emit_failed(*record, StatusCode::AuthenticationFailed);
     }
@@ -2805,6 +2875,123 @@ Status HandshakeEngine::dev_resume_commit(CarrierRecord& record,
   return Status::success();
 }
 
+void HandshakeEngine::clear_crypto_stage() noexcept {
+  assert(!crypto_.pending());
+  secure_clear(crypto_message_);
+  crypto_input_size_ = 0;
+  crypto_output_size_ = 0;
+  crypto_step_ = 0;
+  crypto_token_ = 0;
+  crypto_stage_active_ = false;
+  crypto_process_done_ = false;
+  crypto_compose_done_ = false;
+}
+
+Status HandshakeEngine::run_crypto(void* context) noexcept {
+  auto& engine = *static_cast<HandshakeEngine*>(context);
+  const ByteView input{engine.crypto_message_.data(), engine.crypto_input_size_};
+  const MutableByteView output{engine.crypto_message_.data(), engine.crypto_message_.size()};
+  switch (engine.crypto_op_) {
+    case CryptoOp::Process1:
+      return engine.edhoc_.process_message_1(input);
+    case CryptoOp::Process2:
+      return engine.edhoc_.process_message_2(input);
+    case CryptoOp::Process3:
+      return engine.edhoc_.process_message_3(input);
+    case CryptoOp::Process4:
+      return engine.edhoc_.process_message_4(input);
+    case CryptoOp::Compose1:
+      return engine.edhoc_.compose_message_1(output, engine.crypto_output_size_);
+    case CryptoOp::Compose2:
+      return engine.edhoc_.compose_message_2(output, engine.crypto_output_size_);
+    case CryptoOp::Compose3:
+      return engine.edhoc_.compose_message_3(output, engine.crypto_output_size_);
+    case CryptoOp::Compose4:
+      return engine.edhoc_.compose_message_4(output, engine.crypto_output_size_);
+  }
+  return Status::error(StatusCode::InternalError, "handshake crypto operation");
+}
+
+Status HandshakeEngine::crypto_call(const CryptoOp op, const ByteView input,
+                                    const MutableByteView output, std::size_t& length) noexcept {
+  const bool compose = op >= CryptoOp::Compose1;
+  if ((compose && crypto_compose_done_) || (!compose && crypto_process_done_)) {
+    if (compose) {
+      length = crypto_output_size_;
+      if (length > output.size) return Status::error(StatusCode::NoCapacity, "crypto output");
+      if (length != 0) std::memcpy(output.data, crypto_message_.data(), length);
+    }
+    return compose ? crypto_composed_ : crypto_processed_;
+  }
+  if (crypto_.pending()) return Status::error(StatusCode::WouldBlock, "handshake computing");
+  if (!crypto_stage_active_) {
+    crypto_stage_active_ = true;
+    crypto_token_ = edhoc_flight_.owner_token;
+    crypto_step_ = compose ? 0 : static_cast<std::uint8_t>(op) + 1;
+    crypto_local_ = local_;
+    const auto* record = find_record_by_token(crypto_token_);
+    if (record == nullptr) return Status::error(StatusCode::InvalidState, "crypto flight orphan");
+    crypto_peer_ = record->peer;
+    if (crypto_.asynchronous() && !verifier_.worker_context(crypto_peer_context_)) {
+      return Status::error(StatusCode::Unsupported, "crypto credential snapshot unavailable");
+    }
+  }
+  crypto_op_ = op;
+  if (!compose) {
+    if (input.size > crypto_message_.size() || input.data == nullptr) {
+      return Status::error(StatusCode::InvalidArgument, "crypto input");
+    }
+    if (input.data != crypto_message_.data()) {
+      std::memcpy(crypto_message_.data(), input.data, input.size);
+    }
+    crypto_input_size_ = input.size;
+    sha256(input, crypto_input_hash_);
+  }
+  const Status submitted = crypto_.start(this, &HandshakeEngine::run_crypto);
+  if (crypto_.asynchronous()) return submitted;
+  if (compose) {
+    crypto_compose_done_ = true;
+    crypto_composed_ = submitted;
+  } else {
+    crypto_process_done_ = true;
+    crypto_processed_ = submitted;
+  }
+  return crypto_call(op, input, output, length);
+}
+
+Status HandshakeEngine::poll_crypto(const MonotonicMs now) noexcept {
+  if (crypto_.pending()) {
+    Status result{};
+    const Status completed = crypto_.poll(result);
+    if (!completed) return completed;
+    if (crypto_.cancelled()) {
+      end_edhoc_flight();
+      return Status::success();
+    }
+    if (crypto_op_ >= CryptoOp::Compose1) {
+      crypto_compose_done_ = true;
+      crypto_composed_ = result;
+    } else {
+      crypto_process_done_ = true;
+      crypto_processed_ = result;
+    }
+  }
+  auto* record = find_record_by_token(crypto_token_);
+  if (record == nullptr || !edhoc_flight_.active || edhoc_flight_.owner_token != crypto_token_) {
+    end_edhoc_flight();
+    return Status::success();
+  }
+  if (crypto_step_ == 0) return initiator_compose_m1(*record, now);
+  const ByteView input{crypto_message_.data(), crypto_input_size_};
+  if (crypto_step_ == 1) return responder_continue_m1(*record, input, now);
+  HandshakeRx rx{};
+  rx.step = crypto_step_;
+  crypto_replaying_ = true;
+  const Status resumed = on_edhoc_message(record, rx, input, now);
+  crypto_replaying_ = false;
+  return resumed;
+}
+
 // --- Time, results, cancellation ---
 
 Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
@@ -2814,6 +3001,10 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
   if (has_pending_) return Status::error(StatusCode::Busy, "handshake result pending");
   if (now < last_tick_) return Status::error(StatusCode::InvalidArgument, "handshake time moved");
   last_tick_ = now;
+  if (crypto_.pending() && crypto_.cancelled()) {
+    const Status drained = poll_crypto(now);
+    if (drained.code != StatusCode::WouldBlock) return drained;
+  }
   const Status local = refresh_local();
   if (!local) {
     cancel_all_internal();
@@ -2873,6 +3064,10 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
     }
     return emit_failed(record, StatusCode::Expired);
   }
+  if (crypto_.pending() || crypto_stage_active_) {
+    const Status progressed = poll_crypto(now);
+    if (progressed.code != StatusCode::WouldBlock) return progressed;
+  }
   if (lookup_.kind != ResumeLookupWork::Kind::None) return poll_resume_lookup(now);
   for (const auto& record : records_) {
     if (record.used && record.state == RecordState::ResumeLookupPeer) {
@@ -2880,8 +3075,9 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
     }
   }
   for (auto& record : records_) {
-    if (!record.used || now < record.retransmit_at ||
-        record.state == RecordState::EdhocM4Sent) continue;  // quiet: duplicate replies only
+    if (!record.used || (crypto_stage_active_ && record.token == crypto_token_) ||
+        now < record.retransmit_at || record.state == RecordState::EdhocM4Sent)
+      continue;  // quiet: duplicate replies only
     const bool small_tx = record.last_tx_size != 0;
     const bool big_tx = (record.state == RecordState::EdhocWaitM4 ||
                          record.state == RecordState::EdhocM4Pending) && edhoc_flight_.active &&
@@ -3130,6 +3326,19 @@ bool StoreCredentialVerifier::local_credential(LocalCredential& out) noexcept {
   std::memcpy(out.cred.data(), site.member_cert.bytes.data(), site.member_cert.size);
   out.cred_size = site.member_cert.size;
   out.privkey = identity.key_material;
+  return true;
+}
+
+bool StoreCredentialVerifier::worker_context(PeerVerificationContext& out) const noexcept {
+  out = PeerVerificationContext{};
+  if (!site_.has_site()) return false;
+  const auto& site = site_.site();
+  CertClaims claims{};
+  if (!cert_decode(site.site_cert.view(), claims) || claims.type != CertType::Site) return false;
+  out.sak = claims.pubkey;
+  out.site_id = site.site_id;
+  out.network = site.network;
+  out.verifier = &verifier_;
   return true;
 }
 

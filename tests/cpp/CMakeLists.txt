@@ -819,6 +819,11 @@ add_test(NAME routeloom_sdkv1_blob_storage_tests COMMAND routeloom_sdkv1_blob_st
 # bounds, and the size/stack report. edhoc_probe.c is C: it reads libedhoc's
 # internal key slots (C11-only header) to compare the intermediate PRKs.
 find_package(Threads REQUIRED)
+add_executable(routeloom_crypto_worker_tests test_crypto_worker.cpp)
+target_link_libraries(routeloom_crypto_worker_tests PRIVATE routeloom_core Threads::Threads)
+target_compile_options(routeloom_crypto_worker_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_crypto_worker_tests COMMAND routeloom_crypto_worker_tests)
+
 add_executable(routeloom_edhoc_tests test_edhoc.cpp edhoc_probe.c)
 target_link_libraries(routeloom_edhoc_tests PRIVATE routeloom_core routeloom_edhoc_headers
     Threads::Threads)

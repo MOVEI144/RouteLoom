@@ -175,6 +175,13 @@ struct TestVerifier final : public SessionCredentialVerifier {
     out.privkey = privkey;
     return true;
   }
+  bool worker_context(PeerVerificationContext& out) const noexcept override {
+    out.sak = sak_pub;
+    out.site_id = sdkv1_test::kSiteId;
+    out.network = network;
+    out.verifier = &default_es256_verifier();
+    return true;
+  }
   bool verify_peer(const ByteView cert_bytes, const NodeId expected_node,
                    PeerCertClaims& out) noexcept override {
     out = PeerCertClaims{};
@@ -384,8 +391,8 @@ Status deliver_to(To& to, const From& from, const HandshakeResult& send,
 // time advances 50 ms per hop (well inside the cookie bucket and the
 // retransmit/timer horizons, so no timer fires mid-exchange).
 template <typename A, typename B>
-PumpResult pump(A& a, B& b, const FrozenLink& frozen,
-                  const MonotonicMs start = kT0) {
+PumpResult pump(A& a, B& b, const FrozenLink& frozen, const MonotonicMs start = kT0,
+                CryptoWorker* worker_a = nullptr, CryptoWorker* worker_b = nullptr) {
   PumpResult result{};
   MonotonicMs now = start;
   const auto note_send = [&](const HandshakeResult& send) {
@@ -397,8 +404,16 @@ PumpResult pump(A& a, B& b, const FrozenLink& frozen,
     if (send.phase == 5 && send.step == 2) result.r2_size = send.message_size;
     if (send.phase == 5 && send.step == 3) result.r3_size = send.message_size;
   };
-  for (int round = 0; round < 12 && !(result.established_a && result.established_b); ++round) {
+  for (int round = 0; round < 32 && !(result.established_a && result.established_b); ++round) {
     bool progress = false;
+    if (worker_a != nullptr && worker_a->execute()) {
+      CHECK_OK(a.engine.poll(now));
+      progress = true;
+    }
+    if (worker_b != nullptr && worker_b->execute()) {
+      CHECK_OK(b.engine.poll(now));
+      progress = true;
+    }
     HandshakeResult out{};
     std::vector<HandshakeResult> sends_a, sends_b;
     while (a.engine.take_result(out).ok()) {
@@ -2081,7 +2096,76 @@ void test_dev_configure_busy_while_in_flight() {
   CHECK_OK(pair.a->engine.configure_dev(pair.a->policy, kT0 + 9000));
 }
 
+void test_worker_handshake_and_cancel() {
+  CryptoWorker worker_a, worker_b;
+  auto pair = Pair::make();
+  CHECK_OK(pair.a->engine.bind_crypto_worker(&worker_a));
+  CHECK_OK(pair.b->engine.bind_crypto_worker(&worker_b));
+  MonotonicMs now = kT0;
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, now, kCapsEdhocOnly, kCapsEdhocOnly);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, now));
+  CHECK(pair.a->engine.crypto_pending());
+  CHECK(!pair.a->engine.quiescent());
+  const PumpResult result = pump(*pair.a, *pair.b, frozen, now, &worker_a, &worker_b);
+  CHECK(result.established_a && result.established_b);
+  CHECK(roundtrip_ok(*pair.a, *pair.b, result.est_a, result.est_b));
+  CHECK(worker_a.idle() && worker_b.idle());
+
+  for (const auto reason : {HandshakeCancelReason::Shutdown, HandshakeCancelReason::Revoked}) {
+    auto cancelled = Pair::make();
+    CHECK_OK(cancelled.a->engine.bind_crypto_worker(&worker_a));
+    now = kT0;
+    const FrozenLink link =
+        freeze_link(*cancelled.a, *cancelled.b, now, kCapsEdhocOnly, kCapsEdhocOnly);
+    CHECK_OK(request_link(*cancelled.a, *cancelled.b, link, now));
+    CHECK_OK(cancelled.a->engine.cancel(cancelled.b->self, reason));
+    HandshakeResult ignored{};
+    while (cancelled.a->engine.take_result(ignored)) {
+    }
+    CHECK_OK(cancelled.a->engine.poll(now + 1));
+    CHECK(cancelled.a->engine.crypto_pending());
+    CHECK(worker_a.execute());
+    CHECK_OK(cancelled.a->engine.poll(now + 2));
+    CHECK(!cancelled.a->engine.crypto_pending());
+    CHECK(cancelled.a->sink.installs == 0);
+    CHECK(worker_a.idle());
+    CHECK(cancelled.a->engine.take_result(ignored).code == StatusCode::NotFound);
+  }
+}
+
+void test_worker_cancel_completed_m4() {
+  CryptoWorker worker_a, worker_b;
+  auto pair = Pair::make();
+  CHECK_OK(pair.a->engine.bind_crypto_worker(&worker_a));
+  CHECK_OK(pair.b->engine.bind_crypto_worker(&worker_b));
+  MonotonicMs now = kT0;
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, now, kCapsEdhocOnly, kCapsEdhocOnly);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, now));
+  for (std::uint8_t step = 1; step <= 4; ++step) {
+    auto& from = step % 2 == 1 ? *pair.a : *pair.b;
+    auto& to = step % 2 == 1 ? *pair.b : *pair.a;
+    auto& worker = step % 2 == 1 ? worker_a : worker_b;
+    for (unsigned stage = 0; stage < 2 && from.engine.crypto_pending(); ++stage) {
+      CHECK(worker.execute());
+      CHECK_OK(from.engine.poll(++now));
+    }
+    HandshakeResult send{};
+    CHECK_OK(from.engine.take_result(send));
+    CHECK(send.event == HandshakeEvent::Send && send.phase == 4 && send.step == step);
+    CHECK_OK(from.engine.accept_send(send.token, send.phase, send.step));
+    CHECK_OK(deliver_to(to, from, send, frozen, ++now));
+  }
+  CHECK(pair.a->engine.crypto_pending());
+  CHECK(worker_a.execute());
+  CHECK_OK(pair.a->engine.cancel(pair.b->self, HandshakeCancelReason::Revoked));
+  CHECK_OK(pair.a->engine.poll(++now));
+  CHECK(pair.a->sink.installs == 0);
+  CHECK(!pair.a->engine.crypto_pending() && worker_a.idle());
+}
+
 int main() {
+  test_worker_handshake_and_cancel();
+  test_worker_cancel_completed_m4();
   test_link_edhoc_full();
   test_initiator_retries_m3_until_m4_arrives();
   test_responder_waits_for_m4_admission();

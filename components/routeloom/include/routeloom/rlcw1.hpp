@@ -140,6 +140,14 @@ class Es256Verifier {
   virtual ~Es256Verifier() = default;
   virtual bool verify_digest(const P256PublicKey& pubkey, const Digest256& digest,
                              const Es256Signature& signature) const noexcept = 0;
+  // WouldBlock retains the verification attempt; the Owner retries the same
+  // signed bytes after completion and rechecks its policy before adoption.
+  virtual bool verification_pending() const noexcept { return false; }
+  virtual Status progress_digest(const P256PublicKey& pubkey, const Digest256& digest,
+                                 const Es256Signature& signature, bool& verified) const noexcept {
+    verified = verify_digest(pubkey, digest, signature);
+    return Status::success();
+  }
 };
 const Es256Verifier& default_es256_verifier() noexcept;
 
