@@ -47,7 +47,9 @@ Vendored in this repository
              handshakes (docs/design/sdk-v1/08 P2-1). Subset: include/,
              library/core/, library/internal/, backends/{cbor,memory,log}/;
              upstream's PSA reference cipher suites, tests, Zephyr and CMake
-             files are not vendored. Files are unmodified (blob ids in
+             files are not vendored. Local patches enforce exact message decode
+             lengths and one-byte connection-ID compaction (blob ids and
+             upstream transformations in
              components/routeloom/third_party/VENDORED.json, checked by
              tests/test_vendored_sources.py); RouteLoom's configuration and
              crypto/memory/credential backend are RouteLoom code in
