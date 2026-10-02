@@ -260,7 +260,12 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     // unauthenticated frame's victim. An expired pin is released after End.
     DedupEntry* expired_pin = nullptr;
     std::size_t terminal_pins = 0;
+    std::size_t resident = 0;
+    bool reclaimable = false;
     dedup_.for_each([&](DedupEntry& value) {
+      ++resident;
+      if (value.expires_at_ms <= now_ms || value.phase == DedupPhase::Resolved ||
+          value.phase == DedupPhase::Evidence) reclaimable = true;
       if (value.phase != DedupPhase::Terminal) return;
       ++terminal_pins;
       if (value.expires_at_ms <= now_ms) expired_pin = &value;
@@ -274,6 +279,12 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       observer_.on_diagnostic(
           terminal_refused ? "DEDUP_TERMINAL_RESERVE" : "ADMISSION_NO_ACK_SLOT",
           peer, &frame.header.message);
+      return;
+    }
+    if (resident == kDedupCapacity && !reclaimable) {
+      saturating_inc(dedup_stats_.refused_pool_full);
+      refuse();
+      observer_.on_diagnostic("DEDUP_OVERFLOW", peer, &frame.header.message);
       return;
     }
     // Reserve reply resources provisionally before consuming End replay.

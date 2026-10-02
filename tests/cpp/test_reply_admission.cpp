@@ -7,6 +7,7 @@
 //
 // Q117-05/07/08/11/12/14 exercise the node integration.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -192,6 +193,64 @@ void inject_v2(Harness& h, NodeId receiver, NodeId peer,
     meta.binding_generation = binding.generation;
   }
   h.at(receiver)->on_radio_receive(peer, frame.view(), meta, h.now);
+}
+
+// Small profiles can fill the pool below the terminal quota with live
+// transit work while reply transactions are still available. Refusal must
+// leave the sealed End envelope usable for a fresh-Link same-round retry.
+void test_terminal_pool_pressure_preserves_end() {
+  if (kDedupTransitReserve >= 7) return;
+  Harness h;
+  auto* terminal = h.add(1);
+  h.add(2);
+  h.add(3);
+  h.link(1, 2);
+  h.link(1, 3);
+  for (std::size_t i = 0; i < kDedupTerminalPinMax - 1; ++i) {
+    inject_v2(h, 1, 3, craft_transit(h.cipher, 3, 1, 3, 1, 100 + i));
+    for (int step = 0; step < 40 && terminal->txn_in_flight() != 0; ++step) {
+      terminal->poll(h.now);
+      h.at(3)->poll(h.now);
+      h.net.flush(h.now);
+      ++h.now;
+    }
+    CHECK(terminal->txn_in_flight() == 0);
+  }
+  for (std::size_t i = 0; i < kDedupTransitReserve + 1; ++i) {
+    inject_v2(h, 1, 3, craft_transit(h.cipher, 3, 1, 3, 2, 200 + i));
+    for (int step = 0; step < 3; ++step) {
+      terminal->poll(h.now);
+      h.net.flush(h.now);
+      ++h.now;
+    }
+  }
+  CHECK(terminal->dedup_resident() == kDedupCapacity);
+  CHECK(terminal->dedup_stats().admitted_terminal == kDedupTerminalPinMax - 1);
+  CHECK(terminal->txn_in_flight() < 8);
+  const auto frame = craft_transit(h.cipher, 3, 1, 3, 1, 999);
+  const auto opens = h.sec.at(1)->end_opens();
+  inject_v2(h, 1, 3, frame);
+  CHECK(terminal->dedup_stats().refused_pool_full == 1);
+  CHECK(h.sec.at(1)->end_opens() == opens);
+  CHECK(h.observer(1)->messages.size() == kDedupTerminalPinMax - 1);
+  // One downstream accept makes a retained transit record evictable.
+  // Hold its receipt so it cannot itself occupy the reclaimed slot.
+  h.net.block_send = [](NodeId from, NodeId, ByteView bytes) {
+    return from == 2 && bytes.size > 4 &&
+           bytes.data[4] == static_cast<std::uint8_t>(FrameType::EndReceipt);
+  };
+  for (int step = 0; step < 5; ++step) {
+    h.at(2)->poll(h.now);
+    h.net.flush(h.now);
+    ++h.now;
+  }
+  wire::LinkOpenedFrame sealed{};
+  CHECK(wire::open_link(frame.view(), 1, h.cipher, sealed).ok());
+  wire::EncodedFrame retry{};
+  CHECK(wire::retry_local(sealed, 1, 4900, h.cipher, retry).ok());
+  inject_v2(h, 1, 3, retry);
+  CHECK(h.observer(1)->messages.size() == kDedupTerminalPinMax);
+  CHECK(h.sec.at(1)->end_opens() == opens + 1);
 }
 
 void test_terminal_reserves_receipt_without_route() {
@@ -540,8 +599,8 @@ void test_fourth_binding_refused_without_side_effects() {
   CHECK(relay->component_events_pending() == 0);
 }
 
-// A failed terminal reservation must return its eighth use before trying
-// the BUSY reply; otherwise the ninth-use probe drops an affordable BUSY.
+// A terminal quota refusal must leave room for an affordable BUSY while
+// live transit work occupies the profile's reserve.
 void test_failed_dedup_reservation_releases_use_before_busy() {
   Harness h;
   (void)h.add(1);
@@ -565,12 +624,14 @@ void test_failed_dedup_reservation_releases_use_before_busy() {
     return from == 2 && to == 4 && frame.size > 4 &&
            frame.data[4] == static_cast<std::uint8_t>(FrameType::Data);
   };
-  for (std::uint64_t i = 1; i <= 7; ++i) {
+  const auto live = std::min<std::size_t>(7, kDedupTransitReserve);
+  for (std::uint64_t i = 1; i <= live; ++i) {
     inject_v2(h, 2, 1, craft_transit(h.cipher, 1, 2, 1, 4, 1000 + i));
     h.run(10);
   }
-  CHECK(terminal->txn_in_flight() == 7);
-  CHECK(h.port(2)->leases().live_use_count() == 7);
+  CHECK(terminal->dedup_stats().admitted_transit == live);
+  CHECK(terminal->txn_in_flight() == live);
+  CHECK(h.port(2)->leases().live_use_count() == live);
   CHECK(terminal->congestion_stats().control_queued == 0);
   CHECK(terminal->set_peer_busy_capable(1, true).ok());
   const auto sent_before = terminal->congestion_stats().busy_sent;
@@ -582,7 +643,7 @@ void test_failed_dedup_reservation_releases_use_before_busy() {
   inject_v2(h, 2, 1, frame);
   CHECK(terminal->dedup_stats().refused_terminal_reserve == 1);
   CHECK(terminal->congestion_stats().busy_sent == sent_before + 1);
-  CHECK(terminal->txn_in_flight() == 8);
+  CHECK(terminal->txn_in_flight() == live + 1);
 }
 
 // Q117-08: with the 8-deep control lane full, DATA / routed / END_RECEIPT
@@ -803,6 +864,7 @@ void test_send_to_retired_peer_reports_failure() {
 }  // namespace
 
 int main() {
+  test_terminal_pool_pressure_preserves_end();
   test_terminal_reserves_receipt_without_route();
   test_forward_bounded_by_transaction_lifetime();
   test_wire_budget_survives_transaction_clamp();
