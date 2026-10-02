@@ -11,6 +11,7 @@
 #include "routeloom/config_cose.hpp"
 #include "routeloom/config_dev.hpp"
 #include "routeloom/endpoint_wire.hpp"
+#include "routeloom/signature_progress.hpp"
 
 namespace {
 
@@ -121,6 +122,38 @@ void test_cose_permit_valid() {
   CHECK_OK(endpoint::config_command_decode(payload.view(), cmd));
   CHECK(cmd.network == 7 && cmd.target == 0xC3 && cmd.authority == kAuthorityId);
   CHECK(cmd.next_revision == 5 && cmd.field_count == 1);
+}
+
+void test_cose_worker_progress() {
+  CryptoWorker worker;
+  sdkv1::SignatureProgress signature;
+  CHECK_OK(signature.bind(&worker));
+  Fixture f;
+  f.verifier.bind_signature_verifier(&signature);
+  endpoint::EncodedConfigCommand payload{};
+  bool verified = true;
+  const ByteView object{f.permit.data(), f.permit.size()};
+  CHECK(f.verifier.verify_permit(context(), object, payload, verified).code ==
+        StatusCode::WouldBlock);
+  CHECK(!verified && payload.size == 0);
+  CHECK(f.verifier.verify_permit(context(), object, payload, verified).code ==
+        StatusCode::WouldBlock);
+  CHECK(worker.execute());
+  CHECK_OK(f.verifier.verify_permit(context(), object, payload, verified));
+  CHECK(verified && payload.size == 182);
+  CHECK_OK(signature.reset());
+  CHECK(f.verifier.verify_permit(context(), object, payload, verified).code ==
+        StatusCode::WouldBlock);
+  CHECK(signature.cancel().code == StatusCode::Busy);
+  CHECK(worker.execute());
+  CHECK_OK(signature.cancel());
+  CHECK(f.verifier.verify_permit(context(), object, payload, verified).code ==
+        StatusCode::WouldBlock);
+  CHECK(!verified);
+  CHECK(worker.execute());
+  CHECK_OK(f.verifier.verify_permit(context(), object, payload, verified));
+  CHECK(verified);
+  CHECK_OK(signature.reset());
 }
 
 void test_cose_permit_denied_variants() {
@@ -395,6 +428,7 @@ void test_cose_lane_cross_injection() {
 
 int main() {
   test_cose_permit_valid();
+  test_cose_worker_progress();
   test_cose_permit_denied_variants();
   test_cose_permit_malformed();
   test_cose_permit_signature_bounds();

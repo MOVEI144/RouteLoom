@@ -33,6 +33,7 @@
 
 #include "routeloom/config.hpp"
 #include "routeloom/endpoint_wire.hpp"
+#include "routeloom/rlcw1.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
@@ -97,7 +98,13 @@ class CoseEsp256AuthorityVerifier final : public ConfigAuthorityVerifier {
   std::uint32_t permit_profile_bit() const noexcept override { return 1u << 1; }
   // P-256 ECDSA on the radio Owner is the expensive path the intake limiter
   // exists for (03-signing §3.3).
+  void bind_signature_verifier(const sdkv1::Es256Verifier* verifier) noexcept override {
+    signature_verifier_ = verifier;
+  }
   bool verify_is_expensive() const noexcept override { return true; }
+  bool verification_pending() const noexcept override {
+    return signature_verifier_ != nullptr && signature_verifier_->verification_pending();
+  }
   Status verify_permit(const ConfigPermitContext& context, ByteView permit,
                        endpoint::EncodedConfigCommand& payload,
                        bool& verified) noexcept override;
@@ -109,6 +116,7 @@ class CoseEsp256AuthorityVerifier final : public ConfigAuthorityVerifier {
                          bool& verified) noexcept override;
 
  private:
+  const sdkv1::Es256Verifier* signature_verifier_{nullptr};
   std::uint64_t authority_id_{0};
   std::array<std::uint8_t, kCosePublicKeySize> public_key_{};
   bool provisioned_{false};

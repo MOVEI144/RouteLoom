@@ -3,6 +3,8 @@
 
 #include "routeloom/sdkv1_joiner.hpp"
 
+#include <algorithm>
+#include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -94,7 +96,20 @@ Joiner::Joiner(const JoinerConfig& config, IdentityStore& identity, SiteStore& s
   candidates_.set_retry_max(config_.retry_max_ms);
 }
 
+Status Joiner::bind_crypto_worker(CryptoWorker* worker, SignatureProgress* signature) noexcept {
+  if (crypto_pending() || (state_ != JoinState::Stopped && state_ != JoinState::BootCheck)) {
+    return Status::error(StatusCode::Busy, "join crypto exchange active");
+  }
+  signature_ = signature;
+  if (signature_ != nullptr) {
+    const Status bound = signature_->bind(worker);
+    if (!bound) return bound;
+  }
+  return crypto_.bind(worker);
+}
+
 Joiner::~Joiner() {
+  assert(!crypto_pending());
   teardown_attempt();
   wipe_expectation();
   secure_clear(retained_fingerprint_);
@@ -215,7 +230,15 @@ void Joiner::clear_mailbox() noexcept {
 
 void Joiner::teardown_attempt() noexcept {
   link_.close();
+  (void)cancel_signature();
+  if (crypto_.pending()) {
+    crypto_.cancel();
+    return;
+  }
   handshake_.end();
+  secure_clear(&crypto_decided_, sizeof(crypto_decided_));
+  secure_clear(&crypto_input_, sizeof(crypto_input_));
+  secure_clear(&crypto_evidence_, sizeof(crypto_evidence_));
   secure_clear(msg_);
   clear_mailbox();
   hint_valid_ = false;
@@ -320,7 +343,8 @@ void Joiner::LinkObserver::on_message(const JoinAuthPhase phase, const std::uint
     return;
   }
   if (!Joiner::step_expected(owner_.state_, phase, step)) return;
-  if (owner_.mailbox_valid_) return;  // never overwrite a staged message
+  if (owner_.mailbox_valid_ || owner_.crypto_.pending())
+    return;  // never overwrite a staged message
   if (message.size > owner_.msg_.size()) {
     Joiner::sat_inc(owner_.counters_.rx_dropped);
     return;
@@ -445,7 +469,9 @@ Status Joiner::on_direct_message(const JoinAuthPhase phase, const std::uint8_t s
     sat_inc(counters_.rx_dropped);
     return Status::success();
   }
-  if (mailbox_valid_) return Status::error(StatusCode::Busy, "joiner mailbox full");
+  if (mailbox_valid_ || crypto_.pending()) {
+    return Status::error(StatusCode::Busy, "joiner mailbox full");
+  }
   if (body.size > msg_.size() || (body.size > 0 && body.data == nullptr)) {
     sat_inc(counters_.rx_dropped);
     return Status::success();
@@ -511,6 +537,14 @@ Status Joiner::apply_policy(const JoinerConfig& policy) noexcept {
 Status Joiner::stop(const MonotonicMs now) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "joiner re-entry");
   InCall guard(in_call_);
+  if (!cancel_signature()) return Status::error(StatusCode::Busy, "join signature stopping");
+  if (crypto_.pending()) {
+    crypto_.cancel();
+    Status discarded{};
+    if (!crypto_.poll(discarded)) {
+      return Status::error(StatusCode::Busy, "joiner crypto stopping");
+    }
+  }
   if (clock_uncertain_ || now < last_now_) {
     // A new clock domain is a reboot: the candidate table (whose own latch
     // tripped or would trip on the old times) is rebuilt empty and time
@@ -568,7 +602,15 @@ Status Joiner::stop(const MonotonicMs now) noexcept {
 Status Joiner::poll(const MonotonicMs now) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "joiner re-entry");
   InCall guard(in_call_);
+  if (crypto_.pending() && crypto_.cancelled()) {
+    Status discarded{};
+    if (!crypto_.poll(discarded)) return Status::success();
+    teardown_attempt();
+  }
   if (!clock_ok(now)) return Status::error(StatusCode::ClockUncertain, "joiner clock");
+  if (signature_ != nullptr && signature_->cancelled() && !cancel_signature())
+    return Status::success();
+  if (signature_ != nullptr) signature_->resume();
   if (!direct_ && config_.smart_join && search_deadline_ != 0 &&
       state_ != JoinState::Ready && state_ != JoinState::Stopped &&
       state_ != JoinState::Removed && state_ != JoinState::RecoveryRequired &&
@@ -728,11 +770,28 @@ JoinSnapshot Joiner::snapshot() const noexcept {
   snapshot.last_error = last_error_;
   snapshot.counters = counters_;
   snapshot.candidates = candidates_.stats();
-  snapshot.handshake = handshake_.stats();
+  snapshot.handshake = crypto_.pending() ? crypto_stats_ : handshake_.stats();
   return snapshot;
 }
 
 MonotonicMs Joiner::next_deadline() const noexcept {
+  if (crypto_pending()) {
+    if (crypto_.ready() || (signature_ != nullptr && signature_->ready())) return last_now_;
+    // A cancelled loan has no remaining protocol timer. Completion wakes
+    // Owner to reclaim it; elapsed timers must not spin ahead of the worker.
+    if (crypto_.cancelled() || (signature_ != nullptr && signature_->cancelled()))
+      return kJoinNoDeadline;
+    MonotonicMs next = kJoinNoDeadline;
+    if (state_ == JoinState::WaitM2)
+      next = std::min(t2_deadline_, overall_deadline_);
+    else if (state_ == JoinState::WaitM4)
+      next = std::min(t4_deadline_, overall_deadline_);
+    else if (state_ == JoinState::SendM3 || state_ == JoinState::Decided)
+      next = overall_deadline_;
+    if (!direct_ && config_.smart_join && search_deadline_ != 0)
+      next = std::min(next, search_deadline_);
+    return next;
+  }
   if (action_pending_) return last_now_;  // the Owner must take it first
   const auto state_deadline = [this]() noexcept -> MonotonicMs {
     switch (state_) {
@@ -784,7 +843,7 @@ MonotonicMs Joiner::next_deadline() const noexcept {
 }
 
 bool Joiner::quiescent() const noexcept {
-  if (in_call_) return false;
+  if (in_call_ || crypto_pending()) return false;
   if (action_pending_ || mailbox_valid_ || hint_valid_ || link_failed_) return false;
   if (link_.slot().mode() != JoinObjectSlot::Mode::Idle || link_.connected()) return false;
   switch (state_) {
@@ -844,7 +903,8 @@ bool Joiner::verify_adopted(const SiteRecord& site, const IdentityRecord& identi
   if (!site_validate(site)) return false;
   if (!site_matches_identity(site, identity)) return false;
   bool verified = false;
-  if (!join_membership_verify(site, identity, verified) || !verified) return false;
+  if (!join_membership_verify(site, identity, verified, store_verifier()) || !verified)
+    return false;
   return true;
 }
 
@@ -857,6 +917,9 @@ void Joiner::stage_rrs(const ByteView object) noexcept {
     sat_inc(counters_.rx_dropped);
     return;
   }
+  // Replaying a signature attempt must retain its input until completion.
+  // Later delivery can be retried through the member's RRS fetch path.
+  if (rrs_staged_len_ != 0 && signature_waiting()) return;
   if (object.size > rrs_staged_.size() || (object.size != 0 && object.data == nullptr)) {
     sat_inc(counters_.rx_dropped);
     return;
@@ -865,19 +928,25 @@ void Joiner::stage_rrs(const ByteView object) noexcept {
   rrs_staged_len_ = object.size;
 }
 
-void Joiner::store_staged_rrs() noexcept {
+Status Joiner::store_staged_rrs() noexcept {
   // Nothing staged, or the delivery lost the race with the commit: the
   // site still stands and the gossip/authority fetch paths remain.
-  if (rrs_staged_len_ == 0 || !site_.has_site()) return;
+  if (rrs_staged_len_ == 0 || !site_.has_site()) return Status::success();
   const SiteRecord& site = site_.site();
   CertClaims claims{};
-  if (!cert_decode(site.site_cert.view(), claims) || claims.type != CertType::Site) return;
+  if (!cert_decode(site.site_cert.view(), claims) || claims.type != CertType::Site)
+    return Status::success();
   const ByteView object{rrs_staged_.data(), rrs_staged_len_};
-  const Status st =
-      (revocations_.uncertain() || revocations_.quarantined())
-          ? revocations_.recover(object, claims.pubkey, site.site_id, site.network)
-          : revocations_.accept(object, claims.pubkey, site.site_id, site.network);
+  const Status st = (revocations_.uncertain() || revocations_.quarantined())
+                        ? revocations_.recover(object, claims.pubkey, site.site_id, site.network,
+                                               store_verifier())
+                        : revocations_.accept(object, claims.pubkey, site.site_id, site.network,
+                                              store_verifier());
+  if (signature_waiting())
+    return Status::error(StatusCode::WouldBlock, "join staged RRS computing");
   if (!st && st.code != StatusCode::Conflict) last_error_ = st.code;
+  rrs_staged_len_ = 0;
+  return Status::success();
 }
 
 bool Joiner::below_removal_watermark(const SiteRecord& site) const noexcept {
@@ -1046,10 +1115,10 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
     return Status::success();
   }
   const IdentityRecord& identity = identity_.identity();
-  const Status id_valid = identity_validate(identity);
-  if (!id_valid || identity.node_id != config_.node ||
-      identity.key_location == CredentialKeyLocation::None) {
-    last_error_ = !id_valid ? id_valid.code : StatusCode::InvalidArgument;
+  // IdentityStore already validated the keypair at readback. Repeating
+  // its scalar multiplication here would occupy the live Owner.
+  if (identity.node_id != config_.node || identity.key_location == CredentialKeyLocation::None) {
+    last_error_ = StatusCode::InvalidArgument;
     set_state(JoinState::Stopped);
     return Status::success();
   }
@@ -1108,6 +1177,7 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
   if (health.has_site) {
     const SiteRecord& site = site_.site();
     if (!verify_adopted(site, identity)) {
+      if (signature_waiting()) return Status::success();
       // Decodes but is not ours: needs an external clear, never a silent
       // overwrite and never an m1 (commit and recover are both unusable).
       recovery_required(JoinRecoveryReason::MembershipInvalid);
@@ -1199,6 +1269,12 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
 }
 
 void Joiner::begin_direct_attempt() noexcept {
+  if (aead_ != nullptr && (aead_->seal == nullptr || aead_->open == nullptr)) {
+    last_error_ = StatusCode::Unsupported;
+    teardown_attempt();
+    set_state(JoinState::Stopped);
+    return;
+  }
   JoinHandshakeConfig hs{};
   hs.node = config_.node;
   hs.direct_transport = true;  // zero observed hints: USB selects the site
@@ -1208,14 +1284,8 @@ void Joiner::begin_direct_attempt() noexcept {
   hs.last_site_id = evidence_valid_ ? evidence_.site_id : 0;
   hs.last_generation = evidence_valid_ ? evidence_.generation : 0;
   hs.usable_channel_mask = config_.usable_channel_mask;
-  const Status begin = handshake_.begin(hs, identity_.identity(), entropy_, aead_);
-  if (!begin) {
-    // No candidate table in a direct run: terminal, the Owner restarts.
-    last_error_ = begin.code;
-    teardown_attempt();
-    set_state(JoinState::Stopped);
-    return;
-  }
+  crypto_handshake_config_ = hs;
+  crypto_begin_ = true;
   attempt_ = JoinAttempt{};  // inactive: no table begin/apply, no avoidance
   attempt_record_ = nullptr;
   attempt_key_ = JoinCandidateKey{};
@@ -1479,10 +1549,8 @@ Status Joiner::drive_refresh(const MonotonicMs now) noexcept {
   hs.last_generation = evidence_valid_ ? evidence_.generation : 0;
   hs.last_network = evidence_valid_ && recovery_only_ ? evidence_.network : 0;
   hs.usable_channel_mask = config_.usable_channel_mask;
-  if (!handshake_.begin(hs, identity_.identity(), entropy_, aead_)) {
-    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
-    return Status::success();
-  }
+  crypto_handshake_config_ = hs;
+  crypto_begin_ = true;
   sat_inc(counters_.attempts);
   event_.key = attempt_key_;
   event_.proxy = attempt_proxy_;
@@ -1491,12 +1559,65 @@ Status Joiner::drive_refresh(const MonotonicMs now) noexcept {
   return Status::success();
 }
 
+Status Joiner::run_crypto(void* context) noexcept {
+  auto& owner = *static_cast<Joiner*>(context);
+  const MutableByteView output{owner.msg_.data(), owner.msg_.size()};
+  const ByteView input{owner.msg_.data(), owner.crypto_message_size_};
+  switch (owner.crypto_op_) {
+    case CryptoOp::M1:
+      if (owner.crypto_begin_) {
+        owner.crypto_begin_ = false;
+        const Status begun =
+            owner.handshake_.begin(owner.crypto_handshake_config_, owner.identity_.identity(),
+                                   owner.entropy_, owner.aead_);
+        if (!begun) return begun;
+      }
+      return owner.handshake_.compose_m1(output, owner.crypto_length_);
+    case CryptoOp::M2:
+      return owner.handshake_.process_m2(input);
+    case CryptoOp::M3:
+      return owner.handshake_.compose_m3(output, owner.crypto_length_);
+    case CryptoOp::M4:
+      return owner.handshake_.process_m4(input);
+    case CryptoOp::Decide:
+      return owner.handshake_.decide(owner.crypto_input_, owner.crypto_decided_);
+  }
+  return Status::error(StatusCode::InternalError, "join crypto operation");
+}
+
+Status Joiner::progress_crypto(const CryptoOp op) noexcept {
+  if (crypto_.pending()) {
+    if (op != crypto_op_) return Status::error(StatusCode::Busy, "join crypto computing");
+    Status result{};
+    const Status completed = crypto_.poll(result);
+    if (!completed) return completed;
+    crypto_stats_ = handshake_.stats();
+    return result;
+  }
+  crypto_op_ = op;
+  crypto_message_size_ = msg_len_;
+  crypto_length_ = 0;
+  crypto_stats_ = handshake_.stats();
+  if (op == CryptoOp::Decide) {
+    crypto_evidence_ = evidence_;
+    crypto_input_.membership = evidence_valid_ ? &crypto_evidence_ : nullptr;
+    crypto_input_.boot_witness = boot_witness_;
+    crypto_input_.prior_rs_epoch_floor = evidence_valid_ ? retained_floor_ : 0;
+  }
+  return crypto_.start(this, &Joiner::run_crypto);
+}
+
 Status Joiner::drive_send_m1(const MonotonicMs now) noexcept {
   if (last_m1_ms_ != 0 && now < sat_add(last_m1_ms_, kJoinMinM1IntervalMs)) {
     return Status::success();  // defensive: the refresh wait owns the spacing
   }
   std::size_t length = 0;
-  if (!handshake_.compose_m1(MutableByteView{msg_.data(), msg_.size()}, length)) {
+  const Status composed = progress_crypto(CryptoOp::M1);
+  if (composed.code == StatusCode::WouldBlock || composed.code == StatusCode::Busy) {
+    return Status::success();
+  }
+  length = crypto_length_;
+  if (!composed) {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
@@ -1542,9 +1663,12 @@ Status Joiner::drive_wait_m2(const MonotonicMs now) noexcept {
     clear_mailbox();
     return Status::success();
   }
-  const ByteView message{msg_.data(), msg_len_};
+  const Status processed = progress_crypto(CryptoOp::M2);
+  if (processed.code == StatusCode::WouldBlock || processed.code == StatusCode::Busy) {
+    return Status::success();
+  }
   clear_mailbox();
-  if (!handshake_.process_m2(message)) {
+  if (!processed) {
     // AuthenticationFailed (bad SiteCert/responder signature -> 24 h on
     // the key, no m3) or Failed (decode/transport -> transient).
     finish_attempt(handshake_.outcome(), 0, now);
@@ -1579,7 +1703,12 @@ Status Joiner::drive_send_m3(const MonotonicMs now) noexcept {
     return Status::success();
   }
   std::size_t length = 0;
-  if (!handshake_.compose_m3(MutableByteView{msg_.data(), msg_.size()}, length)) {
+  const Status composed = progress_crypto(CryptoOp::M3);
+  if (composed.code == StatusCode::WouldBlock || composed.code == StatusCode::Busy) {
+    return Status::success();
+  }
+  length = crypto_length_;
+  if (!composed) {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
@@ -1624,9 +1753,12 @@ Status Joiner::drive_wait_m4(const MonotonicMs now) noexcept {
     clear_mailbox();
     return Status::success();
   }
-  const ByteView message{msg_.data(), msg_len_};
+  const Status processed = progress_crypto(CryptoOp::M4);
+  if (processed.code == StatusCode::WouldBlock || processed.code == StatusCode::Busy) {
+    return Status::success();
+  }
   clear_mailbox();
-  if (!handshake_.process_m4(message)) {
+  if (!processed) {
     finish_attempt(handshake_.outcome(), 0, now);
     return Status::success();
   }
@@ -1642,12 +1774,12 @@ Status Joiner::drive_decided(const MonotonicMs now) noexcept {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
-  JoinDecideInput input{};
-  input.membership = evidence_valid_ ? &evidence_ : nullptr;
-  input.boot_witness = boot_witness_;
-  input.prior_rs_epoch_floor = evidence_valid_ ? retained_floor_ : 0;
-  JoinDecided decided{};
-  if (!handshake_.decide(input, decided)) {
+  const Status verified = progress_crypto(CryptoOp::Decide);
+  if (verified.code == StatusCode::WouldBlock || verified.code == StatusCode::Busy) {
+    return Status::success();
+  }
+  JoinDecided decided = crypto_decided_;
+  if (!verified) {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
@@ -1834,7 +1966,10 @@ Status Joiner::drive_commit(const MonotonicMs now) noexcept {
       !below_removal_watermark(site_.site()) && matches_expectation(site_.site()) &&
       verify_adopted(site_.site(), identity_.identity())) {
     // The complete verified record was read back from a healthy pair.
-    store_staged_rrs();  // adopt a delivered RRS1 with it when it verifies
+    if (!store_staged_rrs()) {
+      reconcile_enter(true, now);
+      return Status::success();
+    }
     JoinAction action{};
     action.kind = JoinActionKind::MemberReady;
     action.commit_seq = site_.commit_seq();
@@ -1882,6 +2017,7 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
   if (health.has_site) {
     const SiteRecord& site = site_.site();
     if (!verify_adopted(site, identity)) {
+      if (signature_waiting()) return Status::success();
       recovery_required(JoinRecoveryReason::MembershipInvalid);
       return Status::success();
     }
@@ -1897,7 +2033,7 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
         matches_expectation(site)) {
       // Our write landed (the error was the readback or later): adopt it
       // without consuming another approval or writing again.
-      store_staged_rrs();
+      if (!store_staged_rrs()) return Status::success();
       JoinAction action{};
       action.kind = JoinActionKind::MemberReady;
       action.commit_seq = site_.commit_seq();
@@ -1935,7 +2071,8 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
         }
         return Status::success();
       }
-      store_staged_rrs();  // a same-network advance adopts; a stale set refuses
+      if (!store_staged_rrs())
+        return Status::success();  // a same-network advance adopts; a stale set refuses
       JoinAction action{};
       action.kind = JoinActionKind::MemberReady;
       action.commit_seq = site_.commit_seq();

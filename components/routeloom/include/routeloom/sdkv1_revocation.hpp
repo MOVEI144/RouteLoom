@@ -22,10 +22,11 @@
 #include "routeloom/autonomy.hpp"
 #include "routeloom/autonomy_wire.hpp"
 #include "routeloom/rlcw1.hpp"
+#include "routeloom/sdkv1_grant_renew.hpp"
+#include "routeloom/sdkv1_lifecycle_store.hpp"
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_store.hpp"
-#include "routeloom/sdkv1_lifecycle_store.hpp"
-#include "routeloom/sdkv1_grant_renew.hpp"
+#include "routeloom/signature_progress.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/telemetry.hpp"
 #include "routeloom/types.hpp"
@@ -728,6 +729,9 @@ class MembershipLifecycle final {
   // completion shows in the phase, the pending action and the ACKs. Busy
   // (with zero state change, not even counters) when called back
   // re-entrantly from a port/storage/observer callback.
+  Status bind_crypto_worker(CryptoWorker* worker, SignatureProgress& signature) noexcept;
+  bool crypto_pending() const noexcept { return signature_ != nullptr && signature_->pending(); }
+  bool crypto_waiting() const noexcept { return crypto_waiting_; }
   Status dispatch(const LifecycleInput& input, MonotonicMs now_ms) noexcept;
   // Takes the single outstanding Owner action (NotFound when empty). Taking
   // does not advance the FSM; progress needs ActionComplete.
@@ -889,6 +893,21 @@ class MembershipLifecycle final {
   LifecycleStore* journal_{nullptr};
   LifecyclePorts ports_;
   const Es256Verifier& verifier_;
+  SignatureProgress* signature_{nullptr};
+  bool crypto_waiting_{false};
+  LifecycleInputTag crypto_tag_{LifecycleInputTag::Poll};
+  Digest256 crypto_identity_{};
+  LifecyclePhase crypto_phase_{LifecyclePhase::BootGate};
+  std::uint64_t crypto_policy_{0};
+  std::uint64_t crypto_identity_revision_{0};
+  std::uint32_t crypto_site_seq_{0};
+  const Es256Verifier& crypto_verifier() const noexcept {
+    return signature_ == nullptr ? verifier_ : *signature_;
+  }
+  bool verification_pending() const noexcept {
+    return signature_ != nullptr && signature_->verification_pending();
+  }
+
   RrsExchange exchange_;
 
   LifecyclePhase phase_{LifecyclePhase::BootGate};

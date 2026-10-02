@@ -459,8 +459,7 @@ Status cose_es256_verify(const ByteView payload, const ByteView external_aad,
   cose_es256_digest(payload, external_aad, digest);
   Es256Signature sig{};
   std::memcpy(sig.data(), signature.data, sig.size());
-  verified = verifier.verify_digest(pubkey, digest, sig);
-  return Status::success();
+  return verifier.progress_digest(pubkey, digest, sig, verified);
 }
 
 Status cert_parse(const ByteView cert, CoseEs256Parts& out) noexcept {

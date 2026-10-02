@@ -498,6 +498,80 @@ MembershipLifecycle::MembershipLifecycle(
   refresh_snapshot();
 }
 
+Status MembershipLifecycle::bind_crypto_worker(CryptoWorker* worker,
+                                               SignatureProgress& signature) noexcept {
+  if (crypto_waiting_ || crypto_pending())
+    return Status::error(StatusCode::Busy, "lifecycle crypto active");
+  const Status bound = signature.bind(worker);
+  if (bound) signature_ = worker == nullptr ? nullptr : &signature;
+  return bound;
+}
+
+namespace {
+Digest256 crypto_input_identity(const LifecycleInput& input) noexcept {
+  Sha256 hash;
+  hash.update(ByteView{reinterpret_cast<const std::uint8_t*>(&input.tag), sizeof(input.tag)});
+  ByteView body{};
+  const auto stamp = [&](const PeerCredentialStamp& peer) {
+    hash.update(
+        ByteView{reinterpret_cast<const std::uint8_t*>(&peer.network), sizeof(peer.network)});
+    hash.update(ByteView{reinterpret_cast<const std::uint8_t*>(&peer.peer), sizeof(peer.peer)});
+    hash.update(ByteView{reinterpret_cast<const std::uint8_t*>(&peer.assignment_generation),
+                         sizeof(peer.assignment_generation)});
+    hash.update(ByteView{reinterpret_cast<const std::uint8_t*>(&peer.role), sizeof(peer.role)});
+    hash.update(ByteView{reinterpret_cast<const std::uint8_t*>(&peer.binding_incarnation),
+                         sizeof(peer.binding_incarnation)});
+  };
+  switch (input.tag) {
+    case LifecycleInputTag::Boot:
+      hash.update(
+          ByteView{reinterpret_cast<const std::uint8_t*>(&input.payload.boot.boot_trace_healthy),
+                   sizeof(bool)});
+      break;
+    case LifecycleInputTag::JoinRecoveryComplete:
+      hash.update(ByteView{reinterpret_cast<const std::uint8_t*>(&input.payload.recovery.success),
+                           sizeof(bool)});
+      break;
+    case LifecycleInputTag::ActionComplete:
+      hash.update(
+          ByteView{reinterpret_cast<const std::uint8_t*>(&input.payload.action_complete.token),
+                   sizeof(std::uint64_t)});
+      hash.update(ByteView{
+          reinterpret_cast<const std::uint8_t*>(&input.payload.action_complete.result.code),
+          sizeof(StatusCode)});
+      break;
+    case LifecycleInputTag::VerifiedAuthorityMessage:
+      body = input.payload.authority.body;
+      stamp(input.payload.authority.authority);
+      hash.update(ByteView{&input.payload.authority.authority_type,
+                           sizeof(input.payload.authority.authority_type)});
+      break;
+    case LifecycleInputTag::CompletedRrsObject:
+      body = input.payload.completed.object;
+      hash.update(ByteView{reinterpret_cast<const std::uint8_t*>(&input.payload.completed.peer),
+                           sizeof(NodeId)});
+      break;
+    case LifecycleInputTag::RemovalRequired:
+      body = input.payload.removal_required;
+      break;
+    case LifecycleInputTag::MemberReady:
+      hash.update(ByteView{
+          reinterpret_cast<const std::uint8_t*>(&input.payload.member_ready.site_commit_seq),
+          sizeof(std::uint32_t)});
+      hash.update(ByteView{
+          reinterpret_cast<const std::uint8_t*>(&input.payload.member_ready.rs_epoch_to_fetch),
+          sizeof(std::uint32_t)});
+      break;
+    default:
+      break;
+  }
+  if (body.data != nullptr && body.size != 0) hash.update(body);
+  Digest256 digest{};
+  hash.finish(digest);
+  return digest;
+}
+}  // namespace
+
 Status MembershipLifecycle::dispatch(const LifecycleInput& input, const MonotonicMs now_ms) noexcept {
   // Re-entry from any port/storage/observer callback: Busy with zero state
   // change — not even counters. The Owner queues the input and retries
@@ -507,6 +581,36 @@ Status MembershipLifecycle::dispatch(const LifecycleInput& input, const Monotoni
     return Status::error(StatusCode::InvalidState, "lifecycle self id");
   }
   const CallGuard guard(in_call_);
+  const bool cancel =
+      input.tag == LifecycleInputTag::Stop || input.tag == LifecycleInputTag::LocalLeave;
+  if (signature_ != nullptr && (cancel || signature_->cancelled())) {
+    const Status drained = signature_->cancel();
+    crypto_waiting_ = false;
+    if (!drained && !cancel)
+      return Status::error(StatusCode::WouldBlock, "lifecycle cancellation draining");
+  }
+  const Digest256 input_identity = crypto_input_identity(input);
+  const bool replay = crypto_waiting_ && input.tag == crypto_tag_;
+  if (crypto_waiting_ && !cancel) {
+    if (policy_revision_ != crypto_policy_ || site_.commit_seq() != crypto_site_seq_ ||
+        identity_.context_revision() != crypto_identity_revision_) {
+      (void)signature_->cancel();
+      crypto_waiting_ = false;
+      return Status::error(StatusCode::Expired, "lifecycle verification context changed");
+    }
+    if (replay && input_identity != crypto_identity_)
+      return Status::error(StatusCode::Busy, "lifecycle verification input retained");
+    if (!replay && input.tag != LifecycleInputTag::Poll &&
+        input.tag != LifecycleInputTag::VerifiedPeerControl &&
+        input.tag != LifecycleInputTag::AuthenticatedPeerBound &&
+        input.tag != LifecycleInputTag::AuthenticatedPeerGone)
+      return Status::error(StatusCode::Busy, "lifecycle verification retained");
+  }
+  const bool owns_attempt = !crypto_waiting_ || replay;
+  const auto initial_phase = phase_;
+  if (replay) phase_ = crypto_phase_;
+  if (owns_attempt && signature_ != nullptr) signature_->resume();
+
   if (input.tag == LifecycleInputTag::Boot) {
     last_now_ = now_ms;  // new monotonic domain; holdoff restarts below
   } else if (now_ms < last_now_) {
@@ -560,6 +664,21 @@ Status MembershipLifecycle::dispatch(const LifecycleInput& input, const Monotoni
       status = on_local_leave(now_ms);
       break;
   }
+  if (owns_attempt && signature_ != nullptr && !cancel) {
+    if (signature_->verification_pending()) {
+      crypto_waiting_ = true;
+      crypto_tag_ = input.tag;
+      crypto_identity_ = input_identity;
+      if (!replay) crypto_phase_ = initial_phase;
+      crypto_policy_ = policy_revision_;
+      crypto_site_seq_ = site_.commit_seq();
+      crypto_identity_revision_ = identity_.context_revision();
+      status = Status::error(StatusCode::WouldBlock, "lifecycle verification computing");
+    } else {
+      crypto_waiting_ = false;
+      (void)signature_->reset();
+    }
+  }
   refresh_snapshot();
   return status;
 }
@@ -597,14 +716,16 @@ bool MembershipLifecycle::permits_recovery_control(
 }
 
 bool MembershipLifecycle::quiescent() const noexcept {
-  if (in_call_) return false;
+  if (in_call_ || crypto_waiting_ || crypto_pending()) return false;
   return !action_pending_ && !exchange_.busy() && !fetch_outstanding_ && !need_rrs() &&
          !pending_ack_ && phase_ != LifecyclePhase::ApplyingRrs;
 }
 
 MonotonicMs MembershipLifecycle::next_deadline() const noexcept {
   MonotonicMs next = 0xFFFFFFFFFFFFFFFFULL;
-  if (phase_ == LifecyclePhase::ApplyingRrs || phase_ == LifecyclePhase::Removing) return 0;
+  if (signature_ != nullptr && signature_->ready()) return 0;
+  if (!crypto_pending() &&
+      (phase_ == LifecyclePhase::ApplyingRrs || phase_ == LifecyclePhase::Removing)) return 0;
   if (phase_ == LifecyclePhase::Holdoff) {
     return holdoff_start_ <= 0xFFFFFFFFFFFFFFFFULL - config_.holdoff_ms
                ? holdoff_start_ + config_.holdoff_ms : 0xFFFFFFFFFFFFFFFFULL;
@@ -732,7 +853,7 @@ LifecycleBlockReason MembershipLifecycle::adopt_stores() noexcept {
   CertClaims claims{};
   bool verified = false;
   const Status chain = identity_verify_site_cert(identity, site.site_cert.view(), claims, verified,
-                                                 verifier_);
+                                                 crypto_verifier());
   if (!chain || !verified) return LifecycleBlockReason::Site;
   if (static_cast<std::uint32_t>(site.network >> 32U) != claims.site_epoch) {
     return LifecycleBlockReason::Site;
@@ -755,8 +876,8 @@ LifecycleBlockReason MembershipLifecycle::adopt_stores() noexcept {
     candidate_set_ = RevocationSet{};
     bool verified = false;
     const Status checked = revocation_object_verify(stored_object_.view(), sak_, adopted_.site_id,
-                                                     revocations_.set().network, candidate_set_,
-                                                     verified, verifier_);
+                                                    revocations_.set().network, candidate_set_,
+                                                    verified, crypto_verifier());
     if (!checked || !verified ||
         candidate_set_.rs_epoch != revocations_.rs_epoch() ||
         candidate_set_.site_epoch_floor != revocations_.set().site_epoch_floor ||
@@ -786,6 +907,8 @@ LifecycleBlockReason MembershipLifecycle::adopt_stores() noexcept {
 
 Status MembershipLifecycle::adopt_and_enter(const MonotonicMs now_ms) noexcept {
   const LifecycleBlockReason blocked = adopt_stores();
+  if (verification_pending())
+    return Status::error(StatusCode::WouldBlock, "lifecycle adoption computing");
   if (blocked == LifecycleBlockReason::Site && never_assigned()) {
     // A board that never held a site is not a storage fault: wait closed
     // in BootGate so the first join's MemberReady adopts it live.
@@ -793,6 +916,8 @@ Status MembershipLifecycle::adopt_and_enter(const MonotonicMs now_ms) noexcept {
     return Status::success();
   }
   if (blocked != LifecycleBlockReason::None) {
+    if (verification_pending())
+      return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
     enter_storage_blocked(blocked, now_ms);
     return Status::success();
   }
@@ -809,6 +934,8 @@ Status MembershipLifecycle::adopt_and_enter(const MonotonicMs now_ms) noexcept {
     // the enforcement again and catch the floor up before opening.
     stored_object_.clear();
     if (!revocations_.load_object(stored_object_)) {
+      if (verification_pending())
+        return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
       enter_storage_blocked(LifecycleBlockReason::RevocationStore, now_ms);
       return Status::success();
     }
@@ -907,9 +1034,11 @@ Status MembershipLifecycle::apply_poll(const MonotonicMs now_ms) noexcept {
 Status MembershipLifecycle::apply_verify(const MonotonicMs now_ms) noexcept {
   candidate_set_ = RevocationSet{};
   bool verified = false;
-  const Status checked = revocation_object_verify(candidate_object_.view(), sak_,
-                                                  adopted_.site_id, adopted_.network,
-                                                  candidate_set_, verified, verifier_);
+  const Status checked =
+      revocation_object_verify(candidate_object_.view(), sak_, adopted_.site_id, adopted_.network,
+                               candidate_set_, verified, crypto_verifier());
+  if (verification_pending())
+    return Status::error(StatusCode::WouldBlock, "RRS verification computing");
   if (!checked || !verified) {
     // A stored set that no longer verifies is not recoverable by refetch
     // (it claims to be ours already): maintenance must take over.
@@ -1000,6 +1129,14 @@ Status MembershipLifecycle::apply_verify(const MonotonicMs now_ms) noexcept {
 }
 
 Status MembershipLifecycle::apply_store(const MonotonicMs now_ms) noexcept {
+  bool verified = false;
+  RevocationSet checked{};
+  const Status proof =
+      revocation_object_verify(candidate_object_.view(), sak_, adopted_.site_id, adopted_.network,
+                               checked, verified, crypto_verifier());
+  if (verification_pending()) return Status::error(StatusCode::WouldBlock, "RRS store computing");
+  if (!proof || !verified)
+    return proof.ok() ? Status::error(StatusCode::AuthenticationFailed, "RRS store proof") : proof;
   // Close the admission barrier before the durable write; the barrier only
   // re-opens through the Done step or a fresh adoption.
   if (!bump_policy()) {
@@ -1007,7 +1144,7 @@ Status MembershipLifecycle::apply_store(const MonotonicMs now_ms) noexcept {
     return Status::success();
   }
   const Status stored = revocations_.accept(candidate_object_.view(), sak_, adopted_.site_id,
-                                            adopted_.network, verifier_);
+                                            adopted_.network, crypto_verifier());
   if (!stored) {
     if (stored.code == StatusCode::Conflict &&
         revocations_.has_set() && revocations_.rs_epoch() >= candidate_set_.rs_epoch) {
@@ -1099,7 +1236,11 @@ Status MembershipLifecycle::apply_floor(const MonotonicMs now_ms) noexcept {
   // copy never wipes a newer floor.
   if (site_.commit_seq() != adopted_.site_commit_seq) {
     const LifecycleBlockReason blocked = adopt_stores();
+    if (verification_pending())
+      return Status::error(StatusCode::WouldBlock, "lifecycle adoption computing");
     if (blocked != LifecycleBlockReason::None) {
+      if (verification_pending())
+        return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
       enter_storage_blocked(blocked, now_ms);
       return Status::success();
     }
@@ -1116,6 +1257,8 @@ Status MembershipLifecycle::apply_floor(const MonotonicMs now_ms) noexcept {
     // the floor is durable. Done rechecks the binding and exact epoch.
     (void)site_.initialize();
     if (!site_.has_site() || site_.site().rs_epoch_floor < candidate_set_.rs_epoch) {
+      if (verification_pending())
+        return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
       enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
       return Status::success();
     }
@@ -1391,6 +1534,8 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
   if (!evidence.boot_trace_healthy) {
     // The durable boot trace is unreadable: the boot-witness binding is
     // unverifiable, so no membership opens on this boot.
+    if (verification_pending())
+      return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
     enter_storage_blocked(LifecycleBlockReason::Site, now_ms);
     return Status::success();
   }
@@ -1419,16 +1564,22 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
           removal_proof_valid(journal_->record()) &&
           journal_->resume_removal(journal_->record())) {
         // The same durable intent is now a proven twin.
+      } else if (verification_pending()) {
+        return Status::error(StatusCode::WouldBlock, "journal proof computing");
       } else if (journal_->uncertain() && !journal_->unknown_sibling() &&
                  journal_->record().mode == LifecycleMode::Switching) {
         SiteRecord staged{};
         RevocationSet rrs{};
         if (!switching_proof(journal_->record(), staged, rrs) ||
             !journal_->resume_switch(journal_->record())) {
+          if (verification_pending())
+            return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
           return Status::success();
         }
       } else {
+        if (verification_pending())
+          return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
         enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
         return Status::success();
       }
@@ -1441,6 +1592,8 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
         SiteRecord staged{};
         RevocationSet rrs{};
         if (!switching_proof(record, staged, rrs)) {
+          if (verification_pending())
+            return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
           return Status::success();
         }
@@ -1453,6 +1606,8 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
         SiteRecord staged{};
         if (adopt_stores() != LifecycleBlockReason::None ||
             !staged_site(record, staged) || !site_.has_site()) {
+          if (verification_pending())
+            return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
           return Status::success();
         }
@@ -1462,6 +1617,8 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
           // The site matches neither the old network nor the prepared
           // target: an unrelated site under a stale stage stays
           // blocked, never silently adopted.
+          if (verification_pending())
+            return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
           return Status::success();
         }
@@ -1473,6 +1630,8 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
           // the prepared target itself before the reboot. Cut the
           // stage and run as the adopted member — the same
           // reconciliation MemberReady runs live.
+          if (verification_pending())
+            return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
         }
         return status;
@@ -1488,6 +1647,8 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
             (site_.has_site() && (site_.site().site_id != record.site_id ||
                                   site_.site().network != record.old_network ||
                                   site_.site().assignment_generation != record.generation))) {
+          if (verification_pending())
+            return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
           return Status::success();
         }
@@ -1500,6 +1661,8 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
       }
       if (record.mode == LifecycleMode::Removing || record.mode == LifecycleMode::Holdoff) {
         if (!removal_proof_valid(record)) {
+          if (verification_pending())
+            return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
           return Status::success();
         }
@@ -1516,6 +1679,8 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
               health.uncertain || health.unsupported_mask != 0 ||
               health.read_error_mask != 0 || health.active_load_failed ||
               !revocations_.clean_empty()) {
+            if (verification_pending())
+              return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
             enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
           }
         }
@@ -1531,6 +1696,8 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
             adopted_.rs_epoch < record.rs_floor ||
             adopted_.gk_epoch < record.gk_floor || self_rejected() ||
             !journal_->scrub_idle()) {
+          if (verification_pending())
+            return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
           return Status::success();
         }
@@ -1547,6 +1714,8 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
             health.uncertain || health.unsupported_mask != 0 ||
             health.read_error_mask != 0 || health.active_load_failed ||
             (health.has_site ? !reassigned_after_removal() : !revocations_.clean_empty())) {
+          if (verification_pending())
+            return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
           return Status::success();
         }
@@ -1564,7 +1733,14 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
 
 Status MembershipLifecycle::on_poll(const MonotonicMs now_ms) noexcept {
   if (phase_ == LifecyclePhase::Stopped) return Status::success();
-  if (phase_ == LifecyclePhase::ApplyingRrs) return apply_poll(now_ms);
+  if (phase_ == LifecyclePhase::ApplyingRrs) {
+    // Existing transfers and receipts keep their deadlines while the
+    // candidate's signature is computing; adoption remains in apply_poll.
+    exchange_.poll(now_ms);
+    if (fetch_outstanding_ && now_ms >= fetch_deadline_) clear_fetch(true, now_ms);
+    if (pending_ack_ && now_ms >= pending_ack_due_) send_pending_ack(now_ms);
+    return apply_poll(now_ms);
+  }
   if (phase_ == LifecyclePhase::Switching) return switch_poll(now_ms);
   if (phase_ == LifecyclePhase::Removing) return removal_poll(now_ms);
   if (phase_ == LifecyclePhase::Holdoff) {
@@ -1637,14 +1813,18 @@ Status MembershipLifecycle::on_member_ready(const LifecycleMemberReady& ready,
   } else if (rs_to_fetch_ <= adopted_.rs_epoch) {
     rs_to_fetch_ = 0;
   }
-  if (changed || phase_ == LifecyclePhase::BootGate) {
+  if (changed || phase_ == LifecyclePhase::BootGate ||
+      (crypto_waiting_ && crypto_tag_ == LifecycleInputTag::MemberReady)) {
     const bool was_prepared = phase_ == LifecyclePhase::Prepared;
     phase_ = LifecyclePhase::BootGate;
     const Status status = adopt_and_enter(now_ms);
+    if (!status) return status;
     if (was_prepared) {
       SiteRecord staged{};
       const bool have_stage =
           journal_ && staged_site(journal_->record(), staged) && site_.has_site();
+      if (verification_pending())
+        return Status::error(StatusCode::WouldBlock, "prepared chain computing");
       const bool live_old =
           have_stage && site_.site().network == journal_->record().old_network &&
           site_.site().assignment_generation == journal_->record().generation;
@@ -1653,12 +1833,17 @@ Status MembershipLifecycle::on_member_ready(const LifecycleMemberReady& ready,
         // the COMMIT path is over. Cut the stage (NVS, stage only —
         // the adopted network settings stay); whatever phase the
         // adoption landed keeps running, RRS fetch included.
-        if (!journal_->cut_prepared())
+        if (!journal_->cut_prepared()) {
+          if (verification_pending())
+            return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+        }
       } else if (phase_ == LifecyclePhase::Active) {
-        if (!have_stage || !live_old)
+        if (!have_stage || !live_old) {
+          if (verification_pending())
+            return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
-        else
+        } else
           phase_ = LifecyclePhase::Prepared;
       }
     }
@@ -1862,7 +2047,8 @@ Status MembershipLifecycle::on_recovery(const LifecycleJoinRecovery& recovery,
   if (!recovery.success) return Status::success();  // the Owner retries
   if (phase_ == LifecyclePhase::ApplyingRrs) return Status::success();  // deferred to Floor
   phase_ = LifecyclePhase::BootGate;
-  (void)adopt_and_enter(now_ms);
+  const Status adopted = adopt_and_enter(now_ms);
+  if (adopted.code == StatusCode::WouldBlock) return adopted;
   if (phase_ == LifecyclePhase::Active) {
     self_revoked_ = false;
     saturate_inc(counters_.recoveries);
@@ -1914,17 +2100,19 @@ bool MembershipLifecycle::removal_proof_valid(const LifecycleRecord& record) noe
       cert_len + notice_len + 4 != record.payload.size) return false;
   CertClaims cert{};
   bool verified = false;
-  if (!identity_verify_site_cert(identity_.identity(), ByteView{p + 4, cert_len},
-                                 cert, verified, verifier_) || !verified ||
-      cert.subject != record.site_id ||
+  if (!identity_verify_site_cert(identity_.identity(), ByteView{p + 4, cert_len}, cert, verified,
+                                 crypto_verifier()) ||
+      !verified || cert.subject != record.site_id ||
       cert.site_epoch != static_cast<std::uint32_t>(record.old_network >> 32U) ||
-      cert.network_low32 != static_cast<std::uint32_t>(record.old_network)) return false;
+      cert.network_low32 != static_cast<std::uint32_t>(record.old_network))
+    return false;
   RemovalNotice notice{};
   verified = false;
-  if (!removal_notice_verify(ByteView{p + 4 + cert_len, notice_len}, cert.pubkey,
-                             record.site_id, record.old_network, record.self,
-                             record.generation, notice, verified, verifier_) || !verified ||
-      notice.generation != record.generation || notice.rs_epoch > record.rs_floor) return false;
+  if (!removal_notice_verify(ByteView{p + 4 + cert_len, notice_len}, cert.pubkey, record.site_id,
+                             record.old_network, record.self, record.generation, notice, verified,
+                             crypto_verifier()) ||
+      !verified || notice.generation != record.generation || notice.rs_epoch > record.rs_floor)
+    return false;
   if (site_.has_site()) {
     const SiteRecord& site = site_.site();
     if (site.site_id != record.site_id || site.network != record.old_network ||
@@ -1957,9 +2145,11 @@ Status MembershipLifecycle::on_removal(ByteView object, MonotonicMs now_ms) noex
   }
   RemovalNotice notice{};
   bool verified = false;
-  const Status checked = removal_notice_verify(object, sak_, adopted_.site_id,
-                                                adopted_.network, config_.self,
-                                                adopted_.generation, notice, verified, verifier_);
+  const Status checked =
+      removal_notice_verify(object, sak_, adopted_.site_id, adopted_.network, config_.self,
+                            adopted_.generation, notice, verified, crypto_verifier());
+  if (verification_pending())
+    return Status::error(StatusCode::WouldBlock, "removal verification computing");
   if (!checked || !verified) return Status::success();  // invalid proofs never erase
   LifecycleRecord intent{};
   intent.mode = LifecycleMode::Removing;
@@ -1983,12 +2173,19 @@ Status MembershipLifecycle::on_removal(ByteView object, MonotonicMs now_ms) noex
   std::memcpy(p + 4, cert.bytes.data(), cert.size);
   std::memcpy(p + 4 + cert.size, object.data, object.size);
   intent.payload.size = 4 + cert.size + object.size;
-  if (!removal_proof_valid(intent) || !bump_policy()) {
+  const bool proof_valid = removal_proof_valid(intent);
+  if (verification_pending())
+    return Status::error(StatusCode::WouldBlock, "removal chain computing");
+  if (!proof_valid || !bump_policy()) {
+    if (verification_pending())
+      return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
     enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
     return Status::success();
   }
   phase_ = LifecyclePhase::Removing;  // close admission before the first write
   if (!journal_->begin_removal(intent)) {
+    if (verification_pending())
+      return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
     enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
     return Status::success();
   }
@@ -2127,8 +2324,9 @@ Status MembershipLifecycle::removal_poll(MonotonicMs now_ms) noexcept {
     if (result.code == StatusCode::WouldBlock) {
       removal_attempts_ = 0;
     } else if (removal_step_ == RemovalStep::Runtime || removal_step_ == RemovalStep::Resume) {
-      if (++removal_attempts_ >= rrs_const::kSweepAttemptsMax)
+      if (++removal_attempts_ >= rrs_const::kSweepAttemptsMax) {
         enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+      }
     } else {
       enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
     }
@@ -2160,11 +2358,12 @@ bool MembershipLifecycle::staged_site(const LifecycleRecord& record, SiteRecord&
   }
   CertClaims next{};
   bool verified = false;
-  if (!identity_verify_site_cert(identity_.identity(), out.site_cert.view(), next,
-                                 verified, verifier_) || !verified ||
-      (sak_valid_ && next.pubkey != sak_) ||
+  if (!identity_verify_site_cert(identity_.identity(), out.site_cert.view(), next, verified,
+                                 crypto_verifier()) ||
+      !verified || (sak_valid_ && next.pubkey != sak_) ||
       next.site_epoch != static_cast<std::uint32_t>(record.new_network >> 32U) ||
-      !join_membership_verify(out, identity_.identity(), verified, verifier_) || !verified) {
+      !join_membership_verify(out, identity_.identity(), verified, crypto_verifier()) ||
+      !verified) {
     return false;
   }
   return true;
@@ -2196,9 +2395,12 @@ bool MembershipLifecycle::switching_proof(const LifecycleRecord& record, SiteRec
   CertClaims next{};
   if (!cert_decode(out.site_cert.view(), next)) return false;
   if (!cutover_commit_verify(proof_bytes, next.pubkey, record.old_network, proof, verified,
-                             verifier_) || !verified ||
-      !revocation_object_verify(rrs_bytes, next.pubkey, record.site_id, record.new_network,
-                                rrs, verified, verifier_) || !verified) return false;
+                             crypto_verifier()) ||
+      !verified ||
+      !revocation_object_verify(rrs_bytes, next.pubkey, record.site_id, record.new_network, rrs,
+                                verified, crypto_verifier()) ||
+      !verified)
+    return false;
   Digest256 hash{};
   sha256(rrs_bytes, hash);
   return proof.site_id == record.site_id && proof.new_network == record.new_network &&
@@ -2242,11 +2444,14 @@ Status MembershipLifecycle::renew_prepare(ByteView body) noexcept {
   next.dams = prepare.dams;
   CertClaims claims{};
   bool verified = false;
-  if (!identity_verify_site_cert(identity_.identity(), next.site_cert.view(), claims,
-                                 verified, verifier_) || !verified || claims.pubkey != sak_ ||
+  if (!identity_verify_site_cert(identity_.identity(), next.site_cert.view(), claims, verified,
+                                 crypto_verifier()) ||
+      !verified || claims.pubkey != sak_ ||
       claims.site_epoch != static_cast<std::uint32_t>(next.network >> 32U) ||
-      !join_membership_verify(next, identity_.identity(), verified, verifier_) || !verified)
-    return Status::error(StatusCode::AuthenticationFailed, "renew certificate chain");
+      !join_membership_verify(next, identity_.identity(), verified, crypto_verifier()) || !verified)
+    return Status::error(
+        verification_pending() ? StatusCode::WouldBlock : StatusCode::AuthenticationFailed,
+        "renew certificate chain");
   LifecycleRecord record{};
   record.mode = LifecycleMode::Prepared;
   record.self = config_.self;
@@ -2282,8 +2487,11 @@ Status MembershipLifecycle::renew_prepare(ByteView body) noexcept {
   } else {
     st = journal_->prepare(record);
     if (!st) {
-      if (st.code != StatusCode::Conflict)
+      if (st.code != StatusCode::Conflict) {
+        if (verification_pending())
+          return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
         enter_storage_blocked(LifecycleBlockReason::StoreCommit, last_now_);
+      }
       return st;
     }
   }
@@ -2364,20 +2572,26 @@ Status MembershipLifecycle::renew_commit(ByteView body, MonotonicMs now_ms) noex
   }
   SiteRecord next{};
   if (!staged_site(prepared, next)) {
-    return Status::error(StatusCode::AuthenticationFailed, "renew staged site");
+    return Status::error(
+        verification_pending() ? StatusCode::WouldBlock : StatusCode::AuthenticationFailed,
+        "renew staged site");
   }
   CutoverCommit proof{};
   RevocationSet rrs{};
   bool verified = false;
-  st = cutover_commit_verify(commit.proof.view(), sak_, prepared.old_network,
-                             proof, verified, verifier_);
+  st = cutover_commit_verify(commit.proof.view(), sak_, prepared.old_network, proof, verified,
+                             crypto_verifier());
   if (!st || !verified) {
-    return Status::error(StatusCode::AuthenticationFailed, "renew proof");
+    return Status::error(
+        verification_pending() ? StatusCode::WouldBlock : StatusCode::AuthenticationFailed,
+        "renew proof");
   }
   st = revocation_object_verify(commit.revocations.view(), sak_, prepared.site_id,
-                                prepared.new_network, rrs, verified, verifier_);
+                                prepared.new_network, rrs, verified, crypto_verifier());
   if (!st || !verified) {
-    return Status::error(StatusCode::AuthenticationFailed, "renew rrs");
+    return Status::error(
+        verification_pending() ? StatusCode::WouldBlock : StatusCode::AuthenticationFailed,
+        "renew rrs");
   }
   Digest256 hash{};
   sha256(commit.revocations.view(), hash);
@@ -2422,11 +2636,15 @@ Status MembershipLifecycle::renew_commit(ByteView body, MonotonicMs now_ms) noex
   // until a cold boot rechecks the durable signed intent.
   phase_ = LifecyclePhase::Switching;
   if (!bump_policy()) {
+    if (verification_pending())
+      return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
     enter_storage_blocked(LifecycleBlockReason::PolicyExhausted, now_ms);
     return Status::error(StatusCode::RecoveryRequired, "policy exhausted");
   }
   st = journal_->switch_network(switching);
   if (!st) {
+    if (verification_pending())
+      return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
     enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
     return st;
   }
@@ -2474,16 +2692,21 @@ Status MembershipLifecycle::switch_poll(MonotonicMs now_ms) noexcept {
        site_.site().network != record.new_network) ||
       site_.site().assignment_generation != record.generation ||
       !site_matches_identity(site_.site(), identity_.identity())) {
+    if (verification_pending())
+      return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
     enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
     return Status::error(StatusCode::IntegrityError, "renew signed intent invalid");
   }
   CertClaims current_cert{};
   bool current_verified = false;
-  if (!identity_verify_site_cert(identity_.identity(), site_.site().site_cert.view(),
-                                 current_cert, current_verified, verifier_) ||
-      !current_verified || !join_membership_verify(site_.site(), identity_.identity(),
-                                                   current_verified, verifier_) ||
+  if (!identity_verify_site_cert(identity_.identity(), site_.site().site_cert.view(), current_cert,
+                                 current_verified, crypto_verifier()) ||
+      !current_verified ||
+      !join_membership_verify(site_.site(), identity_.identity(), current_verified,
+                              crypto_verifier()) ||
       !current_verified) {
+    if (verification_pending())
+      return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
     enter_storage_blocked(LifecycleBlockReason::Site, now_ms);
     return Status::error(StatusCode::AuthenticationFailed, "renew current membership");
   }
@@ -2491,6 +2714,8 @@ Status MembershipLifecycle::switch_poll(MonotonicMs now_ms) noexcept {
                          static_cast<std::uint32_t>(record.new_network >> 32U))) {
     // The signed COMMIT is durable evidence that this grant is excluded.
     // Keep its irreversible intent and close the old membership on every boot.
+    if (verification_pending())
+      return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
     enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
     return Status::error(StatusCode::Conflict, "renew self excluded");
   }
@@ -2501,6 +2726,8 @@ Status MembershipLifecycle::switch_poll(MonotonicMs now_ms) noexcept {
   CertClaims next_cert{};
   if (!cert_decode(next.site_cert.view(), next_cert) ||
       current_cert.pubkey != next_cert.pubkey) {
+    if (verification_pending())
+      return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
     enter_storage_blocked(LifecycleBlockReason::Site, now_ms);
     return Status::error(StatusCode::IntegrityError, "renew site cert");
   }
@@ -2572,12 +2799,14 @@ Status MembershipLifecycle::switch_poll(MonotonicMs now_ms) noexcept {
             st = Status::error(StatusCode::Conflict, "renew rrs equivocation");
           if (st && (revocations_.uncertain() || revocations_.quarantined()))
             st = revocations_.recover(rrs_bytes, next_cert.pubkey, record.site_id,
-                                      record.new_network, verifier_);
+                                      record.new_network, crypto_verifier());
         }
       } else {
         st = revocations_.uncertain() || revocations_.quarantined()
-                 ? revocations_.recover(rrs_bytes, next_cert.pubkey, record.site_id, record.new_network, verifier_)
-                 : revocations_.accept(rrs_bytes, next_cert.pubkey, record.site_id, record.new_network, verifier_);
+                 ? revocations_.recover(rrs_bytes, next_cert.pubkey, record.site_id,
+                                        record.new_network, crypto_verifier())
+                 : revocations_.accept(rrs_bytes, next_cert.pubkey, record.site_id,
+                                       record.new_network, crypto_verifier());
       }
       break;
     case 4: st = site_.consolidate(next); break;
@@ -2593,6 +2822,8 @@ Status MembershipLifecycle::switch_poll(MonotonicMs now_ms) noexcept {
     default: return Status::error(StatusCode::InvalidState, "renew step");
   }
   if (!st) {
+    if (verification_pending())
+      return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
     enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
     return st;
   }
@@ -2630,6 +2861,8 @@ Status MembershipLifecycle::on_action_complete(const LifecycleActionComplete& do
     }
     if (adopt_stores() != LifecycleBlockReason::None || !adopted_.has_rrs ||
         adopted_.rs_epoch < adopted_.rs_floor || self_rejected()) {
+      if (verification_pending())
+        return Status::error(StatusCode::WouldBlock, "lifecycle proof computing");
       enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
       return Status::success();
     }
