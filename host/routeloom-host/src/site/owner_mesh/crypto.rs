@@ -166,6 +166,10 @@ fn mesh_f08_crypto_preserves_relay_background() {
     let control = background(true);
     let worker = background(false);
     assert!(
+        control.1 > 0,
+        "blocking control expires hop ACKs: {control:?}"
+    );
+    assert!(
         worker.0 >= 99,
         "background >=99%: control={control:?}, worker={worker:?}"
     );
