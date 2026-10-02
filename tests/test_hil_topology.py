@@ -1,10 +1,14 @@
 """Topology overlays use radio source MACs; flash identity stays independent."""
 import csv
+import contextlib
+import io
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from tools.hil import rig, topology
+from tools.hil import flash, rig, topology
 
 
 class TopologyTests(unittest.TestCase):
@@ -46,6 +50,20 @@ class TopologyTests(unittest.TestCase):
                 self.assertEqual(steps.count("tools/hil/build_image.sh"), count)
                 self.assertEqual(steps.count("tools/hil/flash.py"), count)
                 self.assertIn("only in an authorized hardware round", steps)
+
+    def test_generated_flash_command_accepts_option_like_board_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            boards = self.boards(2)
+            boards[1]["name"] = "-relay"
+            output = root / "out"
+            topology.generate("star", self.table(root, boards), output)
+            command = next(line for line in (output / "STEPS.md").read_text().splitlines()
+                           if line.startswith("python3 tools/hil/flash.py") and "-relay" in line)
+            with patch.object(rig, "resolve_board_port", return_value=(None, [], "OFFLINE")) as resolve, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(flash.main(shlex.split(command)[2:]), 3)
+            self.assertEqual(resolve.call_args.args[0].name, "-relay")
 
     def test_invalid_input_is_rejected_before_output(self):
         for column, value in (("mac", "02:00:00:ff:fe:00:00:01"),

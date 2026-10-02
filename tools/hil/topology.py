@@ -86,7 +86,7 @@ def generate(topology: str, table: Path, output: Path) -> None:
                             "mac": board["probe_mac"], "port_globs": [board["by_id"]],
                             "console": "none" if board["app"] == "bridge_node" else "usb-serial-jtag"}
         flashes.append(shlex.join(["python3", "tools/hil/flash.py", "--rig", str(output / "rig.json"),
-                                   "--bench", topology, "--board", name, "--image-dir",
+                                   "--bench", topology, f"--board={name}", "--image-dir",
                                    f"artifacts/hil/images/{label}"]))
     steps += ["```", "", "## Flash (only in an authorized hardware round)", "",
               "Reserve the boards/serial ports and follow docs/hil.md preflight first.",
