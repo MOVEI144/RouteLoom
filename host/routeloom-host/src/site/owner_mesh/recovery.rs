@@ -266,6 +266,9 @@ fn mesh_m05_simultaneous_power_loss_recovers() {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     converge_outward(&mut world, "m05");
+    for peer in &mut world.peers {
+        peer.smart_join_policy(true, true, 60000);
+    }
     let reboots: Vec<u32> = world.peers.iter().map(|peer| peer.reboots).collect();
     for peer in &mut world.peers {
         peer.power_cut();

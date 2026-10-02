@@ -1375,7 +1375,7 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   put_u64(out, auth.tx_sent);
   out.push_back(coord.refresh_strikes);
   const JoinSnapshot joiner = owner.coordinator().joiner_snapshot();
-  put_u32(out, joiner.counters.attempts);
+  put_u32(out, owner.coordinator().milestones(runtime.now_ms()).attempts);
   put_u32(out, joiner.counters.m1_sent);
   put_u32(out, joiner.counters.rx_dropped);
   // One bounded diagnostic for the R1 Notice target: a live gateway
@@ -1901,8 +1901,19 @@ int main(int argc, char** argv) {
         if (length != 2) fatal("bad G");
         events.probe = payload[1] != 0;
         break;
+      case 'a': {
+        if (length != 1) fatal("bad a");
+        sdkv1::JoinMark mark{};
+        status = device.join_mark(mark);
+        Bytes reply{'a', static_cast<std::uint8_t>(status.code)};
+        reply.insert(reply.end(), mark.begin(), mark.end());
+        secure_clear(mark);
+        write_frame(reply);
+        secure_clear(reply.data(), reply.size());
+        break;
+      }
       case 'X': {
-        if (length != 9 && length != 13) fatal("bad X");
+        if (length != 9 && length != 13 && length != 25) fatal("bad X");
         const auto u32_at = [&](std::size_t at) {
           return static_cast<std::uint32_t>(payload[at] | (payload[at + 1] << 8) |
                                             (payload[at + 2] << 16) |
@@ -1910,7 +1921,15 @@ int main(int argc, char** argv) {
         };
         JoinPolicy policy{};
         policy.removal_holdoff_s = u32_at(1);
-        if (length == 13) policy.isolation_notice_s = u32_at(9);
+        if (length >= 13) policy.isolation_notice_s = u32_at(9);
+        if (length == 25) {
+          policy.smart_join = payload[13] != 0;
+          policy.boot_join = payload[14] != 0;
+          policy.same_site_only = payload[15] != 0;
+          policy.listen_ms = u32_at(17);
+          policy.search_ms = u32_at(21);
+          policy.start_jitter_ms = 2000;
+        }
         std::uint32_t revision = 0;
         status = device.set_join_policy(policy, u32_at(5), revision);
         Bytes reply{'x', static_cast<std::uint8_t>(status.code)};

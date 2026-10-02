@@ -74,6 +74,8 @@ pub(super) struct Switch {
     /// so a forced-multihop world heals back to multi-hop, not to a
     /// direct radio the test never had.
     pub(super) base: Vec<Vec<bool>>,
+    /// Sender bytes, counted once per transmission including loss/broadcast.
+    pub(super) radio_bytes: u64,
     pub(super) delivered: u64,
     pub(super) dropped: u64,
     /// Drop the next N frames on the directed leg (the sender's
@@ -127,6 +129,7 @@ impl Switch {
         Self {
             base: audible.clone(),
             audible,
+            radio_bytes: 0,
             delivered: 0,
             dropped: 0,
             drop_next: vec![vec![0; n]; n],
@@ -310,13 +313,17 @@ impl Switch {
     }
 
     pub(super) fn consume_wire_loss(&mut self, from: usize, to: usize, frame: &[u8]) -> bool {
-        if frame.len() < 5 || frame[..4] != *b"RL\x02\0" {
+        let kind = if frame.len() >= 5 && frame[..4] == *b"RL\x02\0" {
+            frame[4]
+        } else if frame.len() >= 44 && frame[..4] == *b"RLD1" {
+            frame[5]
+        } else {
             return false;
-        }
+        };
         if let Some(rule) = self
             .drop_wire
             .iter_mut()
-            .find(|rule| rule.0 == from && rule.1 == to && rule.2 == frame[4] && rule.3 > 0)
+            .find(|rule| rule.0 == from && rule.1 == to && rule.2 == kind && rule.3 > 0)
         {
             rule.3 -= 1;
             self.wire_dropped += 1;
