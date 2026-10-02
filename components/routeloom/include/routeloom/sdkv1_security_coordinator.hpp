@@ -1088,6 +1088,8 @@ class SecurityCoordinator final : public BootstrapSink,
   bool refresh_active_{false};
   MonotonicMs refresh_start_{0};
   MonotonicMs refresh_cooldown_until_{0};
+  // Armed on retained smart boot; 0 is done, no-deadline waits for adoption.
+  MonotonicMs boot_listen_until_{0};
   MonotonicMs last_authority_start_{0};
   // 04 §3.5: last live-links strike (spacing clock — the live road
   // strikes once per window at most, so one rotation overlap cannot

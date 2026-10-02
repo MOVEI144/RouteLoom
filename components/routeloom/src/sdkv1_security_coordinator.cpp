@@ -642,6 +642,7 @@ MonotonicMs SecurityCoordinator::next_deadline(const MonotonicMs now) const noex
       if (entry.used) sooner(entry.expires_at);
     }
     if (mode_ == CoordinatorMode::Member) {
+      if (boot_listen_until_ != 0) sooner(boot_listen_until_);
       // A pending GK promote and the authority channel join the schedule.
       if (group_keys_.promotion_pending()) return now;
       if (authority_wanted_ && !small().authority.snapshot().started) {
@@ -715,6 +716,9 @@ Status SecurityCoordinator::on_boot(const CoordinatorEvent& event) noexcept {
                  // channel, once adopted) sets it; until then RLD1 RX drops
   radio_generation_ = event.radio_generation;
   usb_direct_ = event.usb_direct;
+  boot_listen_until_ =
+      deps_.joiner_config.smart_join && deps_.joiner_config.boot_join && !event.usb_direct
+          ? kJoinNoDeadline : 0;
   // A standing removal record restarts its RAM holdoff (the length it
   // recorded) on every boot — the Cleaned commit time does not survive the
   // reboot. A verified completed local leave skips only that timer.
@@ -2437,6 +2441,7 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
   action_pending_ = false;
   authority_wanted_ = false;
   join_confirmed_ = false;
+  boot_listen_until_ = 0;
   refresh_active_ = false;
   refresh_strikes_ = 0;
   last_unknown_newer_generation_ = 0;
@@ -2869,6 +2874,19 @@ void SecurityCoordinator::note_link_failed(const MonotonicMs now) noexcept {
 void SecurityCoordinator::watch_linkless(const MonotonicMs now) noexcept {
   if (mode_ != CoordinatorMode::Member || !discovery_started_) return;
   const bool linkless = bank_.live_count(SecurityScope::Link) == 0;
+  if (boot_listen_until_ != 0) {
+    // A verified member-scope advertisement is enough to resume locally;
+    // gateway/authority reachability is not required to hear our own site.
+    const bool heard = !linkless || (deps_.discovery != nullptr &&
+                                    deps_.discovery->scope_stats().scope_accepted != 0);
+    if (heard || !deps_.joiner_config.smart_join || !deps_.joiner_config.boot_join) {
+      boot_listen_until_ = 0;
+    } else if (now >= boot_listen_until_) {
+      start_refresh(now);
+      boot_listen_until_ = 0;  // one boot trigger, also after a finite timeout
+      return;
+    }
+  }
   // 04 §3.5: an old-group link must not veto recovery for a member
   // the site left behind (revoked, cutover-straggler). The live road
   // counts the same unknown-AHEAD-generation evidence as the linkless
@@ -2940,7 +2958,9 @@ void SecurityCoordinator::start_refresh(const MonotonicMs now) noexcept {
   const MonotonicMs due = last_strike_ms_ > kJoinNoDeadline - spread
                               ? kJoinNoDeadline
                               : last_strike_ms_ + spread;
-  if (now < due) return;
+  // Smart boot searches already use their configured listen and random
+  // jitter; the legacy recovery spread must not suppress the boot trigger.
+  if (now < due && boot_listen_until_ == 0) return;
   // The channel suspends (its DAMS copy wipes); the GK state stays live
   // so counters and replay windows survive the engine swap. RLS1 is
   // retained untouched — the refresh only re-verifies it.
@@ -3402,6 +3422,14 @@ void SecurityCoordinator::on_joiner_action(const JoinAction& action, const Monot
     case JoinActionKind::MemberReady:
       refresh_active_ = false;  // re-verified (or silently adopted)
       (void)adopt_member(action, now);
+      if (boot_listen_until_ == kJoinNoDeadline) {
+        const MonotonicMs listen = deps_.joiner_config.listen_ms;
+        const MonotonicMs deadline =
+            now > kJoinNoDeadline - listen ? kJoinNoDeadline : now + listen;
+        boot_listen_until_ = !action.joined_now && mode_ == CoordinatorMode::Member &&
+                                     !member().gateway_active
+                                 ? std::max<MonotonicMs>(1, deadline) : 0;
+      }
       return;
     case JoinActionKind::RemovalRequired:
       refresh_active_ = false;
@@ -3545,6 +3573,7 @@ void SecurityCoordinator::stop_traffic(const bool clear_resume) noexcept {
 Status SecurityCoordinator::request_join(const MonotonicMs now) noexcept {
   if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
   if (mode_ == CoordinatorMode::Member) {
+    boot_listen_until_ = 0;
     join_search_result_ = StatusCode::Ok;
     return start_recovery_join(now);
   }

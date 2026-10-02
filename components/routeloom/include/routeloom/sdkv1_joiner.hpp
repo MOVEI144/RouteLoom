@@ -360,6 +360,7 @@ class Joiner final {
   void teardown_attempt() noexcept;
   void clear_mailbox() noexcept;
   void start_scan() noexcept;
+  Status wait_smart_probe(MonotonicMs now) noexcept;
   void schedule_rescan(MonotonicMs now) noexcept;
   // Shared run reset of start()/start_direct().
   void begin_run(const JoinBootInput& boot) noexcept;

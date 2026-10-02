@@ -2,7 +2,11 @@
 
 Smart join is an opt-in `JoinPolicy` mode. Existing API 1 callers and stored
 format-1 policies keep the previous behavior. A healthy stored membership
-boots as Member without a ZeroTouch DISCOVER or a new join request. A fresh
+boots as Member and listens for `listen_ms`. A verified member-scope
+advertisement or live link from that site completes the boot check without
+ZeroTouch DISCOVER or a new join request. If the site stays unheard and
+`boot_join` is enabled, the existing recovery path starts one finite
+retained-site search; expiry resumes the retained membership. A fresh
 smart search listens for `listen_ms`, adds the existing `start_jitter_ms`
 random delay, then probes. `search_ms` bounds the whole search, including
 listening and retries. One search can start at most one full procedure;
@@ -12,7 +16,13 @@ attempt releases its candidate reservation so a later API search can proceed.
 A healthy retained membership resumes after a finite verification ends,
 while the API reports timeout, pending or denial rather than a new join.
 API calls can start
-another finite search. `boot_join=false` disables automatic fresh boot joins.
+another finite search. `boot_join=false` disables automatic smart boot searches.
+Enabling smart mode during a legacy scan discards legacy offers and arms
+the finite deadline before listening. If a full procedure has already
+started, that procedure consumes the single attempt and the search ends;
+a later API request can start another search. Retained searches also use
+`start_jitter_ms` to spread simultaneous recovery probes; configure a nonzero
+value for spreading. The compatibility default of 0 keeps no jitter.
 `same_site_only=true` requires a retained site preference; an unassigned
 node cannot select an arbitrary site. The existing `isolation_notice_s`
 becomes a one-shot retained-site verification trigger when smart join is on.
@@ -82,7 +92,12 @@ EDHOC messages and 5085 versus 3203 simulated radio bytes. These are simulator
 counts, not measured RF airtime. The live joiner interop uses two real Rust
 Authorities. Owner mesh tests cover list cancellation/distribution, a mixed
 cohort with OFFER and EDHOC reply loss, and retained cutover recovery under
-closed intake. Scenario registration is in `tests/e2e/scenarios.json`.
+closed intake. A 60-second simultaneous-boot comparison in the real Owner
+harness (G—R—two unassigned devices, one expected, `start_jitter_ms=2000`
+in both modes) measures 5 versus 1 full relay starts and 90322 versus 55771 sender radio bytes for legacy versus smart.
+The byte count includes all mesh transmissions, including retries and
+broadcasts, counted once at the sender; it is also not measured RF airtime.
+Scenario registration is in `tests/e2e/scenarios.json`.
 H2 with C3/C6 gateways, two daemons and real RF is still required; these
 host results do not establish its airtime or latency acceptance.
 
@@ -92,13 +107,16 @@ ESP-IDF v6.0.3, compared with 4a931258 in the same cells:
 
 | Cell | app.bin before → after | Static free RAM before → after | RTC/LP used |
 |---|---|---|---|
-| C3 bridge, normal DevRam gateway_small | 1218688 → 1223184 B (+4496) | 52896 → 52736 B (−160) | 6480 B, unchanged |
-| C6 bench, normal Member relay | 1425056 → 1431616 B (+6560) | 147527 → 147367 B (−160) | 164 B, unchanged |
+| C3 bridge, normal DevRam gateway_small | 1218688 → 1224112 B (+5424) | 52896 → 52720 B (−176) | 6480 B, unchanged |
+| C6 bench, normal Member relay | 1425056 → 1432704 B (+7648) | 147527 → 147351 B (−176) | 164 B, unchanged |
 
-The expected keys and site/expiry binding account for the fixed RAM growth;
-the positive-offer reservation reuses existing table rows. The measured
-`app_bin_max` baselines of these two cells are refreshed for the new codecs,
-policy records and probe selection. Static-RAM floors, recorded free-RAM
-budgets, RTC limits, drift tolerance, partitions and capacity profiles are
-unchanged. C3's 27648 B floor passes with 52736 B remaining. Other firmware
-cells were not measured in this PR's targeted run.
+The expected keys, site/expiry binding and finite-search/boot-listen state
+account for the fixed RAM growth; the positive-offer reservation reuses
+existing table rows. The review changes after 57c4bb42 add 928 B of flash
+and 16 B of static RAM on C3, and 1088 B of flash and 16 B of static RAM on C6.
+Measured `app_bin_max` and `static_free_min` regression baselines in
+`tools/ci/cells.json` are refreshed for the cells whose previous baselines
+no longer cover the measured growth. Static-RAM floors, RTC limits, drift
+tolerance, partitions and capacity profiles are unchanged. C3's 27648 B
+floor passes with 52720 B remaining. The firmware matrix separately checks
+all repository cells against their RAM floors and size regression budgets.

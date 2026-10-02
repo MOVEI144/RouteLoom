@@ -1352,7 +1352,7 @@ void emit_snapshot(routeloom::espnow::EspNowSecurityOwner& owner,
   put_u64(out, auth.tx_sent);
   out.push_back(coord.refresh_strikes);
   const JoinSnapshot joiner = owner.coordinator().joiner_snapshot();
-  put_u32(out, joiner.counters.attempts);
+  put_u32(out, owner.coordinator().milestones(runtime.now_ms()).attempts);
   put_u32(out, joiner.counters.m1_sent);
   put_u32(out, joiner.counters.rx_dropped);
   // One bounded diagnostic for the R1 Notice target: a live gateway

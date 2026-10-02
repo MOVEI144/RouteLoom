@@ -980,6 +980,7 @@ impl MeshWorld {
         for (from, tick) in ticks.iter().enumerate() {
             let Some(tick) = tick else { continue };
             for tx in &tick.tx {
+                self.switch.radio_bytes += tx.bytes.len() as u64;
                 self.switch.c7_observe(from, tx.dst_mac, &tx.bytes, b_mac);
                 if tx.dst_mac == BROADCAST_MAC {
                     self.callbacks[from].push((self.now, 1));

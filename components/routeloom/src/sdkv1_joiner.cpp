@@ -492,7 +492,17 @@ Status Joiner::apply_policy(const JoinerConfig& policy) noexcept {
   next.same_site_only = policy.same_site_only;
   next.listen_ms = policy.listen_ms;
   next.search_ms = policy.search_ms;
+  const bool enable_smart = !direct_ && !config_.smart_join && next.smart_join;
   config_ = next;
+  if (enable_smart && state_ != JoinState::Stopped && state_ != JoinState::Ready &&
+      state_ != JoinState::Removed && state_ != JoinState::RecoveryRequired) {
+    // A legacy scan has neither a smart nonce nor a finite deadline. Drop
+    // its offers before listening; an already started procedure consumes
+    // this search's single attempt even when the policy changes.
+    end_search(last_now_);
+    search_deadline_ = sat_add(last_now_, config_.search_ms);
+    if (counters_.attempts == search_attempts_) set_state(JoinState::BootCheck);
+  }
   candidates_.set_avoid(config_.avoid_not_here_ms, config_.avoid_blocked_ms);
   candidates_.set_retry_max(config_.retry_max_ms);
   return Status::success();
@@ -908,6 +918,20 @@ bool Joiner::retain_membership(const SiteRecord& site, const IdentityRecord& ide
   return true;
 }
 
+Status Joiner::wait_smart_probe(const MonotonicMs now) noexcept {
+  std::uint32_t draw = 0;
+  const Status random = entropy_.fill(
+      MutableByteView{reinterpret_cast<std::uint8_t*>(&draw), sizeof draw});
+  if (!random) {
+    last_error_ = random.code;
+    set_state(JoinState::Stopped);
+    return random;
+  }
+  backoff_deadline_ = sat_add(now, config_.listen_ms + draw % (config_.start_jitter_ms + 1U));
+  set_state(JoinState::Backoff);
+  return Status::success();
+}
+
 void Joiner::schedule_rescan(const MonotonicMs now) noexcept {
   // The deadline is set even when entropy fails (the floor holds then).
   (void)candidates_.next_scan_deadline(now, entropy_, backoff_deadline_);
@@ -1108,9 +1132,7 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
       if (direct_) {
         begin_direct_attempt();
       } else if (config_.smart_join) {
-        if (search_deadline_ == 0) search_deadline_ = sat_add(now, config_.search_ms);
-        backoff_deadline_ = sat_add(now, config_.listen_ms);
-        set_state(JoinState::Backoff);
+        return wait_smart_probe(now);
       } else {
         start_scan();
       }
@@ -1128,9 +1150,7 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
       if (direct_) {
         begin_direct_attempt();
       } else if (config_.smart_join) {
-        if (search_deadline_ == 0) search_deadline_ = sat_add(now, config_.search_ms);
-        backoff_deadline_ = sat_add(now, config_.listen_ms);
-        set_state(JoinState::Backoff);
+        return wait_smart_probe(now);
       } else {
         start_scan();
       }
@@ -1159,18 +1179,7 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
       set_state(JoinState::Stopped);
       return Status::success();
     }
-    if (search_deadline_ == 0) search_deadline_ = sat_add(now, config_.search_ms);
-    std::uint32_t draw = 0;
-    const Status random = entropy_.fill(MutableByteView{reinterpret_cast<std::uint8_t*>(&draw), sizeof draw});
-    if (!random) {
-      last_error_ = random.code;
-      set_state(JoinState::Stopped);
-      return random;
-    }
-    backoff_deadline_ = sat_add(now, config_.listen_ms +
-        draw % (config_.start_jitter_ms + 1U));
-    set_state(JoinState::Backoff);
-    return Status::success();
+    return wait_smart_probe(now);
   }
   // Fresh, or a clean quarantine healing via full EDHOC. Direct runs skip
   // the scan: the attachment already selected the site.

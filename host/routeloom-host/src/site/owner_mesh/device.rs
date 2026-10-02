@@ -277,13 +277,49 @@ fn mesh_j02_finite_retained_search_restores_member() {
     );
     assert_eq!(world.snaps[a].id_fp, before.id_fp);
     assert!(world.snaps[a].has_site);
-    assert_eq!(world.snaps[a].j_m1, 0);
+    assert_eq!(world.snaps[a].j_attempts, 0);
     world.switch.heal(a);
     until(&mut world, 120_000, |w| {
         w.snaps[a].authority_ready && w.snaps[a].join_confirmed
     });
     assert!(world.snaps[a].join_confirmed);
     deliver_each(&mut world, a, 0, 2, b"j02-finite-after");
+}
+
+/// A smart boot with retained membership probes only after the local site
+/// stays unheard, and a finite search keeps that membership intact.
+#[test]
+fn mesh_j02_retained_boot_probes_when_site_unheard() {
+    let Some(mut world) = MeshWorld::start("j02-boot-unheard", Switch::forced_multihop()) else {
+        panic!("J02 requires the real Owner mesh peer");
+    };
+    converge_gated(&mut world, 1, "j02 boot unheard");
+    let a = world.index_of(NODE_A);
+    let before = world.snaps[a].clone();
+    world.peers[a].smart_join_policy(true, true, 10000);
+    world.switch.isolate(a);
+    world.peers[a].power_cut();
+    until(&mut world, 500, |_| false);
+    assert_eq!(world.snaps[a].mode, MODE_MEMBER, "listen before probing");
+    until(&mut world, 4000, |w| w.snaps[a].mode == MODE_ZERO_TOUCH);
+    assert_eq!(
+        world.snaps[a].mode, MODE_ZERO_TOUCH,
+        "unheard site starts a probe search"
+    );
+    until(&mut world, 15000, |w| w.snaps[a].mode == MODE_MEMBER);
+    assert_eq!(
+        world.snaps[a].mode, MODE_MEMBER,
+        "finite search restores member"
+    );
+    assert_eq!(world.snaps[a].j_attempts, 0);
+    assert!(world.snaps[a].has_site);
+    assert_eq!(world.snaps[a].id_fp, before.id_fp);
+    world.switch.heal(a);
+    until(&mut world, 120000, |w| {
+        w.snaps[a].authority_ready && w.snaps[a].join_confirmed
+    });
+    assert!(world.snaps[a].join_confirmed);
+    deliver_each(&mut world, a, 0, 2, b"j02-boot-after");
 }
 
 /// F05-R: a send and a leave made from inside Device callbacks (a received

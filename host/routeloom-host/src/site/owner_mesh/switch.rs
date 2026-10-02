@@ -74,6 +74,8 @@ pub(super) struct Switch {
     /// so a forced-multihop world heals back to multi-hop, not to a
     /// direct radio the test never had.
     pub(super) base: Vec<Vec<bool>>,
+    /// Sender bytes, counted once per transmission including loss/broadcast.
+    pub(super) radio_bytes: u64,
     pub(super) delivered: u64,
     pub(super) dropped: u64,
     /// Drop the next N frames on the directed leg (the sender's
@@ -127,6 +129,7 @@ impl Switch {
         Self {
             base: audible.clone(),
             audible,
+            radio_bytes: 0,
             delivered: 0,
             dropped: 0,
             drop_next: vec![vec![0; n]; n],

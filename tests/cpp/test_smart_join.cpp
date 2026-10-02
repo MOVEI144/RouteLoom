@@ -173,6 +173,7 @@ void retained_membership() {
   config.smart_join = true;
   config.same_site_only = true;
   config.listen_ms = 1000;
+  config.start_jitter_ms = 1000;
   net.restart_device(config, 0x197);
   CHECK(net.device().joiner.start(boot_input(), net.now()));
   CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
@@ -190,6 +191,9 @@ void retained_membership() {
   boot.mode = JoinBootMode::VerifyExistingMembership;
   const auto started = net.now();
   CHECK(net.device().joiner.start(boot, started));
+  CHECK(net.device().joiner.poll(started));
+  CHECK(net.device().joiner.next_deadline() > started + config.listen_ms);
+  CHECK(net.device().joiner.next_deadline() <= started + config.listen_ms + config.start_jitter_ms);
   CHECK(net.pump_until([&] { return net.device().joiner.snapshot().state == JoinState::Stopped; }, 60005));
   CHECK(net.site(1).authority_.m1_seen == 0);
   CHECK(net.device().site_store.site().site_id == kSiteA);
@@ -215,6 +219,16 @@ void finite_and_api_only() {
   net.skip_to(1000);
   CHECK(net.device().joiner.snapshot().state == JoinState::Stopped);
   CHECK(net.device().radio.sends == 0);
+
+  // Enabling smart mode on a live legacy scan must also arm its deadline.
+  JoinSimNetwork legacy(device_config(), identity_record());
+  CHECK(legacy.device().joiner.start(boot_input(), 0));
+  CHECK(legacy.device().joiner.poll(0));
+  config.boot_join = true;
+  CHECK(legacy.device().joiner.apply_policy(config));
+  legacy.skip_to(1000);
+  CHECK(legacy.device().joiner.snapshot().state == JoinState::Stopped);
+  CHECK(legacy.device().radio.sends == 0);
 }
 
 void retry_after_inflight_deadline() {
