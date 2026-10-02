@@ -1473,6 +1473,14 @@ int main(int argc, char** argv) {
   using namespace routeloom::sdkv1;
   using namespace routeloom::usb;
 
+  int antenna_level = -2;
+  unsigned gpio_fail_call = 0;
+  if (argc >= 4 && std::strcmp(argv[1], "--check-board-rf") == 0) {
+    antenna_level = std::atoi(argv[2]);
+    gpio_fail_call = static_cast<unsigned>(std::atoi(argv[3]));
+    argc -= 3;
+    argv += 3;
+  }
   const Setup setup = parse_argv(argc, argv);
   if (!setup.nvs_load.empty()) {
     if (!setup.flash.empty() || !setup.flash_ext.empty()) fatal("nvs-load with flash import");
@@ -1482,6 +1490,7 @@ int main(int argc, char** argv) {
   mesh_peer_seed_entropy(setup.seed);
 
   idf_stub::reset();
+  idf_stub::fail_gpio_call(gpio_fail_call);
   idf_stub::set_peer_limit(20);
   idf_stub::set_mac(setup.mac.data());
   idf_stub::set_now_us(static_cast<std::int64_t>(setup.t0) * 1000);
@@ -1559,7 +1568,26 @@ int main(int argc, char** argv) {
     config.usb_device_nonce = setup.seed ^ 0xD15EA5ED00B1E5ULL;
   }
   status = device.begin(config, now);
+  if (gpio_fail_call != 0) {
+    if (status.ok() || status.code != StatusCode::RadioFailure ||
+        std::strcmp(status.detail, "rf switch GPIO setup failed") != 0 ||
+        idf_stub::wifi_init_called() || idf_stub::log_contains("rf switch: enabled")) {
+      fatal("GPIO failure did not stop RF startup");
+    }
+    return 0;
+  }
   if (!status) boot_failed(status);
+  if (antenna_level != -2) {
+    if (!idf_stub::board_rf_before_wifi(antenna_level)) fatal("board RF startup ordering");
+    if (antenna_level < 0) {
+      if (idf_stub::log_contains("rf switch: enabled")) fatal("unexpected RF switch log");
+    } else if (!idf_stub::log_contains(antenna_level == 0
+                                         ? "rf switch: enabled, antenna: internal"
+                                         : "rf switch: enabled, antenna: external")) {
+      fatal("missing RF switch antenna log");
+    }
+    return 0;
+  }
   if (!idf_stub::log_contains(setup.devram ? "security profile: Development"
                                          : "security profile: Candidate")) {
     fatal("boot security profile is not visible");
