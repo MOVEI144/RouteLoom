@@ -1430,9 +1430,8 @@ Status SecurityCoordinator::emit_link_send(const HandshakeResult& result,
   // live start or the exact completed retry token answers: another
   // completed leg for the peer names an exchange the peer no longer routes.
   DemuxEntry* leg = nullptr;
-  const bool quiet_retry = member().engine.has_quiet_link_retry(result.token);
   for (auto& entry : member().demux) {
-    if (entry.used && ((entry.has_start && (!quiet_retry || entry.quiet_retry_token == 0)) ||
+    if (entry.used && ((entry.has_start && entry.quiet_retry_token == 0) ||
                        entry.quiet_retry_token == result.token) &&
         entry.peer == result.peer) {
       leg = &entry;
