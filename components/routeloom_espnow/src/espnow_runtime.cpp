@@ -1592,7 +1592,8 @@ Status EspNowRuntime::reply_observe_authenticated_rx(
 Status EspNowRuntime::reply_acquire(const ReplyBinding captured,
                                        const MonotonicMs deadline,
                                        const MonotonicMs now,
-                                       ReplyLeaseToken& out) noexcept {
+                                       ReplyLeaseToken& out,
+                                       const bool probe) noexcept {
   out = kInvalidReplyLeaseToken;
   ReplyCallGuard guard(reply_call_active_);
   if (!guard.entered()) return Status::error(StatusCode::Busy, "reentrant reply call");
@@ -1625,7 +1626,8 @@ Status EspNowRuntime::reply_acquire(const ReplyBinding captured,
     // driverless Stale marker cannot carry a reply.
     status = Status::error(StatusCode::Conflict, "peer driver not pinned");
   } else {
-    status = reply_leases_.acquire(captured, deadline, now, out);
+    status = probe ? reply_leases_.probe_acquire(captured, deadline, now)
+                   : reply_leases_.acquire(captured, deadline, now, out);
   }
   portEXIT_CRITICAL(&callback_lock_);
   return status;

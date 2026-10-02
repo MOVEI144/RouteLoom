@@ -2324,6 +2324,10 @@ class MeshNode {
   Status reserve_rx_reply(const RxBinding& rx, bool needs_control_slot,
                           std::size_t pool_slots, MonotonicMs now_ms,
                           AdmissionReservation& out) noexcept;
+  Status reserve_rx_reply(const RxBinding& rx, bool needs_control_slot,
+                          std::size_t pool_slots, MonotonicMs now_ms,
+                          AdmissionReservation& out,
+                          MonotonicMs deadline_ms) noexcept;
   // Refuse admission for binding-less input: no HOP_ACCEPT, no dispatch —
   // the unsent reply is counted where BUSY drops land.
   void refuse_without_binding(NodeId peer, const wire::Header& header,

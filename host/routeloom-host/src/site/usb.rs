@@ -1222,23 +1222,23 @@ impl AuthorityTransport for UsbAuthorityAdapter {
 /// attempt).
 #[derive(Default)]
 pub struct SiteInbox {
-    queue: Mutex<VecDeque<(u64, Vec<u8>)>>,
+    queue: Mutex<VecDeque<(u64, u64, Vec<u8>)>>,
     cv: Condvar,
 }
 
 impl SiteInbox {
-    pub fn post(&self, request: u64, body: Vec<u8>) -> bool {
+    pub fn post(&self, session: u64, request: u64, body: Vec<u8>) -> bool {
         let mut queue = self.queue.lock().expect("site inbox poisoned");
         if queue.len() >= INBOX_CAP {
             return false;
         }
-        queue.push_back((request, body));
+        queue.push_back((session, request, body));
         drop(queue);
         self.cv.notify_one();
         true
     }
 
-    fn drain(&self) -> Vec<(u64, Vec<u8>)> {
+    fn drain(&self) -> Vec<(u64, u64, Vec<u8>)> {
         self.queue
             .lock()
             .expect("site inbox poisoned")
@@ -1263,6 +1263,7 @@ struct SiteLink {
     plan_capable: bool,
     session: u64,
     gateway: u64,
+    network: Option<u64>,
 }
 
 fn site_link(state: &State) -> SiteLink {
@@ -1274,6 +1275,7 @@ fn site_link(state: &State) -> SiteLink {
         plan_capable: info.capability.is_some_and(channel_plan_capable),
         session: info.id.unwrap_or(0),
         gateway: info.node.unwrap_or(0),
+        network: info.network,
     }
 }
 
@@ -1286,6 +1288,7 @@ pub struct SiteLane {
     authority_bound: Option<(u64, u64)>,
     authority: Option<Arc<UsbAuthorityAdapter>>,
     next_request: u64,
+    plan_bound: Option<(u64, u64)>,
     noted_unbound_drop: bool,
 }
 
@@ -1389,17 +1392,32 @@ pub fn site_once(
     let authority = lane.authority.clone();
     // Channel plan (0x68/0x69): reports settle the in-flight request; the
     // next queued request leaves only on a capable session.
+    let plan_attached = service
+        .with(|a| link.active && link.plan_capable && link.network == Some(a.network()))
+        .0;
+    let want_plan = plan_attached.then_some((link.session, link.gateway));
+    if lane.plan_bound != want_plan {
+        if lane.plan_bound.is_some() {
+            let _ = service.with(|a| a.channel_plan = Default::default());
+        }
+        lane.plan_bound = want_plan;
+    }
     let mut inbox = state.site_inbox.drain();
-    inbox.retain(|(request, body)| {
+    inbox.retain(|(session, request, body)| {
+        if !link.active || *session != link.session {
+            return false;
+        }
         if channel_plan_sub(body).is_none() {
             return true;
         }
-        if let Ok(report) = decode_channel_plan_report(body) {
-            let _ = service.with(|a| a.channel_plan.on_report(*request, report, mono));
+        if plan_attached {
+            if let Ok(report) = decode_channel_plan_report(body) {
+                let _ = service.with(|a| a.channel_plan_report(*request, report, mono));
+            }
         }
         false
     });
-    if link.active && link.plan_capable {
+    if plan_attached {
         let (next, _) = service.with(|a| a.channel_plan.take_request(mono));
         if let Some((body, action)) = next {
             let request = lane.request_id();
@@ -1435,7 +1453,7 @@ pub fn site_once(
         return;
     }
     let mut rng = |buf: &mut [u8]| fill_random(buf).is_ok();
-    for (request, body) in inbox {
+    for (_, request, body) in inbox {
         if let Some(adapter) = relay.as_ref() {
             match join_relay_sub(&body) {
                 Some(SUB_JOIN_RELAY_UP) => match adapter.handle_up(&body, mono) {
@@ -2224,15 +2242,96 @@ mod tests {
     }
 
     #[test]
+    fn channel_reports_require_current_usb_context() {
+        use routeloom_protocol::host_ops::{encode_channel_plan_report, ChannelPlanReport};
+        for boundary in 0..5 {
+            let service = Arc::new(super::super::SiteService::new(
+                super::super::testkit::authority(
+                    Box::<super::super::store::MemoryStore>::default(),
+                    NOW,
+                ),
+            ));
+            let state = State {
+                site: Some(service.clone()),
+                ..Default::default()
+            };
+            {
+                let mut session = state.session.lock().unwrap();
+                session.authenticated = true;
+                session.id = Some(1);
+                session.network = Some(super::super::testkit::network());
+                session.node = Some(super::super::testkit::GATEWAY);
+                session.capability =
+                    Some(CAP_HOST_OPS_V1 | routeloom_protocol::host_ops::CAP_CHANNEL_PLAN_V1);
+            }
+            let (outbound, _reader) = mpsc::sync_channel(8);
+            let mut lane = SiteLane::default();
+            site_once(&state, &outbound, &mut lane, NOW);
+            service.with(|a| a.channel_plan.note_sent(7, "status", crate::mono_ms()));
+            let body = encode_channel_plan_report(&ChannelPlanReport {
+                active_channel: 11,
+                active_epoch: 2,
+                ..Default::default()
+            });
+            let frame = Frame {
+                kind: FrameKind::HostOps,
+                flags: 0,
+                session: 1,
+                request: 7,
+                body: body.clone(),
+            };
+            crate::record_frame(&state, &frame, &body, NOW);
+            {
+                let mut session = state.session.lock().unwrap();
+                match boundary {
+                    0 => session.authenticated = false,
+                    1 => session.id = Some(2),
+                    2 => session.capability = Some(CAP_HOST_OPS_V1),
+                    3 => session.node = Some(super::super::testkit::GATEWAY + 1),
+                    _ => session.network = Some(super::super::testkit::network() + 1),
+                }
+            }
+            site_once(&state, &outbound, &mut lane, NOW + 1);
+            assert_eq!(
+                service.with(|a| (a.id.channel, a.id.channel_epoch)).0,
+                (1, 1),
+                "boundary {boundary}"
+            );
+            assert!(!service.with(|a| a.channel_plan.busy()).0);
+            {
+                let mut session = state.session.lock().unwrap();
+                session.authenticated = true;
+                session.id = Some(2);
+                session.network = Some(super::super::testkit::network());
+                session.capability =
+                    Some(CAP_HOST_OPS_V1 | routeloom_protocol::host_ops::CAP_CHANNEL_PLAN_V1);
+            }
+            site_once(&state, &outbound, &mut lane, NOW + 2);
+            service.with(|a| a.channel_plan.note_sent(8, "status", crate::mono_ms()));
+            let current = Frame {
+                session: 2,
+                request: 8,
+                ..frame
+            };
+            crate::record_frame(&state, &current, &body, NOW + 2);
+            site_once(&state, &outbound, &mut lane, NOW + 3);
+            assert_eq!(
+                service.with(|a| (a.id.channel, a.id.channel_epoch)).0,
+                (11, 2)
+            );
+        }
+    }
+
+    #[test]
     fn inbox_is_bounded_and_fifo() {
         let inbox = SiteInbox::default();
         for n in 0..INBOX_CAP {
-            assert!(inbox.post(n as u64, vec![n as u8]));
+            assert!(inbox.post(7, n as u64, vec![n as u8]));
         }
-        assert!(!inbox.post(999, vec![9]));
+        assert!(!inbox.post(7, 999, vec![9]));
         let drained = inbox.drain();
         assert_eq!(drained.len(), INBOX_CAP);
-        assert_eq!(drained[0], (0, vec![0]));
+        assert_eq!(drained[0], (7, 0, vec![0]));
         assert!(inbox.drain().is_empty());
     }
 

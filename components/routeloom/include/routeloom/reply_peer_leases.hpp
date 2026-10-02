@@ -108,6 +108,13 @@ class ReplyPeerPort {
   // returning success. `deadline` is clamped to now + kReplyLeaseTtlMs.
   virtual Status acquire(ReplyBinding captured, MonotonicMs deadline,
                          MonotonicMs now, ReplyLeaseToken& out) noexcept = 0;
+  // Read-only admission check, including the live mapping and driver pin.
+  // Unsupported preserves verification-before-acquire for older ports.
+  // The Owner must serialize probe/open/acquire with binding mutations.
+  virtual Status probe_acquire(ReplyBinding /*captured*/, MonotonicMs /*deadline*/,
+                               MonotonicMs /*now*/) noexcept {
+    return Status::error(StatusCode::Unsupported, "reply probe unavailable");
+  }
   // Drop one use. Unknown or stale tokens report NotFound and change nothing.
   virtual Status release(ReplyLeaseToken token) noexcept = 0;
   // Liveness of one use: NotFound (unknown token), Conflict (binding

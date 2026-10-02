@@ -228,38 +228,79 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
   }
 
   if (frame.header.destination == config_.node) {
-    // Terminal admission probes (design-q116 §8.1 — all read-only): the ACK
-    // + receipt pool slots, the control lane, a transaction, the APPLIED
-    // result slot when a fresh one is needed, and the transaction deadline.
-    // Nothing is spent until every probe agrees.
+    // Terminal admission probes (design-q116 §8.1): the ACK + receipt
+    // slots, control lane, APPLIED result slot and transaction deadline.
+    // All capacity checks are read-only; End verification precedes reservations.
     MonotonicMs txn_deadline = 0;
-    const bool need_applied = frame.header.delivery == DeliveryClass::Applied &&
-                              find_applied(key) == nullptr;
-    // APPLIED (01 §1.4/§1.6): a full result pool refuses with its own
-    // capacity accounting — the most specific cause wins the diagnostic.
-    if (need_applied && !applied_slot_available(now_ms)) {
-      ++applied_stats_.refusals_capacity;
+    AppliedRecord* applied = frame.header.delivery == DeliveryClass::Applied
+                                 ? find_applied(key)
+                                 : nullptr;
+    AdmissionReservation res{};
+    const auto refuse = [&]() noexcept {
+      res.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
+    };
+    // APPLIED (01 §1.4/§1.6): a full result pool refuses with its own
+    // capacity accounting — the most specific cause wins the diagnostic.
+    if (frame.header.delivery == DeliveryClass::Applied && applied == nullptr &&
+        !applied_slot_available(now_ms)) {
+      ++applied_stats_.refusals_capacity;
+      refuse();
       observer_.on_diagnostic("APPLIED_NO_RESULT_SLOT", peer,
                               &frame.header.message);
       return;
     }
+    // Capacity probes must not consume End replay or reclaim an
+    // unauthenticated frame's victim. An expired pin is released after End.
+    DedupEntry* expired_pin = nullptr;
+    std::size_t terminal_pins = 0;
+    std::size_t resident = 0;
+    bool reclaimable = false;
+    dedup_.for_each([&](DedupEntry& value) {
+      ++resident;
+      if (value.expires_at_ms <= now_ms || value.phase == DedupPhase::Resolved ||
+          value.phase == DedupPhase::Evidence) reclaimable = true;
+      if (value.phase != DedupPhase::Terminal) return;
+      ++terminal_pins;
+      if (value.expires_at_ms <= now_ms) expired_pin = &value;
+    });
+    const bool terminal_full = terminal_pins >= kDedupTerminalPinMax;
+    const bool terminal_refused = terminal_full && expired_pin == nullptr;
+    if (terminal_refused || !scheduler_.origin_slot_available(config_.node) ||
+        !txn_deadline_for(frame.header.remaining_deadline_ms, now_ms, txn_deadline)) {
+      if (terminal_refused) saturating_inc(dedup_stats_.refused_terminal_reserve);
+      refuse();
+      observer_.on_diagnostic(
+          terminal_refused ? "DEDUP_TERMINAL_RESERVE" : "ADMISSION_NO_ACK_SLOT",
+          peer, &frame.header.message);
+      return;
+    }
+    if (resident == kDedupCapacity && !reclaimable) {
+      saturating_inc(dedup_stats_.refused_pool_full);
+      refuse();
+      observer_.on_diagnostic("DEDUP_OVERFLOW", peer, &frame.header.message);
+      return;
+    }
     if (scheduler_.free_slots() < 2 || !scheduler_.control_slot_available() ||
-        !scheduler_.origin_slot_available(config_.node) ||
-        !txn_slot_available() ||
-        !txn_deadline_for(frame.header.remaining_deadline_ms, now_ms,
-                          txn_deadline)) {
-      emit_busy_or_drop(peer, frame.header,
-                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
-                        rx, now_ms);
+        !txn_slot_available()) {
+      refuse();
       observer_.on_diagnostic("ADMISSION_NO_ACK_SLOT", peer, &frame.header.message);
       return;
     }
-    // Probe reply capacity before opening End: a full queue must not
-    // consume its replay counter and poison the sender's same-round retry.
-    // Verify End before acquiring reply work or reclaiming a terminal pin.
+    // A capacity refusal must leave End replay usable for same-round retry.
+    // Mapping/context failures still open End to report a missing End session;
+    // they cannot acquire reply work even if that End verifies successfully.
+    if (rx.valid && reply_peer_port_ != nullptr) {
+      const auto probe = reply_peer_port_->probe_acquire(rx.binding, txn_deadline, now_ms);
+      if (probe.code == StatusCode::NoCapacity || probe.code == StatusCode::WouldBlock ||
+          probe.code == StatusCode::CounterExhausted) {
+        refuse();
+        observer_.on_diagnostic("ADMISSION_NO_ACK_SLOT", peer, &frame.header.message);
+        return;
+      }
+    }
     wire::PlainFrame plain{};
     const auto status = wire::open_end(frame, config_.node, security_, plain);
     if (!status) {
@@ -267,58 +308,34 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       return;
     }
     if (!rx.valid) {
-      refuse_without_binding(peer, frame.header, "ADMISSION_NO_BINDING",
-                             now_ms);
+      refuse_without_binding(peer, frame.header, "ADMISSION_NO_BINDING", now_ms);
+      return;
+    }
+    if (!reserve_rx_reply(rx, /*needs_control_slot=*/true, 2, now_ms, res,
+                          txn_deadline)) {
+      refuse();
+      observer_.on_diagnostic("ADMISSION_NO_ACK_SLOT", peer, &frame.header.message);
       return;
     }
     if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
       observer_.on_verified_contact(frame.header.origin, now_ms);
     }
-    // Lease first: fully rollbackable, so a later refusal leaves no victim.
-    AdmissionReservation res{};
-    res.node = this;
-    if (reply_peer_port_ == nullptr) {
-      emit_busy_or_drop(peer, frame.header,
-                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
-                        rx, now_ms);
-      observer_.on_diagnostic("ADMISSION_NO_ACK_SLOT", peer, &frame.header.message);
-      return;
-    }
-    ReplyLeaseToken use{kInvalidReplyLeaseToken};
-    if (!reply_peer_port_->acquire(rx.binding, txn_deadline, now_ms, use)) {
-      emit_busy_or_drop(peer, frame.header,
-                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
-                        rx, now_ms);
-      observer_.on_diagnostic("ADMISSION_NO_ACK_SLOT", peer, &frame.header.message);
-      return;
-    }
-    res.use = use;
-    if (!begin_txn(use, txn_deadline, res.txn)) {
-      res.rollback();
-      emit_busy_or_drop(peer, frame.header,
-                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
-                        rx, now_ms);
-      observer_.on_diagnostic("ADMISSION_NO_ACK_SLOT", peer, &frame.header.message);
-      return;
+    if (terminal_full && expired_pin != nullptr) {
+      dedup_.release(expired_pin);
+      saturating_inc(dedup_stats_.expired);
     }
     // APPLIED (01 §1.4): the result record is part of admission — accepted
     // work must always have a place to store its verdict. An existing
     // record covers re-admission after the dedup record expired while the
     // result was still held.
-    AppliedRecord* applied = nullptr;
     bool applied_new = false;
     if (frame.header.delivery == DeliveryClass::Applied) {
-      applied = find_applied(key);
       if (applied == nullptr) {
         applied = allocate_applied(
             frame.header, ByteView{plain.payload.data(), plain.payload_size}, now_ms);
         if (applied == nullptr) {
-          res.rollback();
-          emit_busy_or_drop(peer, frame.header,
-                            static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
-                            rx, now_ms);
-          observer_.on_diagnostic("APPLIED_NO_RESULT_SLOT", peer,
-                                  &frame.header.message);
+          refuse();
+          observer_.on_diagnostic("APPLIED_NO_RESULT_SLOT", peer, &frame.header.message);
           return;
         }
         applied_new = true;
@@ -328,8 +345,8 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     }
     // Terminal admission (sdk-completion/02 §2.3b): the delivered-DATA pin —
     // never evictable, bounded by the transit reserve. A refusal is already
-    // counted + diagnosed inside allocate_dedup (DEDUP_OVERFLOW /
-    // DEDUP_TERMINAL_RESERVE); the sender still gets an honest BUSY/drop.
+    // counted + diagnosed at the quota probe or inside allocate_dedup;
+    // the sender still gets an honest BUSY/drop.
     auto* entry = allocate_dedup(key, FrameType::Data, frame.header.delivery_round,
                                  DedupPhase::Terminal, peer,
                                  frame.header.remaining_deadline_ms, now_ms);
@@ -337,18 +354,12 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       // Bounded dedup exhaustion is a capacity failure: the sender gets a
       // pre-acceptance BUSY (when a reply slot is affordable) instead of a
       // silent black hole.
-      res.rollback();
-      emit_busy_or_drop(peer, frame.header,
-                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
-                        rx, now_ms);
+      refuse();
       return;
     }
     res.dedup = entry;
     if (!queue_end_receipt(frame.header, res.txn, now_ms, entry)) {
-      res.rollback();
-      emit_busy_or_drop(peer, frame.header,
-                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
-                        rx, now_ms);
+      refuse();
       return;
     }
     if (!queue_hop_accept(frame.header, res.txn, now_ms)) {
@@ -358,10 +369,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
               dropped)) {
         finish_txn_work(dropped.txn);
       }
-      res.rollback();
-      emit_busy_or_drop(peer, frame.header,
-                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
-                        rx, now_ms);
+      refuse();
       return;
     }
     res.committed = true;

@@ -84,6 +84,7 @@ class TestSecurity final : public routeloom::SecurityProvider {
                          const routeloom::ByteView ciphertext,
                          const std::array<std::uint8_t, routeloom::kAeadTagSize>& tag,
                          const routeloom::MutableByteView plaintext) noexcept override {
+    if (context.scope == routeloom::SecurityScope::EndToEnd) ++end_opens_;
     if (context.scope == routeloom::SecurityScope::GroupLink && !accept_group_epoch_) {
       return routeloom::Status::error(routeloom::StatusCode::AuthRequired,
                                       "test group epoch unavailable");
@@ -124,12 +125,14 @@ class TestSecurity final : public routeloom::SecurityProvider {
   // Group-scope opens refused as replays (tests assert this stays 0 on the
   // node path: dedup precedes every group open).
   std::uint64_t group_replays() const noexcept { return group_replays_; }
+  std::uint64_t end_opens() const noexcept { return end_opens_; }
 
  private:
   std::set<std::tuple<routeloom::NetworkId, routeloom::NodeId, routeloom::NodeId,
                       std::uint32_t, std::uint64_t>>
       group_accepted_{};
   std::uint64_t group_replays_{0};
+  std::uint64_t end_opens_{0};
   std::uint32_t group_link_boot_{1};
   std::uint32_t group_link_g_{1};
   bool accept_group_epoch_{true};
