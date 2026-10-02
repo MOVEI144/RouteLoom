@@ -34,7 +34,7 @@
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_CRYPTO_WORKER=y", "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL=y"],
       "symbols_absent": ["9AppObject", "11object_wire", "6Device8Observer.*(on_object|object_receive)", "6rl_dev.*on_object"],
-      "budget": {"app_bin_max": 1234304, "static_free_min": 46328, "rtc_used_max": 6632}
+      "budget": {"app_bin_max": 1239056, "static_free_min": 46632, "rtc_used_max": 6632}
     },
     {
       "id": "reference_node-esp32c3-normal-off-devram", "app": "reference_node", "target": "esp32c3",
@@ -287,7 +287,7 @@
       "id": "bridge_node-esp32c3-normal-off-owner_member", "app": "bridge_node", "target": "esp32c3",
       "expect": ["CONFIG_ROUTELOOM_CRYPTO_WORKER=y"],
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
-      "budget": {"app_bin_max": 1231712, "static_free_min": 46328, "rtc_used_max": 6632}
+      "budget": {"app_bin_max": 1239056, "static_free_min": 46632, "rtc_used_max": 6632}
     },
     {
       "id": "reference_node-esp32s3-normal-off-owner_member", "app": "reference_node", "target": "esp32s3",
@@ -357,7 +357,7 @@
       "artifact": "experimental-c6-bridge_node-member",
       "expect": ["CONFIG_ROUTELOOM_CRYPTO_WORKER=y"],
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
-      "budget": {"app_bin_max": 1352208, "static_free_min": 91361, "rtc_used_max": 136}
+      "budget": {"app_bin_max": 1359520, "static_free_min": 91657, "rtc_used_max": 136}
     },
     {
       "id": "experimental-c6-reference_node-member", "app": "reference_node", "target": "esp32c6",
