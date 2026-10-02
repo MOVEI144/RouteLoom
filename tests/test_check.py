@@ -515,12 +515,25 @@ class Scenarios(unittest.TestCase):
                 other = next(step for step in steps if step.require and step is not load)
                 self.assertNotIn("ROUTELOOM_MESH_PEER_GW", other.env)
 
+    def test_hfinal_bursts_use_small_gateway_profile(self):
+        case = "site::owner_mesh::hfinal::mesh_hfinal_m08_delayed_bursts"
+        steps = check.profile_mesh()
+        load = next(step for step in steps if case in (step.require or ()))
+        self.assertEqual(load.env["ROUTELOOM_MESH_PEER_GW"],
+                         str(ROOT / "build-gateway-small/tests/cpp/routeloom_owner_mesh_peer"))
+        self.assertEqual(load.env["ROUTELOOM_MESH_PEER_A"],
+                         str(ROOT / "build-endpoint/tests/cpp/routeloom_owner_mesh_peer"))
+        self.assertEqual(load.env["ROUTELOOM_MESH_PEER_B"],
+                         str(ROOT / "build-relay96/tests/cpp/routeloom_owner_mesh_peer"))
+
     def test_object_rows_are_live_and_use_feature_peers(self):
-        for row_id in ("M10", "P04-O"):
+        for row_id in ("M10", "M10-HFIX-OBJECT", "P04-O"):
             self.assertEqual(self.rows(row_id)[0]["status"], "live")
         steps = check.e2e("pr", "mesh", "build-e2e", None)
         case = "site::owner_mesh::object::mesh_m10_three_hop_with_control"
         obj = next(step for step in steps if case in (step.require or ()))
+        self.assertIn("site::owner_mesh::object::load::mesh_m10_immediate_objects_with_1hz_control",
+                      obj.require)
         self.assertIn("--include-ignored", obj.argv)
         self.assertIn("build-e2e-object", obj.env["ROUTELOOM_MESH_PEER"])
         self.assertEqual(obj.env["ROUTELOOM_MESH_PEER_B"],
@@ -623,7 +636,9 @@ class Scenarios(unittest.TestCase):
                               steps[1].require)
 
     def test_profile_mesh_requires_every_mixed_case(self):
-        step = check.profile_mesh()[-1]
+        step = next(step for step in check.profile_mesh()
+                    if "site::owner_mesh::mesh::mesh_direct_converges_and_delivers"
+                    in (step.require or ()))
         self.assertEqual(set(step.require or ()), {
             "site::owner_mesh::mesh::mesh_direct_converges_and_delivers",
             "site::owner_mesh::mesh::mesh_forced_multihop_relays",

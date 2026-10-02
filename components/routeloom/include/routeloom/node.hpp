@@ -1380,6 +1380,7 @@ class MeshNode {
   }
 
  private:
+  friend struct MeshNodeTestAccess;
   // Marks one MeshNode as "inside an application callback". Every
   // NodeObserver notification runs inside one (via ObserverForwarder), and so
   // does every extended-sink call, so the PowerCoordinator can Busy-reject

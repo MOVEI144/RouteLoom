@@ -7,6 +7,21 @@
 using namespace routeloom;
 using namespace routeloom_test;
 
+namespace routeloom {
+struct MeshNodeTestAccess {
+  static bool fill_retries(MeshNode& node, MonotonicMs now) noexcept {
+    // Previously admitted retries may occupy the reserved slots too.
+    // This plants only scheduler entries; poll/deadline/dispatch stay real.
+    for (std::size_t i = 0; i < MeshNode::tx_queue_capacity(); ++i) {
+      auto job = node.link_control_job(FrameType::RouteUpdate, 2, 30000, now);
+      job.attempts = 1;
+      if (!node.scheduler_.enqueue(std::move(job), node.config_.node, now)) return false;
+    }
+    return true;
+  }
+};
+}  // namespace routeloom
+
 class Sink final : public AppliedEndpointSink {
  public:
   unsigned calls{0};
@@ -51,8 +66,34 @@ bool expired_emit_window_naps() {
   return true;
 }
 
+bool full_scheduler_naps() {
+  SimWorld world;
+  auto* node = world.add(1, 1, 1, 300000);
+  world.add(2);
+  world.start_all();
+  world.link(1, 2, 1, 1);
+  world.net.block_send = +[](NodeId, NodeId, ByteView) { return true; };
+  if (!MeshNodeTestAccess::fill_retries(*node, 0)) return false;
+  MonotonicMs now = 1;
+  if (node->tx_free_slots() != 0) {
+    std::fprintf(stderr, "could not fill scheduler: free=%zu\n", node->tx_free_slots());
+    return false;
+  }
+  for (unsigned i = 0; i < 100; ++i, ++now) {
+    if (!node->poll(now) || node->next_deadline(now) <= now) {
+      std::fprintf(stderr, "full scheduler keeps Owner runnable\n");
+      return false;
+    }
+  }
+  // Retry queued forwarding immediately on the next ordinary Owner pass.
+  world.net.block_send = nullptr;
+  if (!node->poll(now) || world.net.first_pending() == nullptr) return false;
+  return true;
+}
+
 int main() {
   if (!expired_emit_window_naps()) return 1;
+  if (!full_scheduler_naps()) return 1;
   std::vector<std::vector<std::uint8_t>> frames[2];
   std::vector<DeliveryResult> results[2];
   std::vector<std::string> events[2];

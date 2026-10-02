@@ -295,7 +295,7 @@ MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
   // class the per-flow round-robin keeps a light sender from being pinned
   // behind one big continuous flow.
   bool foreground_checked = false;
-  bool foreground_ready = false;
+  bool foreground_pending = false;
   for (std::size_t round = 0; round < kMaxSelectRounds; ++round) {
     bool any = false;
     for (std::size_t offset = 0; offset < kSchedClassCount; ++offset) {
@@ -324,20 +324,31 @@ MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
         const bool object = header.type == FrameType::AppObjectStart ||
                             header.type == FrameType::AppObjectChunk || header.type == FrameType::AppObjectAck;
         if (object && !foreground_checked) {
-          // AppObject uses spare airtime: a ready foreground flow gets the
+          // AppObject uses spare airtime: a queued foreground flow gets the
           // next physical frame even when the DRR cursor points at Bulk.
-          // A blocked peer must not hold up unrelated object transfers.
-          const auto ready = [&](const FlowDesc& candidate) noexcept {
+          const auto pending = [](const FlowDesc& candidate) noexcept {
             const auto* job = candidate.jobs.head;
-            return candidate.sched_class != SchedClass::Bulk && job != nullptr &&
-                   job->not_before_ms <= now_ms && node.tx_admitted_now(*job);
+            return candidate.sched_class != SchedClass::Bulk && job != nullptr;
           };
-          foreground_ready = flows_.find(ready) != nullptr;
-          for (const auto& candidate : overflow_) foreground_ready |= ready(candidate);
+          foreground_pending = !control_.empty() || flows_.find(pending) != nullptr;
+          for (const auto& candidate : overflow_) foreground_pending |= pending(candidate);
+          // A sent foreground exchange still needs its hop/end receipt;
+          // an empty queue does not mean that its airtime turn is over.
+          foreground_pending |= node.deliveries_.find([](const Delivery& delivery) noexcept {
+            return delivery.options.priority != Priority::Bulk && !sleep_terminal(delivery.state);
+          }) != nullptr;
+          foreground_pending |= node.awaiting_hop_.find([](const AwaitingHop& hop) noexcept {
+            return classify(hop.job) != SchedClass::Bulk;
+          }) != nullptr;
           foreground_checked = true;
         }
         if (head->not_before_ms > now_ms ||
-            (object && (now_ms < node.object_send_after_ms_ || foreground_ready))) {
+            (object && (now_ms < node.object_send_after_ms_ || foreground_pending))) {
+          if (object) {
+            // Deliberate spare-airtime holds are not peer congestion.
+            head->not_before_ms = std::max(head->not_before_ms,
+                                           std::max(now_ms, node.object_send_after_ms_));
+          }
           // Link-retry jitter hold (radio.md §8): the job waits for its
           // decorrelation delay — skipped like a window-blocked head and
           // revisited on a later pass.

@@ -22,6 +22,7 @@
 //
 //   T <now u64le>              advance virtual time, run one pump turn,
 //                              report X/B/G/D (see below)
+//   t <session u32le><sequence u64le>  count terminal observer events for this boot
 //   R <src_mac 6><dst_mac 6><frame>
 //                              inject one radio RX frame now (the observed
 //                              destination: broadcast for broadcasts —
@@ -59,6 +60,8 @@
 //                              Device::gateway(), then send once Ready;
 //                              the snapshot tail reports both outcomes
 //   Q                          quit (exit 0)
+//   O <remaining_ms u32le><corrupt_end u8>
+//                              retry the last End envelope with a fresh Link counter
 //   O <next_hop u64le><dst u64le><type u8><minor u8><traffic u8><payload>
 //                              seal one end-protected frame of any type
 //                              (P04: extension types, newer minors) with
@@ -1961,6 +1964,24 @@ int main(int argc, char** argv) {
         write_frame(reply);
         break;
       }
+      case 't': {
+        if (length != 13) fatal("bad t");
+        std::uint32_t session = 0;
+        std::uint64_t sequence = 0;
+        for (unsigned i = 0; i < 4; ++i) session |= std::uint32_t{payload[1 + i]} << (8 * i);
+        for (unsigned i = 0; i < 8; ++i) sequence |= std::uint64_t{payload[5 + i]} << (8 * i);
+        std::uint32_t count = 0;
+        for (const auto& event : observer.delivery_events_) {
+          if (event.id.session != session || event.id.sequence != sequence) continue;
+          if (event.state == DeliveryState::Delivered || event.state == DeliveryState::Failed ||
+              event.state == DeliveryState::Expired || event.state == DeliveryState::CancelledBeforeTx ||
+              event.state == DeliveryState::Indeterminate) ++count;
+        }
+        Bytes reply{'t'};
+        put_u32(reply, count);
+        write_frame(reply);
+        break;
+      }
       case 'R': {
         if (length < 14) fatal("bad R");
         if (!idf_stub::inject_rx(payload.data() + 1, payload.data() + 7, payload.data() + 13,
@@ -2300,6 +2321,22 @@ int main(int argc, char** argv) {
         break;
       }
       case 'O': {
+        static wire::LinkOpenedFrame last_crafted{};
+        if (length == 6) {
+          std::uint32_t remaining = 0;
+          for (unsigned i = 0; i < 4; ++i) remaining |= std::uint32_t{payload[1 + i]} << (8 * i);
+          wire::LinkOpenedFrame retry = last_crafted;
+          if (payload[5] > 1 || retry.protected_payload_size == 0) fatal("bad crafted retry");
+          if (payload[5] != 0) retry.protected_payload[retry.protected_payload_size - 1] ^= 1;
+          wire::EncodedFrame encoded{};
+          status = wire::retry_local(retry, retry.header.next_hop, remaining,
+                                    owner.coordinator().session_provider(), encoded);
+          if (!status) fatal(status.detail);
+          Bytes reply{'o'};
+          reply.insert(reply.end(), encoded.bytes.begin(), encoded.bytes.begin() + encoded.size);
+          write_frame(reply);
+          break;
+        }
         if (length < 20 || length - 20 > kMaxApplicationPayload) fatal("bad O");
         NodeId next_hop = 0, dst = 0;
         for (int i = 0; i < 8; ++i) {
@@ -2324,7 +2361,7 @@ int main(int argc, char** argv) {
         plain.payload_size = length - 20;
         std::memcpy(plain.payload.data(), payload.data() + 20, plain.payload_size);
         wire::EncodedFrame encoded{};
-        status = wire::encode_new(plain, owner.coordinator().session_provider(), encoded);
+        status = wire::encode_new(plain, owner.coordinator().session_provider(), encoded, &last_crafted);
         if (!status) fatal(status.detail);
         Bytes reply{'o'};
         reply.insert(reply.end(), encoded.bytes.begin(),

@@ -36,6 +36,7 @@ constexpr MonotonicMs kRetiredPullWindowMs = 10000;
 }  // namespace
 
 EspNowSecurityOwner::~EspNowSecurityOwner() noexcept {
+  detach_crypto_worker(this);
   (void)lifecycle_signature_.cancel();
   assert(!lifecycle_signature_.pending());
   if (authority_live_) {
@@ -71,6 +72,10 @@ EspNowSecurityOwner::~EspNowSecurityOwner() noexcept {
 
 sdkv1::MembershipLifecycle& EspNowSecurityOwner::lifecycle() noexcept {
   return *reinterpret_cast<sdkv1::MembershipLifecycle*>(lifecycle_box_.data());
+}
+
+const sdkv1::MembershipLifecycle& EspNowSecurityOwner::lifecycle() const noexcept {
+  return *reinterpret_cast<const sdkv1::MembershipLifecycle*>(lifecycle_box_.data());
 }
 
 // --- P6 lifecycle ports -----------------------------------------------------
@@ -804,15 +809,19 @@ MonotonicMs EspNowSecurityOwner::next_deadline(const MonotonicMs now_ms) const n
   // Dev has no handshake, bank expiry or lifecycle poll work. Channel
   // operations retain the compatibility cadence until their next event.
   return tune_.active ? (now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2) : UINT64_MAX;
-#elif defined(ESP_PLATFORM)
-  // Member lifecycle and discovery still require the compatibility cadence;
-  // no slower schedule can extend this image's wait.
-  return now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2;
 #else
+  // Ready results are runnable work, including boot/lifecycle verification.
+  if (crypto_worker_ != nullptr && crypto_worker_->ready()) return now_ms;
+  const bool computing = crypto_worker_ != nullptr && !crypto_worker_->idle();
   MonotonicMs due = coordinator().next_deadline(now_ms);
-  // Authority transports and channel tuning retain fallback while their
-  // pending slots do not publish a complete deadline contract.
-  if (lifecycle_live_ || tune_.active || coordinator().mode() == sdkv1::CoordinatorMode::Member) {
+  if (lifecycle_live_ && lifecycle_booted_) {
+    const MonotonicMs lifecycle_due = lifecycle().next_deadline();
+    if (lifecycle_due < due) due = lifecycle_due;
+  }
+  // Channel tuning retains its radio cadence. Crypto results wake Owner;
+  // an unfinished loan must not add a result-polling cadence of its own.
+  if (tune_.active || (!computing &&
+      (lifecycle_live_ || coordinator().mode() == sdkv1::CoordinatorMode::Member))) {
     const MonotonicMs fallback = now_ms > UINT64_MAX - 2 ? UINT64_MAX : now_ms + 2;
     if (fallback < due) due = fallback;
   }

@@ -578,6 +578,41 @@ void test_terminal_reserve() {
   CHECK(r->dedup_stats().refused_terminal_reserve == 2);
 }
 
+// An invalid End under a valid Link must not reclaim an expired terminal
+// pin or acquire reply work. Only an authenticated admission uses the quota.
+void test_invalid_end_does_not_reclaim_terminal_pin() {
+  Harness h;
+  MeshNode* terminal = h.add(1);
+  (void)h.add(50);
+  h.link(1, 50);
+  for (std::uint64_t i = 0; i < kPins; ++i) {
+    inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 50, 100 + i));
+    drive_terminal_receipt(h, 1, 50);
+  }
+  const auto before = terminal->dedup_stats();
+  CHECK(before.admitted_terminal == kPins);
+  // Advance without polling: RX arrives before the periodic expiry sweep.
+  h.now += kDedupHardCapMs;
+  const auto frame = craft_terminal(h.cipher, 50, 1, 50, 900);
+  wire::LinkOpenedFrame sealed{};
+  CHECK_OK(wire::open_link(frame.view(), 1, h.cipher, sealed));
+  sealed.protected_payload[sealed.protected_payload_size - 1] ^= 1;
+  wire::EncodedFrame invalid{};
+  CHECK_OK(wire::retry_local(sealed, 1, 5000, h.cipher, invalid));
+  inject(h, 1, 50, invalid);
+  CHECK(h.observer(1)->has_diag("test tag mismatch"));
+  CHECK(terminal->dedup_stats().admitted_terminal == before.admitted_terminal);
+  CHECK(terminal->dedup_stats().expired == before.expired);
+  CHECK(terminal->txn_in_flight() == 0);
+  CHECK(h.ports.at(1)->leases().live_use_count() == 0);
+  CHECK(h.observer(1)->messages.size() == kPins);
+  // The valid envelope can now reclaim exactly one expired pin and deliver.
+  inject(h, 1, 50, frame);
+  CHECK(terminal->dedup_stats().admitted_terminal == before.admitted_terminal + 1);
+  CHECK(terminal->dedup_stats().expired == before.expired + 1);
+  CHECK(h.observer(1)->messages.size() == kPins + 1);
+}
+
 // #39: the reserve bounds the number of terminal PINS, not the pool size. A
 // pool crowded with evictable (Resolved) transit records must not refuse
 // delivery to this node's own application: the terminal admission reclaims
@@ -1155,7 +1190,7 @@ void test_delivery_table_terminal_eviction() {
   MessageId extra{};
   const auto refused = a->send(2, payload_view(), best, h.now, extra);
   CHECK(!refused);
-  CHECK(refused.code == StatusCode::NoCapacity);
+  CHECK(refused.code == StatusCode::Busy);
   CHECK(a->dedup_stats().delivery_terminal_evicted == 0);
 
   // Complete all eight (best-effort resolves at TX success) -> terminal.
@@ -1370,6 +1405,7 @@ int main() {
   test_eviction_order();
   test_full_pool_honest_refusal();
   test_terminal_reserve();
+  test_invalid_end_does_not_reclaim_terminal_pin();
   test_terminal_admits_over_resolved_crowd();
   test_upstream_cap();
   test_evidence_cap_and_replay();

@@ -1535,6 +1535,8 @@ void test_port_full_and_tx_result() {
   CHECK(client.advance(start, 1000));
   CHECK(port.sent.empty());  // R1 staged, not lost
   CHECK(client.snapshot().tx_sent == 0);
+  CHECK(client.next_deadline() == 0);
+  CHECK(client.next_deadline(false) == 1000 + 5000);
   port.full = false;
   sdkv1::AuthorityInput tick{};
   tick.kind = sdkv1::AuthorityInputKind::Tick;
@@ -1582,6 +1584,8 @@ void test_staged_confirm_and_one_pending_ack() {
   rx.rx.bytes = ByteView{r2[0].bytes.data(), r2[0].bytes.size()};
   CHECK(client.advance(rx, 1000));
   CHECK(port.sent.size() == 1);  // R3 left, JoinConfirm is still staged.
+  CHECK(client.next_deadline() == 0);
+  CHECK(client.next_deadline(false) == 1000 + 15000);
   if (port.sent.empty()) return;
   (void)fake.on_carrier(port.sent[0].kind,
                         ByteView{port.sent[0].bytes.data(), port.sent[0].bytes.size()}, 1000);

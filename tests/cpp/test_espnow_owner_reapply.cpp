@@ -24,6 +24,20 @@
 
 namespace routeloom::sdkv1 {
 struct SecurityCoordinatorTestAccess {
+  static Status queue_crypto(SecurityCoordinator& coordinator, CryptoWorker& worker,
+                             MonotonicMs now) noexcept {
+    coordinator.deps_.crypto_worker = &worker;
+    auto& engine = coordinator.member().engine;
+    const Status bound = engine.bind_crypto_worker(&worker);
+    if (!bound) return bound;
+    HandshakeRequest request{};
+    request.scope = SecurityScope::EndToEnd;
+    request.peer = 0x00A1000000000002ULL;
+    const Status submitted = engine.request(request, now);
+    // A second link demand cannot advance until the shared mailbox frees.
+    coordinator.bank_.note_demand(SecurityScope::Link, request.peer + 1);
+    return submitted;
+  }
   static bool apply_pending(const SecurityCoordinator& coordinator) noexcept {
     return coordinator.member_apply_pending_;
   }
@@ -38,6 +52,10 @@ struct SecurityCoordinatorTestAccess {
 
 namespace routeloom::espnow {
 struct EspNowSecurityOwnerTestAccess {
+  static void arm_poll(EspNowSecurityOwner& owner, CryptoWorker& worker) noexcept {
+    owner.crypto_worker_ = &worker;
+    owner.booted_ = true;
+  }
   static void install_coordinator(EspNowSecurityOwner& owner,
                                   const sdkv1::SecurityCoordinator::Deps& deps) noexcept {
     owner.config_.log_tag = "owner_reapply";
@@ -597,6 +615,44 @@ routeloom::PowerEvents& device_sleep_events(routeloom::Device& device) noexcept 
   return routeloom::DeviceTestAccess::sleep_events(device);
 }
 int run_device_sleep_scenarios();
+int run_owner_crypto_wait_scenario(EspNowSecurityOwner& owner, EspNowRuntime& runtime,
+                                   CryptoWorker& worker, MonotonicMs now, bool cancel);
+
+void test_owner_crypto_wait(bool cancel) {
+  idf_stub::reset();
+  Stores stores{};
+  CHECK(stores.init());
+  CryptoWorker worker;
+  EspNowSecurityOwner owner{};
+  EspNowSecurityOwnerTestAccess::install_coordinator(owner, stores.deps(owner));
+  routeloom_test::CapturingObserver observer{};
+  EspNowRuntime runtime(radio_config(), owner.session_provider(), observer);
+  EspNowSecurityOwnerTestAccess::attach_runtime(owner, runtime);
+  CHECK(runtime.initialize());
+  CoordinatorEvent boot{};
+  boot.kind = CoordinatorEventKind::Boot;
+  boot.now = kStart;
+  boot.boot_witness = kBoot;
+  boot.boot_prepared = true;
+  CHECK(owner.coordinator().step(boot));
+  MonotonicMs now = kStart;
+  CoordinatorMemberConfig member{};
+  CHECK(take_apply(owner.coordinator(), now, member));
+  EspNowSecurityOwnerTestAccess::apply(owner, member);
+  CHECK(poll(owner.coordinator(), ++now));
+  CoordinatorAction discovery{};
+  CHECK(owner.coordinator().take_action(discovery));
+  CHECK(discovery.kind == CoordinatorActionKind::StartMemberDiscovery);
+  EspNowSecurityOwnerTestAccess::arm_poll(owner, worker);
+  runtime.bind_wake_task(xTaskGetCurrentTaskHandle());
+  worker.bind(nullptr, nullptr, +[](void* context) noexcept {
+    static_cast<EspNowRuntime*>(context)->notify_owner();
+  }, &runtime);
+  CHECK(SecurityCoordinatorTestAccess::queue_crypto(owner.coordinator(), worker, now));
+  CHECK(!worker.idle());
+  failures += run_owner_crypto_wait_scenario(owner, runtime, worker, now, cancel);
+  runtime.stop();
+}
 void test_dev_profile_survives_radio_failure() {
   idf_stub::reset();
   Stores stores{};
@@ -648,5 +704,6 @@ int main() {
   test_device_post_during_runtime_publication();
   test_device_begin_clears_key_on_failure();
   test_dev_profile_survives_radio_failure();
+  for (const bool cancel : {false, true}) test_owner_crypto_wait(cancel);
   return failures == 0 ? 0 : 1;
 }

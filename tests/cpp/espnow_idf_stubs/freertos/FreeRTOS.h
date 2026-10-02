@@ -9,6 +9,7 @@ typedef int BaseType_t;
 typedef unsigned int UBaseType_t;
 typedef unsigned int TickType_t;
 typedef uint8_t StackType_t;
+struct StaticTask_t {};
 typedef void *TaskHandle_t;
 typedef void *QueueHandle_t;
 

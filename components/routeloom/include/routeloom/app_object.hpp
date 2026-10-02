@@ -89,10 +89,14 @@ class AppObject final : public ConfigEndpointSink {
   };
   struct Record {
     Key key{};
-    object_wire::Start start{};
+    object_wire::Digest digest{};
     MonotonicMs until_ms{0};
-    object_wire::AckStatus status{object_wire::AckStatus::Incomplete};
     std::uint64_t bitmap{0};
+    std::uint16_t total{0};
+    std::uint16_t app_tag{0};
+    std::uint8_t chunks{0};
+    std::uint8_t encoding{0};
+    object_wire::AckStatus status{object_wire::AckStatus::Incomplete};
     bool used{false};
     bool ack_pending{false};
   };
@@ -117,6 +121,7 @@ class AppObject final : public ConfigEndpointSink {
     object_wire::Start start{};
     MonotonicMs deadline_ms{0};
     MonotonicMs progress_ms{0};
+    MonotonicMs retry_after_ms{0};
     std::uint32_t tx_epoch{0};
     std::uint32_t rx_epoch{0};
     std::uint32_t destination_boot{0};
@@ -125,7 +130,9 @@ class AppObject final : public ConfigEndpointSink {
     NetworkId network{0};
     std::uint64_t acked{0};
     std::uint64_t emitted{0};
-    std::array<Flight, 2> flight{};
+    // Keep at most one object frame ahead of a foreground exchange.
+    std::array<Flight, 1> flight{};
+    std::uint8_t busy_retries{0};
     bool active{false};
     bool manifest_acked{false};
     bool ever_sent{false};
@@ -149,7 +156,8 @@ class AppObject final : public ConfigEndpointSink {
   ObjectObserver& observer_;
   ConfigEndpointSink* fallback_{nullptr};
   std::array<Rx, ROUTELOOM_APP_OBJECT_RX_SLOTS> rx_{};
-  std::array<Record, 4> records_{};
+  // Completion metadata never retains a payload loan or evicts a live record.
+  std::array<Record, 12> records_{};
   // Separate naturally aligned peer IDs avoid tail padding per floor.
   // Both arrays use the same index and retire together with the context.
   std::array<NodeId, profile::kEndSessions> floor_peers_{};

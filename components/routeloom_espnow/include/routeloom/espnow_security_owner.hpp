@@ -99,6 +99,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   sdkv1::SecurityCoordinator& coordinator() noexcept;
   const sdkv1::SecurityCoordinator& coordinator() const noexcept;
   sdkv1::MembershipLifecycle& lifecycle() noexcept;
+  const sdkv1::MembershipLifecycle& lifecycle() const noexcept;
   // Late bindings (each once, before boot): the radio (RLD1 TX, channel
   // operations, member node adoption) and the USB bridge (LocalJoin +
   // relay ups/downs). A radio-only node skips the bridge: relay ups
