@@ -75,6 +75,20 @@ bool "HIL log of the ESP-NOW LR250 driver rate call"
             confirmation still requires an independent sniffer.
 ```
 
+### CONFIG_ROUTELOOM_HIL_RX_ALLOW_MACS
+
+```text
+string "HIL receive source MAC allow-list (empty disables)"
+        default ""
+        help
+            Bench-only topology control before discovery and Wire processing.
+            Accept only these senders, including broadcast frames. Use up to
+            8 comma-separated colon-separated MACs without spaces, for example
+            aa:bb:cc:dd:ee:ff,11:22:33:44:55:66. Invalid lists fail the build.
+            Parsed at compile time; empty removes the filter and its table.
+            The existing DROP_RX_MAC filter still applies after this list.
+```
+
 ### CONFIG_ROUTELOOM_HIL_DROP_RX_MAC
 
 ```text

@@ -49,6 +49,17 @@ menu "RouteLoom"
             each peer registration. This proves driver acceptance; air-rate
             confirmation still requires an independent sniffer.
 
+    config ROUTELOOM_HIL_RX_ALLOW_MACS
+        string "HIL receive source MAC allow-list (empty disables)"
+        default ""
+        help
+            Bench-only topology control before discovery and Wire processing.
+            Accept only these senders, including broadcast frames. Use up to
+            8 comma-separated colon-separated MACs without spaces, for example
+            aa:bb:cc:dd:ee:ff,11:22:33:44:55:66. Invalid lists fail the build.
+            Parsed at compile time; empty removes the filter and its table.
+            The existing DROP_RX_MAC filter still applies after this list.
+
     config ROUTELOOM_HIL_DROP_RX_MAC
         string "HIL drop frames received from one peer MAC (empty disables)"
         default ""
