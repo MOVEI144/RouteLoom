@@ -54,6 +54,8 @@ RRS1は自己認証objectなので、authority以外のmemberが運んでもよ�
 3. 受理したmemberは、自分のrs_epochが小さい近隣に次のidle refreshで知らせる（Control subtype `StateEpochs`：`ver|sub 0x61|site_epoch u32|applied_rs u32|gk_epoch u32`＝14B、1hop。P6-1で凍結）。取得要求は`RrsRequest`（`ver|sub 0x62|site_epoch u32|have_rs u32`＝10B）。
 4. 取得要求は近隣あたり1分に1回、同時1件（交換全体も1+1：同bufferの二重追跡なし）。
 
+送信枠は受付から15秒（取得側のfetch window）で失敗として解放する。portの拒否、途中のACK、再送でもこの期限を延ばさず、到達できないpeerが他のpeerへの配布を塞ぎ続けないようにする。
+
 これによりauthorityから全memberへのfan-outが無くても、連結成分内ではhop数×(idle refresh間隔＋転送時間)で広がる。分断成分には届かない（§6）。
 
 ## 5. 受理したmemberの動作

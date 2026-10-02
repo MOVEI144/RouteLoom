@@ -1077,6 +1077,10 @@ impl Dispatcher {
         let lease = BootLease(lease_bytes);
         let mut sorted = ops;
         sorted.sort_by_key(|op| op.seq);
+        // Retry timestamps belong only to retained operations. Reuse the
+        // sorted store snapshot so a long-lived lease cannot grow this cache.
+        self.last_attempt
+            .retain(|seq, _| sorted.binary_search_by_key(seq, |op| op.seq).is_ok());
         let mut highwater = sorted
             .iter()
             .filter_map(|op| op.dispatch.as_ref())
@@ -2831,6 +2835,7 @@ pub fn dispatch_loop(state: Arc<State>, outbound: mpsc::SyncSender<Outbound>) {
 
 #[cfg(test)]
 mod tests {
+    mod resources;
     use super::*;
 
     #[test]
