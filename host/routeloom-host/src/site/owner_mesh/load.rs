@@ -31,7 +31,27 @@ fn mesh_m08_repeated_bursts_account_for_every_send() {
     else {
         return;
     };
+    // Start the load after the full topology and its improvement hold settle.
+    world.pump_until(2400, |snaps| {
+        snaps.iter().enumerate().all(|(index, snap)| {
+            snap.phases
+                .iter()
+                .enumerate()
+                .all(|(peer, &phase)| peer == index || phase == PHASE_REACHABLE)
+        })
+    });
+    world.pump_until(600, |_| false);
     world.peers[0].receipts();
+    let routes: Vec<_> = world
+        .peers
+        .iter_mut()
+        .skip(1)
+        .map(|peer| peer.next_hop(testkit::GATEWAY))
+        .collect();
+    assert!(
+        routes.iter().all(|&hop| hop == testkit::GATEWAY),
+        "full mesh direct gateway routes settled"
+    );
     let mut expected = std::collections::BTreeMap::new();
     let mut received = std::collections::BTreeSet::new();
     let mut terminal = std::collections::BTreeMap::new();
@@ -58,6 +78,9 @@ fn mesh_m08_repeated_bursts_account_for_every_send() {
         // Keep the 10 s burst cadence and allow every send its 30 s lifetime.
         for _ in 0..400 {
             world.step(25);
+            for (peer, &hop) in world.peers.iter_mut().skip(1).zip(&routes) {
+                assert_eq!(peer.next_hop(testkit::GATEWAY), hop, "no route flap");
+            }
             assert!(
                 world
                     .snaps

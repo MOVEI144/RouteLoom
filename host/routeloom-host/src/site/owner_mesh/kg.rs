@@ -74,7 +74,14 @@ fn load_world(tag: &str, nodes: usize) -> Option<MeshWorld> {
         edges: (1..nodes)
             .map(|n| {
                 (
-                    if nodes == 5 && n == 2 {
+                    if nodes == 31 {
+                        match n {
+                            1..=3 => 0,
+                            4..=9 => 1 + (n - 4) / 2,
+                            10..=20 => 4 + (n - 10) % 6,
+                            _ => 10 + n - 21,
+                        }
+                    } else if nodes == 5 && n == 2 {
                         1
                     } else if n < 3 {
                         0
@@ -235,6 +242,86 @@ fn mesh_k01_periodic_latest_status_and_events() {
 }
 
 #[test]
+fn mesh_k02_owner_management_and_periodic_load() {
+    let Some(mut world) = load_world("k02-owner", 31) else {
+        return;
+    };
+    let members = 21..31;
+    let mut last_view = [world.now; 31];
+    let mut seen = std::collections::BTreeSet::new();
+    let mut expected = 0;
+    let mut content_received = 0;
+    world.switch.management_us.fill(0);
+    for peer in &mut world.peers {
+        peer.receipts();
+    }
+    let start = world.now;
+    for slot in 0..60_u64 {
+        if slot == 12 || slot == 13 {
+            world.switch.set_audible(0, 2, slot == 13);
+            world.switch.set_audible(2, 0, slot == 13);
+        }
+        for index in members.clone() {
+            let mut view = [0_u8; 10];
+            view[..8].copy_from_slice(&slot.to_be_bytes());
+            world.peers[0].app_send_with(world.nodes[index], 0, 1, &view);
+            if slot % 3 == 0 {
+                let mut status = [0_u8; 34];
+                status[..8].copy_from_slice(&slot.to_be_bytes());
+                world.peers[index].app_send(testkit::GATEWAY, &status);
+                expected += 1;
+            }
+            if slot % 18 == 0 {
+                let mut event = [0_u8; 34];
+                event[..8].copy_from_slice(&slot.to_be_bytes());
+                event[33] = 1;
+                world.peers[index].app_send(testkit::GATEWAY, &event);
+                expected += 1;
+            }
+            if slot % 12 == 0 {
+                world.peers[0].app_send_with(world.nodes[index], 0, 0, &[slot as u8; 127]);
+            }
+            world.step(25);
+        }
+        let until = start + (slot + 1) * 5_000;
+        while world.now < until {
+            world.step(25);
+            for index in members.clone() {
+                for (_, _, _, payload) in world.peers[index].receipts() {
+                    match payload.len() {
+                        10 => last_view[index] = world.now,
+                        127 => content_received += 1,
+                        _ => panic!("unexpected display payload"),
+                    }
+                }
+                assert!(
+                    world.now - last_view[index] < 20_000,
+                    "Owner view freshness"
+                );
+            }
+            for (source, session, seq, payload) in world.peers[0].receipts() {
+                assert_eq!(payload.len(), 34);
+                assert!(
+                    seen.insert((source, session, seq)),
+                    "unique reliable status"
+                );
+            }
+        }
+    }
+    assert!(seen.len() * 1000 >= expected * 995, "Owner status >=99.5%");
+    let total = world.switch.management_us.iter().sum::<u64>() * 1000 / (world.now - start);
+    eprintln!(
+        "K02 Owner: status/events={}/{expected}, content={content_received}, management={total} us/s",
+        seen.len()
+    );
+    assert!(total <= 100_000, "all management including discovery/HELLO");
+    assert!(
+        total <= 1000 * world.peers.len() as u64,
+        "mean management <=1000 us/s/node"
+    );
+}
+
+#[test]
 fn mesh_k05_cursor_replay_gap_and_epoch_change() {
     let Some(mut world) = load_world("k05", 3) else {
         return;
@@ -385,10 +472,16 @@ fn mesh_k03_simultaneous_latest_and_group() {
         ),
         world.now,
     );
-    assert_ne!(
-        result(&outcome).get("device_outcome"),
-        Some(&Json::Null),
-        "full destination has an explicit device outcome: {outcome:?}"
+    let device = result(&outcome)
+        .get("device_outcome")
+        .expect("device outcome");
+    assert_eq!(
+        device.get("state").and_then(Json::as_str),
+        Some("submit_refused")
+    );
+    assert_eq!(
+        device.get("reason").and_then(Json::as_str),
+        Some("delivery table full")
     );
     assert_eq!(accepted + refused, nodes - 1);
 }

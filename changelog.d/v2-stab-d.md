@@ -3,3 +3,5 @@
 - Coalesce scoped metric and sequence refreshes into periodic route advertisements while retaining immediate topology repair.
 - Accept epoch-qualified API1 operation networks, use the admission context's monotonic clock, and retain a gateway refusal when a skipped dispatch position is reclaimed.
 - Enable congestion and periodic traffic coverage through real Owners and the product-timer mesh model, including bounded admission, cursor restart and group traffic.
+- Reuse matched, current-binding HOP_ACCEPT round trips for reachable neighbor leases, refresh idle peers at 20 seconds, and reduce scoped announces after the initial convergence window.
+- Probe terminal reply capacity before consuming an End replay counter, so a refused Reliable frame can retry the same round after queue pressure clears.

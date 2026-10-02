@@ -55,7 +55,8 @@ and the prepare job still need measurement on GitHub runners.
 M08, K01/K03/K05 and M01-T3 run through real Owners. M08 checks the
 7/8/9 admission boundary, accounts for every burst request, verifies each
 Delivered result against a unique receive, and requires at least 99% sender
-receipts, active membership and a 30-second queue drain. K01 covers two/three
+receipts, stable next hops, active membership and a 30-second queue drain.
+The full topology settles before M08 begins its five-minute load. K01 covers two/three
 hops, 127-byte content, periodic status/events and seeded noise. K03 exercises
 ALL group delivery, admission-response replay and a full gateway delivery
 table affecting the last destination. K05 additionally uses the documented
@@ -64,7 +65,9 @@ consumer and production API1 socket for durable cursor restart coverage.
 K02 runs the 31-node product-timer model with churn, continuous view freshness
 and the authoritative mean per-node/total management airtime limits. Stable
 metric/sequence changes use periodic advertisements; topology repair stays
-triggered. The mesh daemon calls the production API1 handler on its virtual
+triggered. A 31-node real-Owner row also measures every discovery, probe,
+HELLO and route transmission once per sender, including failed emissions,
+while checking periodic view freshness and reliable status through churn. The mesh daemon calls the production API1 handler on its virtual
 clock; the consumer cases cover socket framing. Nightly five/32-node and
 30-minute configurations are dry-run coverage until executed. The 24-hour,
 sleep and object variants remain with V2-15/16/18/19. No dry-run establishes

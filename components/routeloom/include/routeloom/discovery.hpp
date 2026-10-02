@@ -354,7 +354,7 @@ struct DiscoveryConfig {
   MonotonicMs migration_until_ms{0};
   std::uint32_t candidate_ttl_ms{5000};       // contracts candidate_ttl_ms
   std::uint32_t awake_lease_ms{30000};        // awake_neighbor_lease_ms
-  std::uint32_t idle_refresh_ms{10000};       // idle_refresh_ms
+  std::uint32_t idle_refresh_ms{20000};       // idle_refresh_ms
   std::uint32_t cookie_bucket_ms{2000};       // cookie time bucket
   std::uint32_t auth_timeout_ms{5000};        // bound on one exchange
   std::uint32_t offer_window_ms{discovery_const::kOfferSlots *
@@ -785,6 +785,7 @@ class NeighborDiscovery {
                      const autonomy::BootstrapAuthBody& auth, MonotonicMs now_ms) noexcept;
 
   // Wire-lane handlers (post-BIND probes only).
+  void refresh_lease(Neighbor& neighbor, MonotonicMs now_ms, std::uint32_t lease_ms) noexcept;
   void handle_probe(Neighbor& neighbor, ByteView payload, MonotonicMs now_ms) noexcept;
   void send_pending_result(Neighbor& neighbor, MonotonicMs now_ms) noexcept;
   void clear_pending_result(BindingId binding) noexcept;
