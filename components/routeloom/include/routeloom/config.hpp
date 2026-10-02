@@ -197,10 +197,16 @@ struct ConfigPermitContext {
 // is a contract violation, and neither a fixed `verified=true` nor
 // bind_operation_payload() is a substitute (04 §4.3). Development
 // providers stay EXPERIMENTAL and are surfaced as such.
+namespace sdkv1 {
+class Es256Verifier;
+}
+
 class ConfigAuthorityVerifier {
  public:
   virtual ~ConfigAuthorityVerifier() = default;
   virtual bool ready() const noexcept = 0;
+  virtual void bind_signature_verifier(const sdkv1::Es256Verifier*) noexcept {}
+  virtual bool verification_pending() const noexcept { return false; }
   virtual SecurityProfile security_profile() const noexcept {
     return SecurityProfile::Development;
   }
@@ -489,6 +495,11 @@ class ConfigJournal {
   //                             mint from unknown counters.
   Status initialize(MonotonicMs now_ms) noexcept;
 
+  void bind_signature_verifier(const sdkv1::Es256Verifier* verifier) noexcept {
+    verifier_.bind_signature_verifier(verifier);
+  }
+  void cancel_verification() noexcept { verification_active_ = false; }
+
   // Control22 handlers. The challenge carries a fresh nonce128, this boot
   // incarnation, the current decision revision and the active hash with a
   // local monotonic expiry <= kConfigChallengeMaxMs — never a wall-clock
@@ -755,6 +766,10 @@ class ConfigJournal {
   ConfigJournalStorage& storage_;
   SecurityFloorStore& floor_;
   ConfigAuthorityVerifier& verifier_;
+  Digest256 verification_hash_{};
+  std::uint32_t verification_epoch_{0};
+  bool verification_active_{false};
+  bool verification_recovery_{false};
   EntropySource& entropy_;
   ConfigRateLimiter& rate_limiter_;
   ConfigProvider* provider_;

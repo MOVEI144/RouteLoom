@@ -81,6 +81,8 @@ Status Device::begin_remote_config(const DeviceConfig& config, const keys::Secre
   MeshNode& node = runtime_->node();
   static DeviceRemoteConfig rc(node);
   rc.entropy = &entropy;
+  const Status bound = rc.target.bind_crypto_worker(owner_->crypto_worker());
+  if (!bound) return bound;
   Status status = rc.store.open("rlcfg");
   if (!status) ESP_LOGE(tag_, "config store open failed: %s", status.detail);
   status = rc.provider.open("rlcfgv", tag_);
@@ -125,6 +127,7 @@ Status Device::begin_remote_config(const DeviceConfig& config, const keys::Secre
 
 void Device::poll_remote_config(const MonotonicMs now_ms) noexcept {
   DeviceRemoteConfig& rc = *remote_config_;
+
 #if ROUTELOOM_DEVICE_MEMBER
   // The site's SAK and the adopted NodeId exist only after adoption: bind
   // once the member node runs. A failed bind leaves intake off this boot.

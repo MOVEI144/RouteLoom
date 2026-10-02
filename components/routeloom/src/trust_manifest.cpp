@@ -5,10 +5,6 @@
 #include "routeloom/byte_io.hpp"
 #include "routeloom/discovery_scope.hpp"  // sha256
 
-extern "C" {
-#include "uECC.h"
-}
-
 namespace routeloom {
 namespace {
 
@@ -203,8 +199,8 @@ Status trust_manifest_assemble(
   return Status::success();
 }
 
-Status trust_manifest_accept(TrustStore& store, const ByteView object,
-                             SecurityFloorStore& floor) noexcept {
+Status trust_manifest_accept(TrustStore& store, const ByteView object, SecurityFloorStore& floor,
+                             const sdkv1::Es256Verifier& verifier) noexcept {
   if (!store.initialized()) {
     return Status::error(StatusCode::InvalidState, "trust store not initialized");
   }
@@ -384,9 +380,12 @@ Status trust_manifest_accept(TrustStore& store, const ByteView object,
   if (!status) return status;
   ScopeDigest digest{};
   sha256(to_verify.view(), digest);
-  if (uECC_verify(anchor->pubkey.data(), digest.data(),
-                  static_cast<unsigned>(digest.size()), parts.signature.data,
-                  uECC_secp256r1()) == 0) {
+  sdkv1::Es256Signature signature{};
+  std::memcpy(signature.data(), parts.signature.data, signature.size());
+  bool verified = false;
+  status = verifier.progress_digest(anchor->pubkey, digest, signature, verified);
+  if (!status) return status;
+  if (!verified) {
     return Status::error(StatusCode::AuthorizationFailed, "manifest signature invalid");
   }
 

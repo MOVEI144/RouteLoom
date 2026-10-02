@@ -9,6 +9,17 @@ app 固有の Kconfig は対象外。秘密の値は reference に展開しな�
 
 生成元：[components/routeloom/Kconfig](../../components/routeloom/Kconfig)
 
+### CONFIG_ROUTELOOM_CRYPTO_WORKER
+
+```text
+bool "Run EDHOC and COSE P-256 on a low-priority worker"
+        default y
+        help
+            A static single-job worker keeps the Owner available for
+            forwarding, ACKs and deadlines during P-256 operations.
+            Disable only for the synchronous comparison workload.
+```
+
 ### CONFIG_ROUTELOOM_TRACE
 
 ```text

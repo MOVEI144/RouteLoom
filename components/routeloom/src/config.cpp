@@ -1514,13 +1514,30 @@ Status ConfigJournal::submit_recovery(const ByteView object, const MonotonicMs n
   bool verified = false;
   // The shared expensive-verify intake gate — same device-level bound as
   // the permit path; a recovery storm cannot monopolize the Owner either.
-  if (verifier_.verify_is_expensive() &&
+  Digest256 verification_hash{};
+  sha256(object, verification_hash);
+  if (verification_active_ &&
+      (verification_hash_ != verification_hash || !verification_recovery_)) {
+    return Status::error(StatusCode::Busy, "config verification active");
+  }
+  if (!verification_active_ && verifier_.verify_is_expensive() &&
       !rate_limiter_.consume_expensive_verify(now_ms)) {
     fill_verdict(verdict, phase_, ConfigReason::Capacity);
     ++stats_.verify_intake_refusals;
     return Status::error(StatusCode::Busy, "recovery verify intake budget");
   }
+  if (!verification_active_) {
+    verification_hash_ = verification_hash;
+    verification_epoch_ = verifier_.policy_epoch();
+    verification_recovery_ = true;
+    verification_active_ = true;
+  }
   Status status = verifier_.verify_recovery(context, object, canonical, verified);
+  if (verifier_.verification_pending() &&
+      (status.code == StatusCode::WouldBlock || status.code == StatusCode::Busy)) {
+    return Status::error(StatusCode::WouldBlock, "config verification computing");
+  }
+  verification_active_ = false;
   if (!status) {
     fill_verdict(verdict, phase_, ConfigReason::AuthorityDenied);
     ++stats_.permits_denied;
@@ -1536,7 +1553,10 @@ Status ConfigJournal::submit_recovery(const ByteView object, const MonotonicMs n
   // The policy epoch this verdict was verified under — re-checked before
   // the floor reservation commits the recovery (same rotation race as the
   // permit path's DECIDED recheck).
-  const std::uint32_t verify_epoch = verifier_.policy_epoch();
+  const std::uint32_t verify_epoch = verification_epoch_;
+  if (verify_epoch != verifier_.policy_epoch()) {
+    return Status::error(StatusCode::Expired, "config verification policy changed");
+  }
 
   endpoint::ConfigRecoveryIntent& intent = recovery_intent_;
   status = endpoint::config_recovery_decode(canonical.view(), intent);
@@ -2035,13 +2055,29 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
   // across every attached journal — no per-namespace bypass. A refusal is
   // CAPACITY, not a denial — it consumes no revision and no acceptance
   // budget.
-  if (verifier_.verify_is_expensive() &&
+  Digest256 verification_hash{};
+  sha256(permit, verification_hash);
+  if (verification_active_ && (verification_hash_ != verification_hash || verification_recovery_)) {
+    return Status::error(StatusCode::Busy, "config verification active");
+  }
+  if (!verification_active_ && verifier_.verify_is_expensive() &&
       !rate_limiter_.consume_expensive_verify(now_ms)) {
     fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::Capacity);
     ++stats_.verify_intake_refusals;
     return Status::error(StatusCode::Busy, "permit verify intake budget");
   }
+  if (!verification_active_) {
+    verification_hash_ = verification_hash;
+    verification_epoch_ = verifier_.policy_epoch();
+    verification_recovery_ = false;
+    verification_active_ = true;
+  }
   Status status = verifier_.verify_permit(context, permit, canonical, verified);
+  if (verifier_.verification_pending() &&
+      (status.code == StatusCode::WouldBlock || status.code == StatusCode::Busy)) {
+    return Status::error(StatusCode::WouldBlock, "config verification computing");
+  }
+  verification_active_ = false;
   if (!status) {
     fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::AuthorityDenied);
     ++stats_.permits_denied;
@@ -2057,7 +2093,10 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
   // the DECIDED commit so a rotation landing in between (a provider
   // callback reentering the trust store, a future async verifier) cannot
   // smuggle an old-epoch verdict into a new-epoch decision.
-  const std::uint32_t verify_epoch = verifier_.policy_epoch();
+  const std::uint32_t verify_epoch = verification_epoch_;
+  if (verify_epoch != verifier_.policy_epoch()) {
+    return Status::error(StatusCode::Expired, "config verification policy changed");
+  }
 
   endpoint::ConfigCommand& command = submit_txn_.command;
   status = endpoint::config_command_decode(canonical.view(), command);

@@ -35,6 +35,7 @@
 #include "routeloom/endpoint_wire.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/security_floor.hpp"
+#include "routeloom/signature_progress.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/trust_manifest.hpp"
 #include "routeloom/trust_store.hpp"
@@ -133,6 +134,9 @@ class ConfigTarget final : public ConfigEndpointSink {
   // refused by the owning journal's own validation. Journals are
   // caller-owned and must outlive this.
   Status add_journal(std::uint16_t config_namespace, ConfigJournal& journal) noexcept;
+  // Bind while idle; drain cancellation before destroying the target or worker.
+  Status bind_crypto_worker(CryptoWorker* worker) noexcept;
+  Status cancel_crypto() noexcept;
   // Attach the trust-management connection kind-5 intake and the trust
   // status query answer from. Optional: without it kind-5 manifests are
   // refused and subtype-5 queries denied. Caller-owned; must outlive this.
@@ -178,6 +182,10 @@ class ConfigTarget final : public ConfigEndpointSink {
   // reserve the slot at all).
   struct Assembly {
     bool active{false};
+    bool computing{false};
+    bool cancelled{false};
+    bool verify_charged{false};
+    std::uint32_t trust_epoch{0};
     autonomy::ControlObjectKind kind{autonomy::ControlObjectKind::ConfigPermit};
     NodeId origin{kInvalidNodeId};
     ConfigJournal* journal{nullptr};  // owner for kind 3/4; null for kind 5
@@ -207,6 +215,8 @@ class ConfigTarget final : public ConfigEndpointSink {
                 std::uint16_t received_len, autonomy::ObjectAckStatus status,
                 MonotonicMs now_ms) noexcept;
 
+  sdkv1::SignatureProgress signature_{};
+  bool asynchronous_{false};
   ConfigWirePort& wire_;
   ConfigRateLimiter& limiter_;
   TrustStore* trust_{nullptr};

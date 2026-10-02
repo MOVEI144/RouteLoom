@@ -34,6 +34,17 @@
 
 namespace routeloom::sdkv1 {
 struct SecurityCoordinatorTestAccess {
+  static Status queue_crypto(SecurityCoordinator& coordinator, CryptoWorker& worker,
+                             MonotonicMs now) noexcept {
+    coordinator.deps_.crypto_worker = &worker;
+    auto& engine = coordinator.member().engine;
+    const Status bound = engine.bind_crypto_worker(&worker);
+    if (!bound) return bound;
+    HandshakeRequest request{};
+    request.scope = SecurityScope::EndToEnd;
+    request.peer = 0x00A1000000000002ULL;
+    return engine.request(request, now);
+  }
   static CoordinatorMemberConfig adopted(const SecurityCoordinator& coordinator) noexcept {
     return coordinator.adopted_;
   }
@@ -1576,6 +1587,64 @@ void test_lifecycle_stop_defers_durable_resume_clear() {
   bool done = false;
   CHECK(cache.clear_step(cursor, done).ok());
   CHECK(cursor == 1 && f.resume_storage.slot(0)[0] != 0x42);
+}
+
+void test_stop_retains_worker_workspace() {
+  current = "stop_retains_worker_workspace";
+  for (const auto kind : {CoordinatorEventKind::Stop, CoordinatorEventKind::StopForLifecycle}) {
+    Fixture f{};
+    CHECK(f.init_stores());
+    CHECK(f.identity.commit(identity_record()).ok());
+    CHECK(f.site.commit(site_record()).ok());
+    CryptoWorker worker;
+    SecurityCoordinator coordinator(f.deps());
+    CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+    MonotonicMs now = kT0;
+    CHECK(poll_until_member(coordinator, now));
+    CHECK(SecurityCoordinatorTestAccess::queue_crypto(coordinator, worker, now).ok());
+    CHECK(!worker.idle());
+    CoordinatorEvent stop{};
+    stop.kind = kind;
+    stop.now = now + 1;
+    CHECK(coordinator.step(stop).code == StatusCode::Busy);
+    CHECK(coordinator.mode() == CoordinatorMode::Fresh);
+    CHECK(!coordinator.session_provider().ready());
+    CHECK(coordinator.adopt_dev(CoordinatorDevConfig{}, now + 1).code == StatusCode::Busy);
+    CHECK(coordinator.step(stop).code == StatusCode::Busy);
+    CHECK(coordinator.next_deadline(now + 1) == kJoinNoDeadline);
+    CHECK(worker.execute());
+    CHECK(coordinator.next_deadline(now + 1) == now + 1);
+    CHECK(coordinator.step(stop).ok());
+    CHECK(worker.idle());
+    CHECK(coordinator.snapshot().link_sessions == 0);
+    CHECK(coordinator.snapshot().end_sessions == 0);
+  }
+  // Stop during the Joiner's stored-certificate verification, before Member adoption.
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  CryptoWorker worker;
+  auto deps = f.deps();
+  deps.crypto_worker = &worker;
+  SecurityCoordinator coordinator(deps);
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  CHECK(coordinator.step(poll_at(kT0 + 1)).ok());
+  CHECK(coordinator.mode() == CoordinatorMode::ZeroTouch && !worker.idle());
+  CoordinatorEvent stop{};
+  stop.kind = CoordinatorEventKind::Stop;
+  stop.now = kT0 + 2;
+  CHECK(coordinator.step(stop).code == StatusCode::Busy);
+  CHECK(worker.execute());
+  const Status retired = coordinator.step(poll_at(kT0 + 3));
+  CHECK(retired.ok() || retired.code == StatusCode::InvalidState);
+  CHECK(worker.idle());
+  CHECK(coordinator.mode() == CoordinatorMode::Fresh);
+  stop.now = kT0 + 4;
+  (void)coordinator.step(stop);
+  (void)worker.execute();
+  ++stop.now;
+  CHECK(coordinator.step(stop).ok());
 }
 
 void test_commit_veto() {
@@ -3131,6 +3200,7 @@ int main() {
   test_link_failure_refresh_waits_for_poll_boundary();
   test_refresh_quiet_channel_with_live_links_never_strikes();
   test_refresh_newer_generations_with_live_links();
+  test_stop_retains_worker_workspace();
   test_commit_veto();
   test_local_leave_boot_keeps_revocation_floor_without_holdoff();
   test_store_credential_verifier();

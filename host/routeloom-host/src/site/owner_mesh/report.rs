@@ -95,7 +95,7 @@ pub(super) fn write_world(world: &MeshWorld, passed: bool) {
         format!(
             "{{\"node\":\"{:#x}\",\"reboots\":{},\"sends\":{},\"send_failures\":{},\
              \"app_tx\":{},\"app_tx_delivered\":{},\"rx_count\":{},\"no_route\":{},\
-             \"queued\":{},\"rx_queue_max\":{},\"owner_polls\":{},\"hop_accept_expired\":{}}}",
+             \"queued\":{},\"rx_queue_max\":{},\"owner_polls\":{},\"hop_accept_expired\":{},\"crypto_submitted\":{},\"crypto_completed\":{},\"crypto_owner_ms\":{},\"crypto_pending\":{}}}",
             peer.node,
             peer.reboots,
             snap.sends,
@@ -108,6 +108,10 @@ pub(super) fn write_world(world: &MeshWorld, passed: bool) {
             snap.rx_queue_max,
             snap.owner_polls,
             snap.hop_accept_expired,
+            snap.crypto_submitted,
+            snap.crypto_completed,
+            snap.crypto_owner_ms,
+            snap.crypto_pending,
         )
     });
     write(

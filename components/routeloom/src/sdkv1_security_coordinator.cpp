@@ -70,6 +70,9 @@ SecurityCoordinator::SecurityCoordinator(const Deps& deps) noexcept
 }
 
 SecurityCoordinator::~SecurityCoordinator() noexcept {
+  (void)cancel_for_swap();
+  drain_workspace_crypto(last_now_);
+  assert(!workspace_crypto_pending());
 #if ROUTELOOM_DEV_RAM
   if (mode_ == CoordinatorMode::Dev) {
     destroy_dev();
@@ -238,28 +241,62 @@ SecurityCoordinator::MemberEngine::MemberEngine(
 {
 }
 
+bool SecurityCoordinator::workspace_crypto_pending() const noexcept {
+  if (workspace_mode_ == CoordinatorMode::ZeroTouch) return ws_.joiner.crypto_pending();
+  if (workspace_mode_ == CoordinatorMode::Member || workspace_mode_ == CoordinatorMode::Dev)
+    return ws_.member.engine.crypto_pending();
+  return false;
+}
+
+void SecurityCoordinator::drain_workspace_crypto(const MonotonicMs now) noexcept {
+  if (workspace_mode_ == CoordinatorMode::ZeroTouch)
+    (void)ws_.joiner.stop(now);
+  else if (workspace_mode_ == CoordinatorMode::Member || workspace_mode_ == CoordinatorMode::Dev)
+    (void)ws_.member.engine.poll(now);
+}
+
+bool SecurityCoordinator::cancel_for_swap() noexcept {
+  if (workspace_mode_ == CoordinatorMode::ZeroTouch)
+    (void)ws_.joiner.stop(last_now_);
+  else if (workspace_mode_ == CoordinatorMode::Member || workspace_mode_ == CoordinatorMode::Dev)
+    (void)ws_.member.engine.cancel_all();
+  swap_waiting_ = workspace_crypto_pending();
+  return swap_waiting_;
+}
+
 void SecurityCoordinator::destroy_workspace() noexcept {
-  if (mode_ == CoordinatorMode::ZeroTouch) {
+  (void)cancel_for_swap();
+  if (workspace_crypto_pending()) {
+    workspace_retiring_ = true;
+    return;
+  }
+  if (workspace_mode_ == CoordinatorMode::ZeroTouch) {
     ws_.joiner.~Joiner();
-  } else if (has_member_engine()) {
-    // The engine's cross-references (cookie, cache, sink) die with the
-    // workspace; outside references (bank, stores, ports) stay valid.
-    // The wipe below also clears demux cookies and slot bytes (and the
-    // dev PSK dies with the dev-armed engine here).
+  } else if (workspace_mode_ == CoordinatorMode::Member ||
+             workspace_mode_ == CoordinatorMode::Dev) {
     ws_.member.~MemberEngine();
   } else {
     return;
   }
   secure_clear(&ws_, sizeof(ws_));
+  workspace_mode_ = CoordinatorMode::Fresh;
+  workspace_retiring_ = false;
+  swap_waiting_ = false;
 }
 
 void SecurityCoordinator::create_joiner() noexcept {
+  assert(workspace_mode_ == CoordinatorMode::Fresh);
+  workspace_mode_ = CoordinatorMode::ZeroTouch;
   new (&ws_.joiner) Joiner(deps_.joiner_config, *deps_.identity, *deps_.site, *deps_.revocations,
                            *deps_.entropy, *deps_.rld1, joiner_observer_, deps_.join_aead);
   ws_.joiner.set_commit_policy(this);
+  (void)ws_.joiner.bind_crypto_worker(deps_.crypto_worker,
+                                      deps_.crypto_worker == nullptr ? nullptr : &join_signature_);
 }
 
 void SecurityCoordinator::create_member() noexcept {
+  assert(workspace_mode_ == CoordinatorMode::Fresh);
+  workspace_mode_ = mode_;
   // Relay service identities (#116 §3.2): both incarnations are the
   // adopted rlboot witness — committed durable, nonzero, distinct per
   // boot. The hints come from the adopted stores (OFFERs must name this
@@ -303,6 +340,7 @@ void SecurityCoordinator::create_member() noexcept {
   new (&ws_.member) MemberEngine(*deps_.resume_storage, bank_, bank_sink_, *this, *deps_.verifier,
                                  *deps_.entropy, *deps_.rld1, *this, *deps_.proxy_sealer,
                                  proxy_config, gateway_config, deps_.join_aead);
+  (void)ws_.member.engine.bind_crypto_worker(deps_.crypto_worker);
 #if ROUTELOOM_PROFILE_HAS_GATEWAY
   ws_.member.gateway.set_host_sink(this);
 #endif
@@ -374,6 +412,7 @@ Status SecurityCoordinator::adopt_dev(const CoordinatorDevConfig& config,
                                      const MonotonicMs now) noexcept {
 #if ROUTELOOM_DEV_RAM
   if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  if (workspace_retiring_) return Status::error(StatusCode::Busy, "workspace retiring");
   if (mode_ != CoordinatorMode::Fresh) {
     return Status::error(StatusCode::InvalidState, "coordinator already running");
   }
@@ -647,6 +686,11 @@ Status SecurityCoordinator::member_discovery_config(DiscoveryConfig& out) noexce
 }
 
 MonotonicMs SecurityCoordinator::next_deadline(const MonotonicMs now) const noexcept {
+  if (workspace_retiring_ || swap_waiting_) {
+    // Completion wakes Owner; polling an unfinished loan must not starve
+    // the lower-priority worker.
+    return deps_.crypto_worker != nullptr && deps_.crypto_worker->ready() ? now : kJoinNoDeadline;
+  }
   if (sleeping_ || mode_ == CoordinatorMode::Fresh) return kJoinNoDeadline;
   MonotonicMs deadline = kJoinNoDeadline;
   const auto sooner = [&](const MonotonicMs candidate) {
@@ -710,6 +754,7 @@ bool SecurityCoordinator::member_work_pending() const noexcept {
 }
 
 bool SecurityCoordinator::quiescent_locked() const noexcept {
+  if (workspace_retiring_ || swap_waiting_) return false;
   if (tune_outstanding_ != 0 || member_apply_pending_) return false;
   for (const auto& staged : staged_) {
     if (staged.used) return false;
@@ -732,6 +777,7 @@ bool SecurityCoordinator::quiescent_locked() const noexcept {
 }
 
 Status SecurityCoordinator::on_boot(const CoordinatorEvent& event) noexcept {
+  if (workspace_retiring_) return Status::error(StatusCode::Busy, "workspace retiring");
   if (mode_ != CoordinatorMode::Fresh) {
     return Status::error(StatusCode::InvalidState, "coordinator already booted");
   }
@@ -782,6 +828,22 @@ Status SecurityCoordinator::on_boot(const CoordinatorEvent& event) noexcept {
 }
 
 Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
+  if (workspace_retiring_) {
+    drain_workspace_crypto(now);
+    if (workspace_crypto_pending()) return Status::success();
+    destroy_workspace();
+  }
+  if (swap_waiting_) {
+    drain_workspace_crypto(now);
+    if (workspace_crypto_pending()) return Status::success();
+    swap_waiting_ = false;
+    if (refresh_waiting_) {
+      refresh_waiting_ = false;
+      start_refresh(now);
+    }
+    return Status::success();
+  }
+
   if (mode_ == CoordinatorMode::Fresh) {
     return Status::error(StatusCode::InvalidState, "coordinator not booted");
   }
@@ -2442,7 +2504,11 @@ Status SecurityCoordinator::restore_sleep_image(RtcSessionPort& port, const std:
 
 Status SecurityCoordinator::on_stop(const MonotonicMs now,
                                      const bool defer_resume_clear) noexcept {
-  (void)now;
+  if (workspace_retiring_) {
+    drain_workspace_crypto(now);
+    if (workspace_crypto_pending()) return Status::error(StatusCode::Busy, "workspace retiring");
+    destroy_workspace();
+  }
   if (has_member_engine()) {
     // stop_traffic reads the state; unattached (pre-Start) relays stop
     // as revoked.
@@ -2473,6 +2539,7 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
   join_confirmed_ = false;
   boot_listen_until_ = 0;
   refresh_active_ = false;
+  refresh_waiting_ = false;
   refresh_strikes_ = 0;
   last_unknown_newer_generation_ = 0;
   adopted_ = CoordinatorMemberConfig{};
@@ -2497,7 +2564,8 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now,
   restore_elapsed_ms_ = 0;
   restore_error_ = Status{StatusCode::Ok, "ok"};
   mode_ = CoordinatorMode::Fresh;
-  return Status::success();
+  return workspace_retiring_ ? Status::error(StatusCode::Busy, "workspace retiring")
+                             : Status::success();
 }
 
 // --- Authority channel (G-SEC P5) ----------------------------------------------------------------
@@ -2991,6 +3059,10 @@ void SecurityCoordinator::start_refresh(const MonotonicMs now) noexcept {
   // Smart boot searches already use their configured listen and random
   // jitter; the legacy recovery spread must not suppress the boot trigger.
   if (now < due && boot_listen_until_ == 0) return;
+  if (cancel_for_swap()) {
+    refresh_waiting_ = true;
+    return;
+  }
   // The channel suspends (its DAMS copy wipes); the GK state stays live
   // so counters and replay windows survive the engine swap. RLS1 is
   // retained untouched — the refresh only re-verifies it.
@@ -3035,6 +3107,7 @@ void SecurityCoordinator::maybe_abandon_refresh(const MonotonicMs now) noexcept 
                        health.read_error_mask == 0 && !health.active_load_failed &&
                        !health.quarantined && !health.uncertain;
   if (!healthy) return;
+  if (cancel_for_swap()) return;
   if (search_ended) {
     join_search_result_ = snapshot.counters.denies != 0 ? StatusCode::AuthorizationFailed
                           : snapshot.counters.pendings != 0 ? StatusCode::ApprovalRequired
@@ -3107,6 +3180,7 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
                                                   const std::uint32_t boot_session,
                                                   const MonotonicMs now,
                                                   const std::uint32_t rs_epoch_to_fetch) noexcept {
+  if (workspace_crypto_pending()) return Status::error(StatusCode::Busy, "workspace loan active");
   if (boot_session == 0) return Status::error(StatusCode::InvalidArgument, "zero boot session");
   CoordinatorMemberConfig cfg{};
   cfg.network = site.network;
@@ -3654,6 +3728,7 @@ Status SecurityCoordinator::start_recovery_join(const MonotonicMs now) noexcept 
   if (!deps_.site->has_site() || !deps_.identity->has_identity()) {
     return Status::error(StatusCode::InvalidState, "recovery join without membership");
   }
+  if (cancel_for_swap()) return Status::error(StatusCode::Busy, "workspace loan active");
   in_port_ = true;
   last_now_ = now;
   // Traffic halts and member secrets scrub, but the stores stay: the
