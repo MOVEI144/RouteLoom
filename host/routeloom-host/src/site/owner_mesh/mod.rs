@@ -89,6 +89,7 @@ mod relay_reset;
 mod report;
 mod send;
 mod switch;
+mod uplink;
 mod usb_host;
 mod world;
 

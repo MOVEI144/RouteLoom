@@ -1288,6 +1288,19 @@ impl MeshPeer {
         (reply[1], reply[2])
     }
 
+    pub(super) fn terminal_capacity(&mut self) -> (u32, u32, u64) {
+        self.send(b"q");
+        let reply = self.recv().expect("terminal capacity reply");
+        assert_eq!(reply.len(), 17);
+        assert_eq!(reply[0], b'q');
+        let mut pos = 1;
+        (
+            get_u32(&reply, &mut pos),
+            get_u32(&reply, &mut pos),
+            get_u64(&reply, &mut pos),
+        )
+    }
+
     pub(super) fn tracked_burst(&mut self, count: u8, dst: u64) -> Vec<(u8, u32, u64)> {
         let mut command = vec![b'h', count];
         command.extend_from_slice(&dst.to_le_bytes());

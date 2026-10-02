@@ -1,0 +1,2 @@
+- Add real-Owner coverage for reverse gateway-scoped star delivery with lost hop/End acknowledgements and bidirectional five-hop delivery with the crypto worker.
+- Retain the stock gateway_small overload as an explicit failing qualification case: 40 simultaneously admitted sends exceed the unchanged 28 terminal pins. Hardware reverse/far-end qualification remains pending.
