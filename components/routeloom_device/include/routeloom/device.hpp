@@ -22,11 +22,11 @@
 #include <cstdint>
 
 #include "freertos/FreeRTOS.h"
+#include "routeloom/app_object.hpp"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/key_schedule.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/power.hpp"
-#include "routeloom/app_object.hpp"
 #include "routeloom/profile.hpp"
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_store.hpp"
@@ -384,12 +384,14 @@ class Device {
   void bind_runtime(espnow::EspNowRuntime& runtime) noexcept;
   class Observer final : public NodeObserver
 #if ROUTELOOM_DEVICE_SLEEP
-                       , public PowerEvents
+      ,
+                         public PowerEvents
 #endif
 #if ROUTELOOM_APP_OBJECT_TRANSFER
-                       , public ObjectObserver
+      ,
+                         public ObjectObserver
 #endif
-                       {
+  {
    public:
     // Constant-initialized, so begin() holds it without a guard and an
     // image that never begins (maintenance console) links none of it.
