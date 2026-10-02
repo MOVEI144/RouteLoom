@@ -1,0 +1,4 @@
+- Preserve authenticated same-round Reliable retries when terminal dedup or reply bindings are full, and spread final recovery rounds under simultaneous bursts without increasing capacities, deadlines or retry counts.
+- Use the gateway's matched active-channel report for signed join packages after commit/readback, retaining the channel across daemon restarts.
+- Clarify that the dedup256 override does not qualify the stock S3 bridge; its H7 RAM guard rejection remains unresolved.
+- Seven-node M08 qualification remains pending: the default small32 receiver still fails the per-sender 99% delivery requirement.

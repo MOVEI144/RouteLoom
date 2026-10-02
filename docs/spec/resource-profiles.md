@@ -14,6 +14,8 @@
 
 各budget合計はprofile ceiling以下であることをCI検査する。CPU/crypto libraryによりscratchが増えたら、定数を偽って合格にせずprofileを改訂する。voterは未予算化・無効。C3を含む全ノードに一つの最大設定を強制しない。
 
+`gateway-s3` は設計予算の名前で、S3 の stock bridge で dedup256 を保証する名前ではない。H7 の ESP-IDF 6.0.3・worker OFF の stock build は S3 の静的空き 6736 B < 8192 B、C3 は 11896 B < 27648 B で guard が拒否した。これらの構成は利用可能な supported cell と扱わない。容量 override の選択肢は残すが、guard を通した構成と radio/security 稼働時の heap の実測が揃うまで board qualification は未完了とする。
+
 raw64標本をdirection×rate×length×neighborごとに保持しない。固定統計poolのcounter/EWMA/必要な少数ringを使う。dedup数、結果保存bytes、member context数、active destination数は独立の制約。node台帳128だから128宛先の全経路を同時に保持できるとは限らない。
 
 返信受理の固定容量は各profileのRX／TX枠とは別に、Owner全体でbinding entry 3、use 8、受理transaction 8、component event 8。受理時に必要なTX枠とcontrol laneを確保し、局所仕事は最大1500msで終結する。これらをpeer数倍に増やさず、枠不足は有限retry／BUSY／計数付きdropで扱う。C3の実機RAM・stackとRF性能は受入ゲートで測定する。
