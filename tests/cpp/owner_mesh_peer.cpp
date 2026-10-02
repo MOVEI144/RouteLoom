@@ -1596,6 +1596,7 @@ int main(int argc, char** argv) {
   const SecurityProfile expected_profile =
       setup.devram ? SecurityProfile::Development : SecurityProfile::Candidate;
   if (owner.security_profile() != expected_profile ||
+      owner.session_provider().security_profile() != expected_profile ||
       device.capabilities().security_profile != expected_profile) {
     fatal("boot security profile does not match the selected mode");
   }

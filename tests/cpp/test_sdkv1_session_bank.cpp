@@ -900,7 +900,18 @@ void suite_provider_wiring() {
   std::uint32_t epoch = 0;
   CHECK_OK(provider.tx_epoch(SecurityScope::Link, kPeer, epoch));
   CHECK(epoch == 0x1111);
+  CHECK_OK(provider.current_rx_epoch(SecurityScope::Link, kPeer, epoch));
+  CHECK(epoch == 0x2222);
+  install_link(fix.bank, kPeer, 0x3333, 0x1234, 0x20);
+  CHECK_OK(provider.current_rx_epoch(SecurityScope::Link, kPeer, epoch));
+  CHECK(epoch == 0x1234);  // Current context, never the RX overlap or TX id.
+  CHECK(provider.current_rx_epoch(SecurityScope::Link, kPeer + 1, epoch).code ==
+        StatusCode::AuthRequired);
+  CHECK(epoch == 0 && fix.bank.demand_count() == 0);
   CHECK_OK(provider.retire(SecurityScope::Link, kPeer));
+  CHECK(provider.current_rx_epoch(SecurityScope::Link, kPeer, epoch).code ==
+        StatusCode::AuthRequired);
+  CHECK(epoch == 0);
   CHECK_OK(provider.retire_all(kPeer));
 }
 

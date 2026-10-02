@@ -140,7 +140,9 @@ bool SecurityCoordinator::SessionProviderMux::ready() const noexcept {
 }
 
 SecurityProfile SecurityCoordinator::SessionProviderMux::security_profile() const noexcept {
-  return group().security_profile();
+  // Member uses the session bank even before adoption; its missing RX
+  // context must never select the Development fallback in the radio Owner.
+  return dev_ ? SecurityProfile::Development : SecurityProfile::Candidate;
 }
 
 Status SecurityCoordinator::SessionProviderMux::tx_epoch(const SecurityScope scope, const NodeId peer,

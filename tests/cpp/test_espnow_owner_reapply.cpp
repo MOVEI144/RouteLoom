@@ -403,6 +403,7 @@ void test_member_root_mapping(bool flat) {
   CHECK(take_apply(owner.coordinator(), now, member));
   EspNowSecurityOwnerTestAccess::apply(owner, member);
   CHECK(runtime.node().started());
+  CHECK(owner.session_provider().security_profile() == SecurityProfile::Candidate);
   const NodeConfig& node = runtime.node().config();
   if (flat) {
     CHECK(node.group_roots[0] == site_record().gateways[0] &&
@@ -555,6 +556,7 @@ void test_dev_profile_survives_radio_failure() {
   EspNowSecurityOwnerTestAccess::attach_runtime(owner, runtime);
   CHECK(runtime.initialize().ok());
   CHECK(owner.security_profile() == SecurityProfile::Candidate);
+  CHECK(owner.session_provider().security_profile() == SecurityProfile::Candidate);
   EspNowSecurityOwner::DevConfig config{};
   config.psk.fill(0xA5);
   config.network = kNetwork;
@@ -564,6 +566,7 @@ void test_dev_profile_survives_radio_failure() {
   config.role = kMemberRoleEndpoint;
   CHECK(EspNowSecurityOwnerTestAccess::adopt_dev(owner, config, kStart).ok());
   CHECK(owner.security_profile() == SecurityProfile::Development);
+  CHECK(owner.session_provider().security_profile() == SecurityProfile::Development);
   CoordinatorAction action{};
   CHECK(owner.coordinator().take_action(action).ok());
   CHECK(action.kind == CoordinatorActionKind::ApplyMemberConfig);
