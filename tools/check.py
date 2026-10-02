@@ -9,7 +9,7 @@ sdk.yml firmware matrix is generated from.
 
     check.py quick                  docs + portable C/C++ tests
     check.py ci [--dry-run]         every stage CI runs, in order
-    check.py core|docs|golden|rust|interop|profile-mesh|fuzz
+    check.py core|docs|golden|rust|interop|compat|profile-mesh|fuzz
     check.py profiles [--build DIR]  portable suites per resource profile
     check.py scenarios              tests/e2e/scenarios.json rows
     check.py firmware --list [--format github]
@@ -90,6 +90,8 @@ def core(sanitizers: str = "ON") -> list[Step]:
 def docs() -> list[Step]:
     return [Step(["python3", "tools/check_docs.py"]),
             Step(["python3", "tools/gen_manifest.py", "--check"]),
+            Step(["python3", "tools/gen_user_reference.py", "--check"]),
+            Step(["python3", "tools/check_api1_contract.py"]),
             Step(["python3", "tools/sync_reference_tables.py", "--check"]),
             Step(["python3", "tools/check_review_contracts.py"]),
             Step(["python3", "tools/check.py", "scenarios"]),
@@ -157,6 +159,30 @@ def interop() -> list[Step]:
         Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::owner_mesh::",
               "--", "--nocapture"], cwd="host", env=mesh_env, forbid=SKIP_MARK,
              require=live_cases(rows, "site/owner_mesh/")),
+    ]
+
+
+def compat() -> list[Step]:
+    """N-1 records migrate; HostLink 1 is refused by the real USB Owner."""
+    env = {"ROUTELOOM_OWNER_PEER": str(ROOT / PEER),
+           "ROUTELOOM_MESH_PEER": str(ROOT / MESH_PEER), "UBSAN_OPTIONS": "halt_on_error=1"}
+    case = "site::owner_mesh::fault::mesh_hostlink_v2_auth_negatives"
+    return [
+        Step(["cmake", "-S", ".", "-B", "build", "-DROUTELOOM_ENABLE_SANITIZERS=ON",
+              "-DCMAKE_BUILD_TYPE=Debug"]),
+        Step(["cmake", "--build", "build", "--parallel", JOBS, "--target",
+              "routeloom_sdkv1_golden_tests", "routeloom_config_tests", "routeloom_migration_tests",
+              "routeloom_joiner_interop_peer", "routeloom_owner_mesh_peer"]),
+        Step(["ctest", "--test-dir", "build", "--output-on-failure", "-R",
+              "routeloom_(sdkv1_golden|config|migration)_tests"]),
+        Step(["cargo", "test", "-p", "routeloom-protocol", "--test", "compat"], cwd="host"),
+        Step(["cargo", "test", "-p", "routeloom-provision", "--test", "sdkv1_golden"], cwd="host"),
+        Step(["cargo", "test", "-p", "routeloom-host", "--bins",
+              "site::store::tests::migration_advances_a_v2_database_and_keeps_a_copy"], cwd="host"),
+        Step(["assert-peer-version", PEER, PEER_VERSION]),
+        Step(["assert-peer-version", MESH_PEER, MESH_PEER_VERSION]),
+        Step(["cargo", "test", "-p", "routeloom-host", "--bins", case, "--", "--nocapture"],
+             cwd="host", env=env, forbid=SKIP_MARK, require={case}),
     ]
 
 
@@ -509,6 +535,25 @@ STATIC_FREE_DRIFT = 256
 RTC_DRIFT = 64
 
 
+def development_key_errors(image: bytes, settings: list[str]) -> list[str]:
+    """Inspect linked constants as well as the configured quick-start key."""
+    kconfig = (ROOT / "components/routeloom_device/Kconfig").read_text(encoding="utf-8")
+    key = re.search(
+        r'config ROUTELOOM_DEVELOPMENT_KEY_HEX\s+string[^\n]*\n\s+default "([0-9a-fA-F]+)"',
+        kconfig)
+    if key is None:
+        return ["missing development key definition for image inspection"]
+    keys = {key.group(1).lower()}
+    for setting in settings:
+        configured = re.fullmatch(
+            r'CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX="([0-9a-fA-F]{64})"', setting)
+        if configured is not None:
+            keys.add(configured.group(1).lower())
+    if any(bytes.fromhex(value) in image or value.encode() in image.lower() for value in keys):
+        return ["MemberEdhoc image contains a development key"]
+    return []
+
+
 def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
     budget = cell.get("budget")
     if not budget:
@@ -524,29 +569,11 @@ def size_errors(data: dict, cell: dict, build: Path) -> list[str]:
     app_bin = files["bin"].stat().st_size
     if "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y" in (
             cell.get("overlay", []) + cell.get("expect", [])):
-        # Inspect the linked image, including constants; the quick-start
-        # key can survive even when no development symbol is referenced.
-        kconfig = (ROOT / "components/routeloom_device/Kconfig").read_text(encoding="utf-8")
-        key = re.search(
-            r'config ROUTELOOM_DEVELOPMENT_KEY_HEX\s+string[^\n]*\n\s+default "([0-9a-fA-F]+)"',
-            kconfig)
-        if key is None:
-            errors.append("missing development key definition for image inspection")
-        else:
-            image = files["bin"].read_bytes()
-            keys = {key.group(1).lower()}
-            settings = cell.get("overlay", []) + cell.get("expect", [])
-            sdkconfig = build.parent / "sdkconfig"
-            if sdkconfig.is_file():
-                settings += sdkconfig.read_text(encoding="utf-8").splitlines()
-            for setting in settings:
-                configured = re.fullmatch(
-                    r'CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX="([0-9a-fA-F]{64})"', setting)
-                if configured is not None:
-                    keys.add(configured.group(1).lower())
-            image_lower = image.lower()
-            if any(bytes.fromhex(value) in image or value.encode() in image_lower for value in keys):
-                errors.append("MemberEdhoc image contains a development key")
+        settings = cell.get("overlay", []) + cell.get("expect", [])
+        sdkconfig = build.parent / "sdkconfig"
+        if sdkconfig.is_file():
+            settings += sdkconfig.read_text(encoding="utf-8").splitlines()
+        errors += development_key_errors(files["bin"].read_bytes(), settings)
     if app_bin > budget["app_bin_max"] + APP_BIN_DRIFT:
         errors.append(f"app.bin {app_bin} B > budget {budget['app_bin_max']} B "
                       f"(+{APP_BIN_DRIFT} B drift)")
@@ -661,7 +688,7 @@ def stream(step: Step, cwd: Path, env: dict) -> tuple[int, str, set[str]]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="stage", required=True)
-    for name in ("quick", "ci", "docs", "golden", "rust", "interop", "profile-mesh", "fuzz"):
+    for name in ("quick", "ci", "docs", "golden", "rust", "interop", "compat", "profile-mesh", "fuzz"):
         sub.add_parser(name).add_argument("--dry-run", action="store_true")
     p_profiles = sub.add_parser("profiles")
     p_profiles.add_argument("--dry-run", action="store_true")
@@ -717,7 +744,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_firmware(cells, args.dry_run, data)
 
     stages = {"core": lambda: core(getattr(args, "sanitizers", "ON")), "docs": docs,
-              "golden": golden, "rust": rust, "interop": interop,
+              "golden": golden, "rust": rust, "interop": interop, "compat": compat,
               "profiles": lambda: profiles(getattr(args, "build", None)),
               "profile-mesh": profile_mesh, "fuzz": fuzz,
               "firmware": lambda: [s for c in data["cells"] for s in firmware_steps(c)]}
