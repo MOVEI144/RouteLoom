@@ -332,7 +332,7 @@ fn rejoin_history(occupied: bool, worker: bool) {
     );
 }
 
-fn fill_terminal_quota(world: &mut MeshWorld) {
+pub(super) fn fill_terminal_quota(world: &mut MeshWorld) {
     let source = world.macs[1];
     let destination = world.macs[0];
     let mut pins = 0;

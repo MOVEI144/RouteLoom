@@ -9,6 +9,16 @@ fn mesh_m08_repeated_bursts_account_for_every_send() {
 }
 
 pub(super) fn repeated_bursts(delay_ms: u64) {
+    burst_world(delay_ms, if max_nodes() == 32 { 5 } else { 3 }, false);
+}
+
+#[test]
+#[ignore = "H7 seven-node qualification repro; per-sender 99% remains red"]
+fn mesh_h7_m08_seven_node_star() {
+    burst_world(10, 7, true);
+}
+
+fn burst_world(delay_ms: u64, nodes: usize, star: bool) {
     {
         let Some(mut boundary) = route_loss_world("m08-boundary", Switch::direct(), false) else {
             return;
@@ -30,7 +40,6 @@ pub(super) fn repeated_bursts(delay_ms: u64) {
             );
         }
     }
-    let nodes = if max_nodes() == 32 { 5 } else { 3 };
     let mut switch = Switch::new(&Topology::full(nodes));
     // Pin each initial binding to the gateway before exposing other peers.
     // Full audibility alone does not require discovery to bind every pair.
@@ -42,16 +51,17 @@ pub(super) fn repeated_bursts(delay_ms: u64) {
     let Some(mut world) = route_loss_world("m08", switch, false) else {
         return;
     };
-    for peer in 1..nodes {
-        world.switch.heal(peer);
+    if !star {
+        for peer in 1..nodes {
+            world.switch.heal(peer);
+        }
     }
     // Start the load after the full topology and its improvement hold settle.
     world.pump_until(2400, |snaps| {
         snaps.iter().enumerate().all(|(index, snap)| {
-            snap.phases
-                .iter()
-                .enumerate()
-                .all(|(peer, &phase)| peer == index || phase == PHASE_REACHABLE)
+            snap.phases.iter().enumerate().all(|(peer, &phase)| {
+                peer == index || (star && index != 0 && peer != 0) || phase == PHASE_REACHABLE
+            })
         })
     });
     world.pump_until(600, |_| false);
@@ -108,10 +118,12 @@ pub(super) fn repeated_bursts(delay_ms: u64) {
             // Stub callbacks have no transport latency. Drive accepted work
             // before a coarse idle tick can manufacture a hop timeout.
             world.step((if draining { 1 } else { 25 }).min(round_end - world.now));
-            draining = world
-                .snaps
-                .iter()
-                .any(|s| s.queued != 0 || s.app_tx.iter().any(|tx| tx.state < DELIVERY_DELIVERED));
+            draining = world.snaps.iter().any(|s| {
+                s.queued != 0
+                    || s.app_tx
+                        .iter()
+                        .any(|tx| tx.seq != 0 && tx.state < DELIVERY_DELIVERED)
+            });
             for (peer, &hop) in world.peers.iter_mut().skip(1).zip(&routes) {
                 assert_eq!(peer.next_hop(testkit::GATEWAY), hop, "no route flap");
             }
@@ -141,8 +153,14 @@ pub(super) fn repeated_bursts(delay_ms: u64) {
         for &key in expected.keys() {
             let peer = world.index_of(key.0);
             for tx in world.snaps[peer].app_tx.iter().filter(|tx| tx.seq == key.2) {
-                if tx.state >= DELIVERY_DELIVERED {
-                    terminal.insert(key, tx.state);
+                if tx.state >= DELIVERY_DELIVERED
+                    && terminal.insert(key, tx.state).is_none()
+                    && tx.state != DELIVERY_DELIVERED
+                {
+                    eprintln!(
+                        "M08 failed: source={peer} session={} sequence={} reason={}",
+                        key.1, key.2, tx.reason
+                    );
                 }
             }
         }

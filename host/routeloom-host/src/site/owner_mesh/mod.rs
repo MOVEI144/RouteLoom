@@ -73,6 +73,7 @@ mod daemon;
 mod device;
 mod end;
 mod fault;
+mod h7;
 mod hfinal;
 mod join;
 mod kg;

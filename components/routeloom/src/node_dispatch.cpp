@@ -729,7 +729,12 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
     delivery->next_round_at_ms = std::min(delivery->expires_at_ms, now_ms + 50);
     if (delivery->round + 1U == config_.max_end_to_end_rounds &&
         delivery->expires_at_ms - delivery->next_round_at_ms > 5000) {
-      delivery->next_round_at_ms = delivery->expires_at_ms - 5000;
+      // Simultaneous sources must not re-fill the same bounded reply pool
+      // together in their last round. Spread within the existing recovery
+      // window, without adding a round or extending the origin deadline.
+      const auto spread = (static_cast<std::uint32_t>(config_.node) * 137U) %
+                          kBusyRetryAfterMaxMs;
+      delivery->next_round_at_ms = delivery->expires_at_ms - 5000 + spread;
     }
     set_delivery_state(*delivery, DeliveryState::WaitingForRoute, reason);
     return;

@@ -405,6 +405,15 @@ Status MeshNode::reserve_rx_reply(const RxBinding& rx,
                                      const std::size_t pool_slots,
                                      const MonotonicMs now_ms,
                                      AdmissionReservation& out) noexcept {
+  return reserve_rx_reply(rx, needs_control_slot, pool_slots, now_ms, out, UINT64_MAX);
+}
+
+Status MeshNode::reserve_rx_reply(const RxBinding& rx,
+                                     const bool needs_control_slot,
+                                     const std::size_t pool_slots,
+                                     const MonotonicMs now_ms,
+                                     AdmissionReservation& out,
+                                     const MonotonicMs deadline_ms) noexcept {
   out.node = this;
   out.txn = kInvalidTxnHandle;
   out.use = kInvalidReplyLeaseToken;
@@ -430,13 +439,14 @@ Status MeshNode::reserve_rx_reply(const RxBinding& rx,
   if (now_ms > UINT64_MAX - kReplyLeaseTtlMs) {
     return Status::error(StatusCode::CounterExhausted, "ttl unrepresentable");
   }
+  const MonotonicMs deadline = std::min(now_ms + kReplyLeaseTtlMs, deadline_ms);
   ReplyLeaseToken use{kInvalidReplyLeaseToken};
   Status status = reply_peer_port_->acquire(rx.binding,
-                                            now_ms + kReplyLeaseTtlMs,
+                                            deadline,
                                             now_ms, use);
   if (!status) return status;
   out.use = use;
-  status = begin_txn(use, now_ms + kReplyLeaseTtlMs, out.txn);
+  status = begin_txn(use, deadline, out.txn);
   return status;
 }
 
