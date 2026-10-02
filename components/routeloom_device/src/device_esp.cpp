@@ -707,15 +707,19 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   // Owner sleep tail (P4 §9.3, V1-F07): one-shot wake evidence for the
   // restore below. The marker/programmed reads clear the RTC cells, so a
   // reset without a new sleep never reuses them.
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
   const std::uint32_t message_session = boot_session_;
+#endif
   bool owner_boot_marked = false;
   const ResetCause owner_boot_cause = classify_boot(owner_boot_marked);
   const std::uint32_t owner_programmed_ms = s_sleep_programmed_ms;
   s_sleep_programmed_ms = 0;
   const bool owner_deep_wake = owner_boot_cause == ResetCause::DeepSleepWake;
   const bool owner_timer_wake = esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
   sdkv1::BufferRtcSessionPort owner_rtc_port(
       MutableByteView{s_rtc_session.data(), s_rtc_session.size()});
+#endif
   static EspNowPowerPort owner_power_port(runtime);
   static FailStreakClearOnSleep owner_streak_clear;
   owner_power_port.set_pre_sleep_hook(&owner_streak_clear);
@@ -734,14 +738,20 @@ void Device::boot_and_run(DeviceConfig& config) noexcept {
   static sdkv1::BlobPowerStorage power_storage(power_namespace);
   static PowerCoordinator power(PowerConfig{30000}, node, owner_power_port, power_storage,
                                 observer());
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  owner_power_port.bind_owner(*owner_);
+#else
   owner_power_port.bind_owner(*owner_, &owner_rtc_port);
+#endif
   const std::int64_t owner_prepare_at_us =
       esp_timer_get_time() + static_cast<std::int64_t>(CONFIG_ROUTELOOM_SLEEP_AFTER_MS) * 1000LL;
   const std::int64_t owner_stop_at_us =
       esp_timer_get_time() +
       static_cast<std::int64_t>(CONFIG_ROUTELOOM_SLEEP_RADIO_BUDGET_MS) * 1000LL;
   runtime.set_radio_deadline(static_cast<MonotonicMs>(owner_stop_at_us / 1000));
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
   sdkv1::SecurityCoordinator& coordinator = owner_->coordinator();
+#endif
 #endif
 #if CONFIG_ROUTELOOM_ROLE_GATEWAY
   // A bounded byte carrier; decoding and all bridge state stay on Owner.
