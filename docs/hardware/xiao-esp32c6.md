@@ -30,7 +30,7 @@ HP core RISC-V 32bit最大160MHz、LP core最大20MHz。HP SRAM512KB、標準boa
 | D9 | 20 | SPI MISO |
 | D10 | 18 | SPI MOSI |
 
-BOOTはGPIO9、USER LEDはGPIO15。USB Serial/JTAGはGPIO12/13（D−/D＋）を使う。GPIO3はRF switchの有効化（Lowで有効）、GPIO14はantenna選択（Low：基板上アンテナ、High：U.FL外部）で、自由な端子として扱わない。外部アンテナを使うときはGPIO14の設定と適合条件を確認する。
+BOOTはGPIO9、USER LEDはGPIO15。USB Serial/JTAGはGPIO12/13（D−/D＋）を使う。GPIO3はRF switchの有効化（Lowで有効）、GPIO14はantenna選択（Low：基板上アンテナ、High：U.FL外部）で、自由な端子として扱わない。SDK の `Device` 起動は Wi-Fi 初期化前に GPIO3 を出力 Low、GPIO14 を出力 Low に自動設定し、基板上アンテナを選ぶ。U.FL 外部アンテナを使う場合は component の Kconfig `CONFIG_ROUTELOOM_BOARD_C6_EXTERNAL_ANTENNA=y`（既定 n）で GPIO14 を High にする。起動 log は `rf switch: enabled, antenna: internal|external`。GPIO 設定が失敗した場合は Wi-Fi を初期化しない。外部アンテナの適合条件を確認する。
 
 ## 4. 電源
 
