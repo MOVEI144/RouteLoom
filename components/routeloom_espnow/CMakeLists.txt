@@ -21,7 +21,7 @@ idf_component_register(
     src/psa_edhoc_aead.cpp
     src/psa_session_aead.cpp
   INCLUDE_DIRS include
-  REQUIRES routeloom esp_wifi esp_event esp_netif esp_timer freertos nvs_flash mbedtls bootloader_support esp_driver_usb_serial_jtag app_update esp_partition spi_flash
+  REQUIRES routeloom esp_wifi esp_event esp_netif esp_timer freertos nvs_flash mbedtls bootloader_support esp_driver_usb_serial_jtag esp_driver_gpio app_update esp_partition spi_flash
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
 # ESP-IDF public headers intentionally use GNU C/C++ extensions. Keep strict

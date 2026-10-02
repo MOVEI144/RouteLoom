@@ -646,11 +646,9 @@ target_compile_options(routeloom_sdkv1_dev_route_tests PRIVATE -Wall -Wextra -Wp
 add_test(NAME routeloom_sdkv1_dev_route_tests COMMAND routeloom_sdkv1_dev_route_tests)
 
 # Multi-node mesh peer (D04, issue #168): one real Owner + runtime + USB
-# node per process, driven by the Rust test
-# (host/routeloom-host/src/site/owner_mesh/), never by ctest.
-add_executable(routeloom_owner_mesh_peer owner_mesh_peer.cpp owner_mesh_c_app.c
+# node per process, driven by the Rust mesh tests and the board boot checks.
+add_library(routeloom_owner_mesh_boot OBJECT owner_mesh_peer.cpp owner_mesh_c_app.c
     espnow_idf_stubs/idf_stubs.cpp
-    ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device_c.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device_config.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device_migration.cpp
@@ -660,23 +658,22 @@ add_executable(routeloom_owner_mesh_peer owner_mesh_peer.cpp owner_mesh_c_app.c
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_security_owner.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1_entropy.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1.cpp
-    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_board_config.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_sdkv1_store.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_boot_session.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_config_store.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_legacy_purge.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_security_floor.cpp)
-target_link_libraries(routeloom_owner_mesh_peer PRIVATE routeloom_core)
+target_link_libraries(routeloom_owner_mesh_boot PRIVATE routeloom_core)
 # owner_mesh_c_app.c is the --c-app application: C11 on the Device C API.
-set_target_properties(routeloom_owner_mesh_peer PROPERTIES
+set_target_properties(routeloom_owner_mesh_boot PROPERTIES
     C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 # The peer carries Device's remote-config target and channel plan (a
 # firmware image selects them with CONFIG_ROUTELOOM_CONFIG and
 # CONFIG_ROUTELOOM_MIGRATION); --remote-config and --channel-plan enable
 # them per node.
-target_compile_definitions(routeloom_owner_mesh_peer PRIVATE ROUTELOOM_DEVICE_REMOTE_CONFIG=1
+target_compile_definitions(routeloom_owner_mesh_boot PRIVATE ROUTELOOM_DEVICE_REMOTE_CONFIG=1
                            ROUTELOOM_DEVICE_MIGRATION=1)
-target_include_directories(routeloom_owner_mesh_peer PRIVATE
+target_include_directories(routeloom_owner_mesh_boot PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs
     ${CMAKE_CURRENT_SOURCE_DIR}/esp_idf_stub
@@ -684,9 +681,52 @@ target_include_directories(routeloom_owner_mesh_peer PRIVATE
     ${ROUTELOOM_UECC_DIR}
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/include)
-target_compile_options(routeloom_owner_mesh_peer PRIVATE
+target_compile_options(routeloom_owner_mesh_boot PRIVATE
     -Wall -Wextra -Wpedantic -Werror -Wno-unused-variable -Wno-unused-parameter
     -Wno-unused-function -Wno-unused-private-field)
+
+# Reuse the real Owner boot with target-specific Device/board translation units.
+set(ROUTELOOM_BOARD_BOOT_SOURCES
+    ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_board_config.cpp)
+foreach(board IN ITEMS host esp32c3 esp32s3 esp32c5 esp32c6 esp32c6_external)
+  if(board STREQUAL "host")
+    set(peer routeloom_owner_mesh_peer)
+  else()
+    set(peer routeloom_board_rf_${board}_peer)
+  endif()
+  add_executable(${peer} ${ROUTELOOM_BOARD_BOOT_SOURCES})
+  target_link_libraries(${peer} PRIVATE routeloom_owner_mesh_boot routeloom_core)
+  target_include_directories(${peer} PRIVATE
+      $<TARGET_PROPERTY:routeloom_owner_mesh_boot,INCLUDE_DIRECTORIES>)
+  target_compile_options(${peer} PRIVATE
+      $<TARGET_PROPERTY:routeloom_owner_mesh_boot,COMPILE_OPTIONS>)
+  target_compile_definitions(${peer} PRIVATE
+      $<TARGET_PROPERTY:routeloom_owner_mesh_boot,COMPILE_DEFINITIONS>)
+  if(NOT board STREQUAL "host")
+    string(REPLACE "_external" "" chip "${board}")
+    string(TOUPPER "${chip}" chip)
+    target_compile_definitions(${peer} PRIVATE CONFIG_IDF_TARGET_${chip}=1)
+  endif()
+  if(board STREQUAL "esp32c6_external")
+    target_compile_definitions(${peer} PRIVATE CONFIG_ROUTELOOM_BOARD_C6_EXTERNAL_ANTENNA=1)
+    set(antenna 1)
+  elseif(board STREQUAL "esp32c6")
+    set(antenna 0)
+  else()
+    set(antenna -1)
+  endif()
+  add_test(NAME routeloom_board_rf_${board}
+      COMMAND ${peer} --check-board-rf ${antenna} 0
+      --node 2 --mac 021122334455 --role 1 --t0 1000 --seed 1 --member --devram --flat --netlow 0x524c0001)
+  if(board STREQUAL "esp32c6")
+    foreach(call IN ITEMS 1 4)
+      add_test(NAME routeloom_board_rf_${board}_gpio_failure_${call}
+          COMMAND ${peer} --check-board-rf ${antenna} ${call}
+          --node 2 --mac 021122334455 --role 1 --t0 1000 --seed 1 --member --devram --flat --netlow 0x524c0001)
+    endforeach()
+  endif()
+endforeach()
 
 # Live E2E peer (design P3-4 §10.2): driven by the Rust Site Authority
 # test (host/routeloom-host/src/site/joiner_interop.rs), never by ctest.
