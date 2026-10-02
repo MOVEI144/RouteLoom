@@ -339,7 +339,15 @@ fn display_load(mut world: MeshWorld, members: [usize; 2]) {
         for (slot, member) in members.into_iter().enumerate() {
             if world.snaps[member].rx_count > seen[slot] {
                 seen[slot] = world.snaps[member].rx_count;
-                last_view[slot] = world.now;
+                let body = &world.snaps[member].rx;
+                // The peer snapshot retains the first 96 bytes of a 127-byte value.
+                assert!(matches!(body.len(), 4 | 96), "expected a display value");
+                let generated_tick = u32::from_be_bytes(body[..4].try_into().unwrap());
+                assert!(
+                    generated_tick <= tick,
+                    "view cannot come from a future tick"
+                );
+                last_view[slot] = start + u64::from(generated_tick) * 25;
             }
             assert!(
                 world.now - last_view[slot] < 20_000,

@@ -34,7 +34,7 @@
      "source": "components/routeloom/include/routeloom/usb_host_ops.hpp", "rule": "only subcommands 0x60-0x63 use it"},
     {"id": "authority_envelope", "label": "AuthorityEnvelope", "value": 1, "c": "ROUTELOOM_AUTHORITY_ENVELOPE", "rust": "AUTHORITY_ENVELOPE",
      "cpp_check": "routeloom::keys::kAuthorityEnvelopeVersion", "cpp_include": "routeloom/key_schedule.hpp", "rust_check": "routeloom_keysched::AUTHORITY_ENVELOPE_VERSION",
-     "source": "components/routeloom/include/routeloom/key_schedule.hpp", "rule": "types 1-8 registered; new types are additive"},
+     "source": "components/routeloom/include/routeloom/key_schedule.hpp", "rule": "types 1-9 registered; new types are additive"},
     {"id": "api1_envelope", "label": "API1 envelope", "value": 1, "rust": "API1_ENVELOPE",
      "rust_check": ["crate::api1::API_VERSION", "routeloom_client::api1::API_VERSION"],
      "source": "host/routeloom-host/src/api1.rs", "rule": "methods, fields and error codes are additive"},
@@ -121,7 +121,7 @@
     "esp_idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802",
     "rust": "1.85.0"
   },
-  "partition_layout": null,
+  "partition_layout": "PT-4M-v2",
   "reason_codes": {
     "width_bits": 16,
     "ranges": [

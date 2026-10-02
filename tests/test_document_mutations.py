@@ -7,7 +7,7 @@ import tempfile
 import unittest
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'tools'))
-from check_review_contracts import validate
+from check_review_contracts import validate, acceptance_test_sources
 from check_docs import run as docs_run
 
 def test_copy_filter(directory, names):
@@ -39,6 +39,16 @@ class MutationTests(unittest.TestCase):
         cmake.write_text(cmake.read_text() + '\n# V1-K12\n')
         failed = {item['name'] for item in validate(self.root)['failed']}
         self.assertIn('acceptance_trace:V1-K12', failed)
+    def test_checker_decoy_is_not_acceptance_evidence(self):
+        test = self.root/'tests/cpp/test_kdf.cpp'
+        test.write_text(test.read_text().replace('V1-K12', 'K12'))
+        checker = self.root/'tests/test_check.py'
+        checker.write_text(checker.read_text() + '\n# V1-K12\n')
+        result = validate(self.root)
+        self.assertIn('acceptance_trace:V1-K12',
+                      {item['name'] for item in result['failed']})
+        self.assertFalse(any('V1-F04' in path.read_text()
+                             for path in acceptance_test_sources(self.root)))
     def test_acceptance_tag_requires_exact_id(self):
         test = self.root/'tests/cpp/test_kdf.cpp'
         source = test.read_text()

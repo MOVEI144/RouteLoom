@@ -332,7 +332,7 @@ esptool.py write_flash 0x20000 rlsec.bin                                       #
 | V1-H05 | revokeの段階（committed→distributing→converged）とunknownの計数（**P5 PR3でGK半分が配布・収束**：RRS1側もP6-1 PR Aでsnapshot配布・Applied ACK・unknown計数を実装済み（fake transport）。GK側は`gk_rotation`の段階とunknown計数で追える） |
 | V1-H06 | ACL：read権限では`join.decide`不可（**P3-3でhost試験済み**：`MEMBERSHIP_READ`だけのprincipalは一覧可・revoke不可、grant無しは`site.status`も不可） |
 | V1-H07 | host crash（commit後・送信前）→機器の再試行で冪等再発行（**P3-3でhost試験済み**：SQLite storeを開き直し、同じMemberCert byte列を再発行） |
-| V1-H08 | USB 0x40〜0x46 codecのC++/Rust共通vector、capability無しでUnsupported |
+| V1-H08 | USB join relay 0x60〜0x63／authority 0x64〜0x67 codecのC++/Rust共通vector、capability無しでUnsupported |
 | V1-H09 | routeloom-provision：RLI1・DevCertのgolden一致、所持証明の無い公開鍵には発行しない（**P7-1でhost試験済み**：`tests/sdkv1_office.rs`が発行したDevCert・注入鍵RLI1を共通vectorとbyte一致で確認し、PoPの不一致・改ざん・再送を拒否。**P7の残りでhost試験済み**：PoPのC++/Rust共通vectorとbyte一致、保守verbの鍵生成・PoP・bundle密封・readback（共通vectorの本物bundle）、SiteCert発行のgolden一致と`inventory.json`。HILは未実施） |
 | V1-H10 | 現場用firmwareへの切替と出荷検査（§6手順6-7）：app領域だけの再書込みで`rlsec` identityを保持し、`routeloom field boot: fw=`と`sdkv1 identity: node=`で照合、検査用現場でjoin→Memberを確認。console buildのままは不合格。**host試験済み**：`status`の`fw=`報告・`unknown`時fail-closed・`provision-expect --fw`照合（`routeloom_sdkv1_maintenance_tests`、`routeloomctl`）。実機の切替・joinはHIL未実施 |
 | V1-H11 | `membership.archive`：撤去済み行だけを1 transactionで忘却し、`revoke`履歴を残してNodeId再利用を禁止し続ける（**host試験済み**：容量回収・現役混じりCONFLICT・idempotency・再起動耐久、socket経由の入力検証・ADMIN認可） |

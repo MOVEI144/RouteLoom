@@ -60,7 +60,7 @@ P0-1／P0-2、P1-1〜P1-5、P2-1、P2-3、P3-1〜P3-4、P4-1〜P4-4、P5-1／P5-
 
 ## 3. 受入ID一覧
 
-参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）の計62件。`tools/check_review_contracts.py`は設計表のID集合とテストソース内の正確なタグを機械照合し、変異試験で検出力を確認する。タグの存在はID全条件の達成を証明しない。同じIDでもportable／host部分と実機・HIL部分は別の証拠として扱う。
+参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H12（[07](07-host-api-tooling.md) §8）の計65件。`tools/check_review_contracts.py`は設計表のID集合とテストソース内の正確なタグを機械照合し、変異試験で検出力を確認する。タグの存在はID全条件の達成を証明しない。同じIDでもportable／host部分と実機・HIL部分は別の証拠として扱う。
 
 | 範囲 | 実行済みの部分 | 未完了・範囲外 |
 |---|---|---|

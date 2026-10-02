@@ -35,7 +35,7 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 | HostLink (RLU1) protocol | 2 | `ROUTELOOM_HOSTLINK_PROTOCOL` / `HOSTLINK_PROTOCOL` | `components/routeloom/include/routeloom/usb_codec.hpp` | strict equality; bound into the HELLO transcript |
 | HostOps schema | 1 | `ROUTELOOM_HOSTOPS_SCHEMA` / `HOSTOPS_SCHEMA` | `components/routeloom/include/routeloom/usb_host_ops.hpp` | subcommands and capability bits are additive |
 | HostOps join relay schema | 2 | `ROUTELOOM_HOSTOPS_JOIN_RELAY_SCHEMA` / `HOSTOPS_JOIN_RELAY_SCHEMA` | `components/routeloom/include/routeloom/usb_host_ops.hpp` | only subcommands 0x60-0x63 use it |
-| AuthorityEnvelope | 1 | `ROUTELOOM_AUTHORITY_ENVELOPE` / `AUTHORITY_ENVELOPE` | `components/routeloom/include/routeloom/key_schedule.hpp` | types 1-8 registered; new types are additive |
+| AuthorityEnvelope | 1 | `ROUTELOOM_AUTHORITY_ENVELOPE` / `AUTHORITY_ENVELOPE` | `components/routeloom/include/routeloom/key_schedule.hpp` | types 1-9 registered; new types are additive |
 | API1 envelope | 1 | `API1_ENVELOPE` | `host/routeloom-host/src/api1.rs` | methods, fields and error codes are additive |
 | API1 caps_version | 2 | `API1_CAPS` | `host/routeloom-host/src/api1.rs` | bumped when an existing capability's meaning changes |
 
@@ -67,7 +67,7 @@ the Rust workspace and meshviz). Each surface below carries its own number.
 | Host operation store (SQLite) | 4 | `STORE_HOST_OPS` | `host/routeloom-host/src/sqlite_store.rs` | accepts 1..=current and migrates forward |
 | Site Authority store (SQLite) | 3 | `STORE_SITE` | `host/routeloom-host/src/site/store.rs` | migrates 1 and 2 forward, keeping a copy of the old file; other versions refused |
 
-Toolchain: ESP-IDF v6.0.3 (`76f5dedd9950a3012fee8fb7d5586df21fc67802`), Rust 1.85.0. Partition layout ID: not registered yet.
+Toolchain: ESP-IDF v6.0.3 (`76f5dedd9950a3012fee8fb7d5586df21fc67802`), Rust 1.85.0. Partition layout ID: PT-4M-v2.
 
 Reason codes are u16 and are allocated by area:
 
@@ -190,7 +190,10 @@ tests: its security vtable holds static keys only, and production security
 - `rl_context` is opaque; storage is caller-provided via
   `rl_context_size()`/`rl_context_alignment()` + `rl_init`.
 - The Device C API (`routeloom/device.h`, `rl_dev_*`) follows the same
-  header rule with its own major, `RL_DEV_API_VERSION` (`1`); its layouts
+  header rule with its own major, `RL_DEV_API_VERSION` (`1`). Its additive
+  tails accept the original prefix: capabilities before `object_transfer`,
+  observer before `on_object`, and join policy before `smart_join`; fields
+  outside the caller's `struct_size` are not accessed. Its layouts
   are pinned in [`protocol/abi-golden/device-api1.json`](../../protocol/abi-golden/device-api1.json)
   by the same tool. Its value types shared with the core (`rl_message_id_t`,
   `rl_delivery_result_t`, `rl_applied_*_t`, `rl_group_send_options_t`) carry

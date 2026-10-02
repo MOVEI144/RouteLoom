@@ -69,8 +69,8 @@ C++ の各関数に対応する `rl_dev_*` を置く（`rl_dev_send`、`rl_dev_s
 - callback は `rl_dev_observer_t`（`on_message`、`on_delivery`、`on_membership`、`on_connectivity`、`on_operation`、`on_applied_request`、`on_poll`）。`on_poll` は Owner の pass ごとに callback の外で呼ぶので、そこから Device を呼べる。
 - APPLIED の受信側は常に非同期：`on_applied_request` で ticket を受け、callback の後で `rl_dev_complete_applied` を呼ぶ。`on_applied_request` が NULL なら NoEndpoint で拒否する。
 - 他の task からは `rl_dev_post(job, ctx)` だけ（8 件、満杯は `RL_STATUS_BUSY`）。
-- 全 struct の先頭に `{struct_size, version}`。version は `RL_DEV_API_VERSION`（1）、struct_size は header の宣言以上でなければ `RL_STATUS_INVALID_ARGUMENT`。大きい struct_size は受けて末尾を無視する。1.x は末尾の追加と関数の追加だけで、layout は `protocol/abi-golden/device-api1.json`（ILP32 と LP64）で固定する。共通の値の型（`rl_message_id_t`、`rl_delivery_result_t`、`rl_applied_*_t`、`rl_group_send_options_t`）は core ABI 3 のものを使い、version は `RL_ABI_VERSION`。
-- sleep の C wrapper は V2-17 の対象であり、まだ提供しない。
+- 全 struct の先頭に `{struct_size, version}`。version は `RL_DEV_API_VERSION`（1）、struct_size は必須 prefix より短いと `RL_STATUS_INVALID_ARGUMENT`。通常は `sizeof`、追加末尾を持つ capabilities／observer／join_policy はそれぞれ `offsetof(object_transfer)`／`offsetof(on_object)`／`offsetof(smart_join)` までの旧 prefix も受ける。渡された範囲だけを読み書きし、宣言より大きい struct_size の余剰末尾は無視する。1.x は末尾の追加と関数の追加だけで、layout は `protocol/abi-golden/device-api1.json`（ILP32 と LP64）で固定する。共通の値の型（`rl_message_id_t`、`rl_delivery_result_t`、`rl_applied_*_t`、`rl_group_send_options_t`）は core ABI 3 のものを使い、version は `RL_ABI_VERSION`。
+- sleep は C++ の Device API だけで提供し、C wrapper はまだ無い（v2.x で追加）。
 
 ### JoinPolicy
 
