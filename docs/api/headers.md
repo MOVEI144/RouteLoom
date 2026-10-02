@@ -23,6 +23,8 @@
 | `congestion.hpp` | [routeloom](../../components/routeloom/include/routeloom/congestion.hpp) |
 | `counter_store.hpp` | [routeloom](../../components/routeloom/include/routeloom/counter_store.hpp) |
 | `crc32.hpp` | [routeloom](../../components/routeloom/include/routeloom/crc32.hpp) |
+| `crypto_progress.hpp` | [routeloom](../../components/routeloom/include/routeloom/crypto_progress.hpp) |
+| `crypto_worker.hpp` | [routeloom](../../components/routeloom/include/routeloom/crypto_worker.hpp) |
 | `deadline.hpp` | [routeloom](../../components/routeloom/include/routeloom/deadline.hpp) |
 | `device_credential.hpp` | [routeloom](../../components/routeloom/include/routeloom/device_credential.hpp) |
 | `discovery.hpp` | [routeloom](../../components/routeloom/include/routeloom/discovery.hpp) |
@@ -86,6 +88,7 @@
 | `security.hpp` | [routeloom](../../components/routeloom/include/routeloom/security.hpp) |
 | `security_floor.hpp` | [routeloom](../../components/routeloom/include/routeloom/security_floor.hpp) |
 | `session_bank.hpp` | [routeloom](../../components/routeloom/include/routeloom/session_bank.hpp) |
+| `signature_progress.hpp` | [routeloom](../../components/routeloom/include/routeloom/signature_progress.hpp) |
 | `site_signed.hpp` | [routeloom](../../components/routeloom/include/routeloom/site_signed.hpp) |
 | `status.hpp` | [routeloom](../../components/routeloom/include/routeloom/status.hpp) |
 | `telemetry.hpp` | [routeloom](../../components/routeloom/include/routeloom/telemetry.hpp) |
@@ -103,6 +106,7 @@
 | `device.hpp` | [routeloom_device](../../components/routeloom_device/include/routeloom/device.hpp) |
 | `espnow_autonomy.hpp` | [routeloom_espnow](../../components/routeloom_espnow/include/routeloom/espnow_autonomy.hpp) |
 | `espnow_board_config.hpp` | [routeloom_espnow](../../components/routeloom_espnow/include/routeloom/espnow_board_config.hpp) |
+| `espnow_crypto_worker.hpp` | [routeloom_espnow](../../components/routeloom_espnow/include/routeloom/espnow_crypto_worker.hpp) |
 | `espnow_flash_layout.hpp` | [routeloom_espnow](../../components/routeloom_espnow/include/routeloom/espnow_flash_layout.hpp) |
 | `espnow_migration.hpp` | [routeloom_espnow](../../components/routeloom_espnow/include/routeloom/espnow_migration.hpp) |
 | `espnow_power.hpp` | [routeloom_espnow](../../components/routeloom_espnow/include/routeloom/espnow_power.hpp) |
