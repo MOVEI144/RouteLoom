@@ -133,12 +133,18 @@ void MeshNode::obs_tx_submitted(TxJob& job, const std::uint64_t token,
     }
     bucket->current.last_sample_ms = now_ms;
   }
-  // Per-peer mirror (03 §6): the A->B queue picture and the exchange ratio
-  // are per-next-hop, so the global bucket is mirrored into the neighbor
-  // record even when the bounded bucket pool overflows.
+  // Per-next-hop routing inputs (03 §6) remain available even when the
+  // bounded observation bucket pool overflows.
   if (auto* neighbor = find_neighbor(job.peer)) {
     ++neighbor->sojourn_samples;
-    ewma_add(neighbor->queue_sojourn_ewma_ms, now_ms - job.enqueued_at_ms,
+    const auto& header = job.form == JobForm::Plain ? job.plain.header : job.forwarded.header;
+    const bool object = header.type == FrameType::AppObjectStart ||
+                        header.type == FrameType::AppObjectChunk || header.type == FrameType::AppObjectAck;
+    // Object's intentional spare-airtime hold is not next-hop congestion.
+    // Full enqueue-to-radio delay remains in the observation bucket above.
+    const auto eligible_ms = object ? std::max(job.enqueued_at_ms, job.not_before_ms)
+                                    : job.enqueued_at_ms;
+    ewma_add(neighbor->queue_sojourn_ewma_ms, now_ms - eligible_ms,
              neighbor->sojourn_samples);
     neighbor->last_sojourn_ms = now_ms;
     neighbor->metric_sources |= Neighbor::kMetricSourceLocalSojourn;

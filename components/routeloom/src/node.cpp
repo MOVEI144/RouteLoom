@@ -396,7 +396,7 @@ MeshNode::DedupEntry* MeshNode::allocate_dedup(
     const std::uint32_t deadline_remaining_ms, const MonotonicMs now_ms) noexcept {
   if (auto* existing = find_dedup(key, type, round)) return existing;
 
-  // Class admission gates (02 §2.5) run BEFORE touching the pool: terminal
+  // Class admission gates (02 §2.5) run before admitting work: terminal
   // pins may never reach into the transit reserve, and one previous-hop peer
   // may not monopolize retained non-terminal state.
   //
@@ -405,9 +405,18 @@ MeshNode::DedupEntry* MeshNode::allocate_dedup(
   // transit records must not refuse delivery to this node's own application
   // while the sweep below could reclaim one of them (#39 collateral refusal).
   if (phase == DedupPhase::Terminal && count_terminal_pins() >= kDedupTerminalPinMax) {
-    saturating_inc(dedup_stats_.refused_terminal_reserve);
-    observer_.on_diagnostic("DEDUP_TERMINAL_RESERVE", upstream, &key.id);
-    return nullptr;
+    // RX admission can precede the periodic sweep after an occupied Owner.
+    // A pin whose full retention elapsed no longer consumes the quota.
+    auto* expired = dedup_.find([&](const DedupEntry& value) {
+      return value.phase == DedupPhase::Terminal && value.expires_at_ms <= now_ms;
+    });
+    if (expired == nullptr) {
+      saturating_inc(dedup_stats_.refused_terminal_reserve);
+      observer_.on_diagnostic("DEDUP_TERMINAL_RESERVE", upstream, &key.id);
+      return nullptr;
+    }
+    dedup_.release(expired);
+    saturating_inc(dedup_stats_.expired);
   }
   if (phase != DedupPhase::Terminal &&
       count_transit_upstream(upstream) >= kDedupPerUpstreamMax &&

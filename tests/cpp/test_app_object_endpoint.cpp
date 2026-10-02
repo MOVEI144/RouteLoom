@@ -9,7 +9,7 @@
 #include "test_sim.hpp"
 
 using namespace routeloom;
-static_assert(sizeof(AppObject) <= profile::kEndSessions * 20 + 864,
+static_assert(sizeof(AppObject) <= profile::kEndSessions * 20 + 1536,
               "AppObject metadata budget excludes caller-owned payload buffers");
 namespace {
 // Endpoint boundaries include one authenticated driver-queue handoff; radio
@@ -50,11 +50,12 @@ class Observer final : public NodeObserver, public ObjectObserver {
   void on_delivery(const DeliveryResult&) noexcept override {}
   void on_diagnostic(const char*, NodeId, const MessageId*) noexcept override {}
   void on_object(const ObjectRxInfo&, ByteView) noexcept override { ++received; }
-  void on_object_result(const ObjectResult& value) noexcept override { result = value; }
+  void on_object_result(const ObjectResult& value) noexcept override { result = value; ++results; }
   std::size_t object_receive_slots() const noexcept override { return slots; }
   std::size_t slots{ROUTELOOM_APP_OBJECT_RX_SLOTS};
   ObjectResult result{};
   unsigned received{0};
+  unsigned results{0};
 };
 struct Fixture {
   Radio radio;
@@ -136,6 +137,9 @@ void terminal_ack_guard() {
     f.object->poll(0); f.object->poll(1);
     auto ack = frame(FrameType::AppObjectAck, object_wire::Ack{id, object_wire::AckStatus::Incomplete, 0, 0});
     f.object->on_config_frame(2, ack, 2);
+    const auto busy = frame(FrameType::AppObjectAck,
+                            object_wire::Ack{id, object_wire::AckStatus::Busy, 0, 0});
+    f.object->on_config_frame(2, busy, 3);
     f.object->poll(3); f.object->poll(500);
     if (boundary == 1) f.security.tx_context = 2;
     const MonotonicMs now = boundary == 2 ? 10002 : 501;
@@ -147,6 +151,26 @@ void terminal_ack_guard() {
     assert(f.observer.result.state == expected);
     if (boundary == 1) assert(f.observer.result.reason == StatusCode::AuthRequired);
     if (boundary == 2) assert(f.observer.result.reason == StatusCode::Expired);
+  }
+}
+void remote_busy_deadline() {
+  for (const bool no_buffer : {false, true}) {
+    Fixture f;
+    ObjectId id = 0;
+    ObjectOptions options{}; options.deadline_ms = 30000;
+    assert(f.object->send(2, {f.storage.data(), 1}, options, 0, id));
+    f.object->poll(0); f.object->poll(1);
+    for (MonotonicMs now = 1000; now < 30000; now += 1000) {
+      const auto ack = frame(FrameType::AppObjectAck, object_wire::Ack{
+          id, no_buffer ? object_wire::AckStatus::NoBuffer : object_wire::AckStatus::Busy, 0, 0});
+      f.object->on_config_frame(2, ack, now);
+      f.object->poll(now);
+      assert(f.observer.results == (no_buffer ? 1U : 0U));
+    }
+    f.object->poll(30000);
+    assert(f.observer.results == 1);
+    assert(f.observer.result.state == (no_buffer ? ObjectState::Failed : ObjectState::Expired));
+    assert(f.observer.result.reason == (no_buffer ? StatusCode::NoCapacity : StatusCode::Expired));
   }
 }
 void source_floor_capacity() {
@@ -219,6 +243,7 @@ int main(int argc, char** argv) {
   if (argc == 1 || std::string(argv[1]) == "loan") loan_registration();
   if (argc == 1 || std::string(argv[1]) == "deadline") received_deadline();
   if (argc == 1 || std::string(argv[1]) == "ack") terminal_ack_guard();
+  if (argc == 1 || std::string(argv[1]) == "busy") remote_busy_deadline();
   if (argc == 1 || std::string(argv[1]) == "floor") source_floor_capacity();
   if (argc == 1 || std::string(argv[1]) == "boot") boot_retires_full_receiver();
 }

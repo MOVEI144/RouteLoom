@@ -458,8 +458,8 @@ add_test(NAME routeloom_usb_state_gate_tests COMMAND routeloom_usb_state_gate_te
 # below/above capacity with honest saturation. The fills are sized for the
 # relay capacity (96); builds with another dedup capacity cover it through
 # the mesh suites instead (tools/check.py profiles).
-if(ROUTELOOM_DEDUP_CAPACITY EQUAL 96 OR
-   (ROUTELOOM_DEDUP_CAPACITY EQUAL 0 AND
+if(ROUTELOOM_DEDUP_PROFILE STREQUAL "relay" OR
+   (ROUTELOOM_DEDUP_PROFILE STREQUAL "" AND
     NOT ROUTELOOM_RESOURCE_PROFILE STREQUAL "endpoint" AND
     NOT ROUTELOOM_RESOURCE_PROFILE STREQUAL "gateway_small"))
   add_executable(routeloom_dedup_tests test_dedup.cpp)

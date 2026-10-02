@@ -1087,6 +1087,17 @@ impl MeshPeer {
         Some(tick)
     }
 
+    pub(super) fn terminal_count(&mut self, session: u32, sequence: u64) -> u32 {
+        let mut command = vec![b't'];
+        command.extend_from_slice(&session.to_le_bytes());
+        command.extend_from_slice(&sequence.to_le_bytes());
+        self.send(&command);
+        let reply = self.recv().expect("terminal count reply");
+        assert_eq!(reply.len(), 5);
+        assert_eq!(reply[0], b't');
+        get_u32(&reply, &mut 1)
+    }
+
     pub(super) fn send_rx(&mut self, src_mac: &[u8; 6], dst_mac: &[u8; 6], frame: &[u8]) {
         let mut command = vec![b'R'];
         command.extend_from_slice(src_mac);
@@ -1228,6 +1239,17 @@ impl MeshPeer {
         command.extend_from_slice(payload);
         self.send(&command);
         let reply = self.recv().expect("craft reply");
+        assert_eq!(reply[0], b'o');
+        reply[1..].to_vec()
+    }
+
+    /// Rewrap the last crafted End envelope with a fresh Link counter.
+    pub(super) fn retry_crafted_frame(&mut self, remaining_ms: u32, corrupt_end: bool) -> Vec<u8> {
+        let mut command = vec![b'O'];
+        command.extend_from_slice(&remaining_ms.to_le_bytes());
+        command.push(u8::from(corrupt_end));
+        self.send(&command);
+        let reply = self.recv().expect("crafted retry reply");
         assert_eq!(reply[0], b'o');
         reply[1..].to_vec()
     }
