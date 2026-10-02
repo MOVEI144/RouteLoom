@@ -381,6 +381,36 @@ fn main() {
             forward: None,
         },
         Case {
+            name: "broadcast_route_update",
+            comment: "Scoped ROUTE_UPDATE, GroupLink protection (C++ wire codec)",
+            frame: plain(
+                FrameType::RouteUpdate,
+                0,
+                DeliveryClass::BestEffort,
+                0,
+                1,
+                2,
+                BROADCAST_NODE_ID,
+                2,
+                BROADCAST_NODE_ID,
+                101,
+                7,
+                5000,
+                &broadcast_route::encode(
+                    &[broadcast_route::Record {
+                        destination: 2,
+                        generation: 1,
+                        sequence: 0,
+                        metric: 0,
+                        via: 0,
+                    }],
+                    2,
+                )
+                .expect("broadcast route payload"),
+            ),
+            forward: None,
+        },
+        Case {
             name: "route_request",
             comment: "ROUTE_REQUEST Discover (38-byte payload), link protection only",
             frame: plain(

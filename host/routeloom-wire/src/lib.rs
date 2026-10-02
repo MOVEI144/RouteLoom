@@ -30,10 +30,10 @@
 //! 52      8     message sequence                  E
 //! 60      4     remaining deadline ms             H
 //! 64      4     original lifetime ms              E
-//! 68      2     link epoch                        H
-//! 70      2     end epoch                         E
-//! 72      8     link crypto counter               H
-//! 80      8     end crypto counter                E
+//! 68      4     link epoch                        H
+//! 72      4     end epoch                         E
+//! 76      6     link crypto counter               H
+//! 82      6     end crypto counter                E
 //! 88      n     link ciphertext: payload [+ end tag if FLAG_END_PROTECTED]
 //! 88+n    16    link AEAD tag (AAD = complete 88-byte header)
 //! ```
@@ -260,8 +260,10 @@ impl TryFrom<u8> for DeliveryClass {
 pub enum SecurityScope {
     Link = 0,
     EndToEnd = 1,
-    /// GROUP_DATA end protection: sender = origin, receiver = group address.
+    /// GROUP_DATA end protection: receiver = the site-group domain.
     Group = 2,
+    /// Scoped broadcast ROUTE_UPDATE, keyed by sender boot and GK epoch.
+    GroupLink = 3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -272,6 +274,12 @@ pub struct SecurityContext {
     pub receiver: u64,
     /// Wire v2: 32-bit, never wraps in a device lifetime.
     pub epoch: u32,
+    /// GroupLink: the header's end_epoch (GK generation).
+    pub group_epoch: u32,
+    /// Group: the header's message session.
+    pub sender_boot: u32,
+    /// Group: the full destination group address.
+    pub group_id: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -569,20 +577,28 @@ fn end_aad(header: &Header) -> [u8; 53] {
 }
 
 fn link_context(header: &Header) -> SecurityContext {
+    let group = header.frame_type == FrameType::RouteUpdate && header.next_hop == BROADCAST_NODE_ID;
     SecurityContext {
-        scope: SecurityScope::Link,
+        scope: if group {
+            SecurityScope::GroupLink
+        } else {
+            SecurityScope::Link
+        },
         network: header.network,
         sender: header.previous_hop,
         receiver: header.next_hop,
         epoch: header.link_epoch,
+        group_epoch: if group { header.end_epoch } else { 0 },
+        sender_boot: 0,
+        group_id: 0,
     }
 }
 
 fn end_context(header: &Header) -> SecurityContext {
     // GROUP_DATA is end-protected under the group scope (C++ end_context):
-    // the context receiver is the fixed site-group domain, so one key,
-    // counter space and replay window per (sender, epoch) cover every group;
-    // the destination group stays authenticated through the end AAD.
+    // the fixed receiver shares the counter/replay domain across groups,
+    // while group_id and sender_boot carry the per-group/session key inputs.
+    // The destination group also stays authenticated through the end AAD.
     let group = header.frame_type == FrameType::GroupData;
     SecurityContext {
         scope: if group {
@@ -598,6 +614,9 @@ fn end_context(header: &Header) -> SecurityContext {
             header.destination
         },
         epoch: header.end_epoch,
+        group_epoch: 0,
+        sender_boot: if group { header.message.session } else { 0 },
+        group_id: if group { header.destination } else { 0 },
     }
 }
 
@@ -630,9 +649,11 @@ fn wrap_link<S: SecurityProvider>(
 }
 
 pub fn validate_header(header: &Header) -> Result<()> {
-    // frame_type/delivery are enums, so the decoder's unknown-type and
-    // delivery-class rejections cannot be bypassed at the API boundary: an
-    // invalid value is unconstructable here (unlike the C++ u8 fields).
+    // Extension carries a public u8, so the enum alone cannot enforce the
+    // registry. Never emit a type that the decoder would reject.
+    if matches!(header.frame_type, FrameType::Extension(_)) && !header.frame_type.is_extension() {
+        return err(ErrorCode::InvalidArgument, "unknown frame type");
+    }
     if header.network == 0
         || header.network > u64::from(u32::MAX)
         || header.origin == INVALID_NODE_ID
@@ -641,6 +662,21 @@ pub fn validate_header(header: &Header) -> Result<()> {
         || header.next_hop == INVALID_NODE_ID
     {
         return err(ErrorCode::InvalidArgument, "wire identity field is invalid");
+    }
+    if (header.next_hop == BROADCAST_NODE_ID
+        || (header.frame_type == FrameType::RouteUpdate && header.destination == BROADCAST_NODE_ID))
+        && (header.frame_type != FrameType::RouteUpdate
+            || header.next_hop != BROADCAST_NODE_ID
+            || header.destination != BROADCAST_NODE_ID
+            || header.origin != header.previous_hop
+            || header.origin == BROADCAST_NODE_ID
+            || header.hop_remaining != 1
+            || header.delivery != DeliveryClass::BestEffort
+            || header.delivery_round != 0
+            || header.flags != 0
+            || header.end_counter != 0)
+    {
+        return err(ErrorCode::ProtocolError, "invalid broadcast route header");
     }
     if header.payload_length > MAX_APPLICATION_PAYLOAD as u16 {
         return err(ErrorCode::InvalidArgument, "payload exceeds v1 limit");
@@ -680,6 +716,9 @@ pub fn encode_new<S: SecurityProvider>(
     let mut header = input.header.clone();
     header.payload_length = input.payload_size as u16;
     validate_header(&header)?;
+    if header.next_hop == BROADCAST_NODE_ID && (header.link_epoch == 0 || header.end_epoch == 0) {
+        return err(ErrorCode::InvalidState, "GroupLink epochs unavailable");
+    }
 
     header.link_counter = security.next_counter(&link_context(&header))?;
 
@@ -724,6 +763,9 @@ pub fn open_link<S: SecurityProvider>(
             ErrorCode::AuthorizationFailed,
             "frame is not addressed to this hop",
         );
+    }
+    if header.next_hop == BROADCAST_NODE_ID && (header.link_epoch == 0 || header.end_epoch == 0) {
+        return err(ErrorCode::ProtocolError, "invalid GroupLink epochs");
     }
     let expected_plain = usize::from(header.payload_length)
         + if header.flags & FLAG_END_PROTECTED != 0 {
