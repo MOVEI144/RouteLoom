@@ -351,7 +351,10 @@ class AuthorityClient final {
   // True only when Dormant with nothing pending and no outer call in flight.
   bool quiescent() const noexcept;
   // Next Tick the owner must honour, or UINT64_MAX when nothing is pending.
+  // Port retries may wait for an external completion; protocol timers
+  // remain scheduled even while that work is blocked.
   MonotonicMs next_deadline() const noexcept;
+  MonotonicMs next_deadline(bool retry_port) const noexcept;
 
  private:
   enum class TxKind : std::uint8_t { None = 0, R1, R3, Envelope };

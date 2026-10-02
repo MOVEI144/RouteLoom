@@ -578,14 +578,18 @@ bool AuthorityClient::quiescent() const noexcept {
 }
 
 MonotonicMs AuthorityClient::next_deadline() const noexcept {
+  return next_deadline(true);
+}
+
+MonotonicMs AuthorityClient::next_deadline(const bool retry_port) const noexcept {
   if (state_ == AuthoritySnapshot::State::Dormant) return UINT64_MAX;
-  if (tx_size_ != 0) return 0;  // staged bytes wait for the port; retry now
+  if (retry_port && tx_size_ != 0) return 0;
   if (state_ == AuthoritySnapshot::State::Backoff) return backoff_until_;
   if (state_ == AuthoritySnapshot::State::Connecting) return hs_deadline_;
-  if (ack_pending_ || !join_confirm_sent_) return 0;
+  if (retry_port && (ack_pending_ || !join_confirm_sent_)) return 0;
   MonotonicMs deadline = UINT64_MAX;
   if (!join_confirmed_) deadline = sat_add(ready_since_, kJoinConfirmTimeoutMs);
-  if (pull_pending_) {
+  if (pull_pending_ && (retry_port || tx_size_ == 0)) {
     const MonotonicMs due =
         !pull_sent_ ? ready_since_ : sat_add(last_pull_ms_, kPullBucketMs);
     if (due < deadline) deadline = due;

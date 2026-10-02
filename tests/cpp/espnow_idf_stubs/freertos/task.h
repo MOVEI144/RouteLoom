@@ -24,6 +24,8 @@ BaseType_t xTaskCreatePinnedToCore(TaskFunction_t fn, const char *name,
                                    BaseType_t core);
 void vTaskSuspend(TaskHandle_t task);
 TaskHandle_t xTaskGetCurrentTaskHandle(void);
+UBaseType_t uxTaskPriorityGet(TaskHandle_t task);
+void vTaskPrioritySet(TaskHandle_t task, UBaseType_t priority);
 void vTaskDelay(TickType_t ticks);
 void vTaskDelete(TaskHandle_t task);
 uint32_t uxTaskGetStackHighWaterMark(TaskHandle_t task);

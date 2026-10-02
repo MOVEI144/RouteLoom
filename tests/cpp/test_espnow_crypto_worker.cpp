@@ -26,6 +26,10 @@ TaskHandle_t worker_task = nullptr;
 unsigned worker_notifications = 0;
 unsigned owner_notifications = 0;
 unsigned owner_handle = 0;
+unsigned replacement_handle = 0;
+unsigned replacement_notifications = 0;
+UBaseType_t owner_priority = 1;
+UBaseType_t worker_priority = 0;
 unsigned creates = 0;
 unsigned executions = 0;
 bool fail_create = true;
@@ -47,7 +51,8 @@ TaskHandle_t xTaskCreateStatic(TaskFunction_t fn, const char* name, uint32_t dep
   // Both C3/C6 use IDF's byte-count stack API. Crypto must be runnable
   // above IDLE, alongside the default priority-1 Owner.
   CHECK(depth == 4096 && stack != nullptr && storage != nullptr);
-  CHECK(priority == tskIDLE_PRIORITY + 1);
+  CHECK(priority == owner_priority && priority > tskIDLE_PRIORITY);
+  worker_priority = priority;
   if (fail_create) return nullptr;
   entry = fn;
   argument = param;
@@ -55,11 +60,22 @@ TaskHandle_t xTaskCreateStatic(TaskFunction_t fn, const char* name, uint32_t dep
   return worker_task;
 }
 
+UBaseType_t uxTaskPriorityGet(TaskHandle_t task) {
+  CHECK(task == nullptr);
+  return owner_priority;
+}
+void vTaskPrioritySet(TaskHandle_t task, UBaseType_t priority) {
+  CHECK(task == worker_task && priority == owner_priority);
+  worker_priority = priority;
+}
+
 void xTaskNotifyGive(TaskHandle_t task) {
   if (task == worker_task && task != nullptr)
     ++worker_notifications;
   else if (task == &owner_handle)
     ++owner_notifications;
+  else if (task == &replacement_handle)
+    ++replacement_notifications;
   else
     CHECK(false);
 }
@@ -96,5 +112,22 @@ int main() {
     owner_notifications = 0;
   }
   CHECK(executions == 3);
+  espnow::detach_crypto_worker(&owner_handle);
+  owner_priority = 3;
+  CHECK(espnow::start_crypto_worker(&completed, &replacement_handle) == worker);
+  CHECK(worker_priority == owner_priority && creates == 2);
+  // An old Owner's destructor must not detach its replacement.
+  espnow::detach_crypto_worker(&owner_handle);
+  CHECK(progress.start(&replacement_handle, &run_job).code == StatusCode::WouldBlock);
+  CHECK(espnow::start_crypto_worker(&completed, &owner_handle) == nullptr);
+  dispatch_worker();
+  CHECK(owner_notifications == 0 && replacement_notifications == 1);
+  Status result{};
+  CHECK(progress.poll(result));
+  espnow::detach_crypto_worker(&replacement_handle);
+  CHECK(progress.start(&replacement_handle, &run_job).code == StatusCode::WouldBlock);
+  dispatch_worker();
+  CHECK(replacement_notifications == 1);
+  CHECK(progress.poll(result));
   return failures == 0 ? 0 : 1;
 }
