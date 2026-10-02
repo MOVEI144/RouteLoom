@@ -467,8 +467,8 @@ rl_status_code_t rl_get_applied_result(const rl_context_t* context, rl_message_i
    driver through vtable send(). */
 void rl_poll(rl_context_t* context, rl_monotonic_ms_t now_ms);
 /* The latest time the owner task must call rl_poll again when no radio
-   event or API call arrives first; ask again after every owner pass. Until
-   the core tracks its timers this is now_ms + RL_POLL_INTERVAL_MAX_MS. */
+   event or API call arrives first; ask again after every owner pass. Core C
+   callers retain RL_POLL_INTERVAL_MAX_MS as their maximum wait. */
 #define RL_POLL_INTERVAL_MAX_MS 2u
 rl_monotonic_ms_t rl_next_deadline(const rl_context_t* context, rl_monotonic_ms_t now_ms);
 void rl_on_radio_receive(rl_context_t* context, rl_node_id_t peer,

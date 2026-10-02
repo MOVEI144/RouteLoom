@@ -644,7 +644,7 @@ int "Measured local channel-switch bound (ms) — deployment input"
 ```text
 bool "Drive a deep-sleep prepare/enter cycle"
         default n
-        depends on ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && !ROUTELOOM_ROLE_GATEWAY
+        depends on !ROUTELOOM_ROLE_GATEWAY
         help
             Experimental path: the Owner prepares sleep after
             ROUTELOOM_SLEEP_AFTER_MS of uptime and enters deep sleep with a

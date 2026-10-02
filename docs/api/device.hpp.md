@@ -33,12 +33,23 @@
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/key_schedule.hpp"
 #include "routeloom/node.hpp"
+#include "routeloom/power.hpp"
 #include "routeloom/profile.hpp"
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_store.hpp"
 #include "routeloom/types.hpp"
 #include "routeloom/usb_bridge.hpp"
 #include "sdkconfig.h"
+
+// Firmware reserves sleep state only in its explicit deep-sleep build.
+// Host harnesses exercise the same API with caller-owned storage.
+#ifndef ROUTELOOM_DEVICE_SLEEP
+#if defined(ESP_PLATFORM)
+#define ROUTELOOM_DEVICE_SLEEP CONFIG_ROUTELOOM_DEEP_SLEEP
+#else
+#define ROUTELOOM_DEVICE_SLEEP 1
+#endif
+#endif
 
 // Remote-config target of a DevRam or Member node (V2-08, issue #17): the
 // SDK-namespace journal on the node's routed config lane. Firmware images
@@ -212,6 +223,9 @@ class DeviceObserver {
     (void)cause;
   }
   virtual void on_connectivity(const ConnectivitySnapshot& snapshot) noexcept { (void)snapshot; }
+  // Durable sleep pending was re-injected (Ok) or refused/expired. Ok is
+  // admission only; on_delivery reports the subsequent delivery outcome.
+  virtual void on_sleep_pending_result(const PendingDeliveryRecord&, StatusCode) noexcept {}
   // A request_join or leave ended: JOINED, JOIN_DENIED, JOIN_PENDING,
   // JOIN_TIMEOUT, LEFT or RECOVERY_REQUIRED (reason ids).
   virtual void on_operation(OperationId operation, std::uint16_t result) noexcept {
@@ -285,14 +299,24 @@ class Device {
 
   // One Owner pass: USB, runtime drain, owner, posted jobs, poll hook.
   void step(MonotonicMs now_ms) noexcept;
-  // Latest time the next step() may run. Fixed at one Owner poll period
-  // until the components report their deadlines.
+  // Minimum component deadline bounded by the role ceiling (endpoint
+  // 1000 ms, relay 100 ms, gateway 20 ms); unsupported work keeps 2 ms.
   MonotonicMs next_deadline(MonotonicMs now_ms) const noexcept;
+  // Caller-owned coordinator over mesh(), with an Owner-aware PowerPort.
+  // Bind once after adoption; all sleep work then runs through step().
+  Status bind_sleep(PowerCoordinator& power, ResetCause cause, ElapsedInterval elapsed,
+                    MonotonicMs now_ms) noexcept;
+  Status prepare_sleep(const SleepRequest& request) noexcept;
+  Status enter_sleep(const SleepTicket& ticket) noexcept;
+  Status abort_sleep() noexcept;
+  Status wake(ResetCause cause, ElapsedInterval elapsed, MonotonicMs now_ms) noexcept;
+  SleepTicket sleep_ticket() const noexcept;
+  ResumeOutcome wake_info() const noexcept;
   // Gateway USB input for the next step().
   void usb_receive(ByteView bytes, MonotonicMs now_ms) noexcept;
 
   // The only call another task may make: queues `job` for the Owner task.
-  // Busy when kPostCapacity jobs are waiting.
+  // Busy when kPostCapacity jobs are waiting or sleep handoff has begun.
   Status post(Job job, void* ctx) noexcept;
 
   Status send(NodeId destination, ByteView payload, const SendOptions& options,
@@ -346,12 +370,25 @@ class Device {
  private:
   friend struct ::rl_dev;
   friend struct DeviceTestAccess;
+  void bind_runtime(espnow::EspNowRuntime& runtime) noexcept;
+#if ROUTELOOM_DEVICE_SLEEP
+  class Observer final : public NodeObserver, public PowerEvents {
+#else
   class Observer final : public NodeObserver {
+#endif
    public:
     // Constant-initialized, so begin() holds it without a guard and an
     // image that never begins (maintenance console) links none of it.
     constexpr Observer() noexcept = default;
     void bind(Device& device) noexcept { device_ = &device; }
+#if ROUTELOOM_DEVICE_SLEEP
+    void on_transition(PowerState, PowerState, const char*) noexcept override {}
+    void on_pending_result(const PendingDeliveryRecord& record,
+                           StatusCode result) noexcept override;
+    void on_diagnostic(const char* reason) noexcept override {
+      on_diagnostic(reason, kInvalidNodeId, nullptr);
+    }
+#endif
     void on_message(const MessageKey& key, NodeId source, ByteView payload) noexcept override;
     void on_message(const MessageKey& key, NodeId source, ByteView payload,
                     const DeliveryAssurance& assurance) noexcept override;
@@ -367,6 +404,10 @@ class Device {
    private:
     Device* device_{nullptr};
   };
+  static Observer& observer() noexcept {
+    static Observer value;
+    return value;
+  }
   struct Posted {
     Job job{nullptr};
     void* ctx{nullptr};
@@ -408,6 +449,10 @@ class Device {
   espnow::EspNowSecurityOwner* owner_{nullptr};
   usb::UsbBridge* bridge_{nullptr};
   GatewayDelivery* gateway_{nullptr};
+#if ROUTELOOM_DEVICE_SLEEP
+  PowerCoordinator* power_{nullptr};
+  RadioGeneration sleep_radio_generation_{};
+#endif
 #if ROUTELOOM_DEVICE_REMOTE_CONFIG
   DeviceRemoteConfig* remote_config_{nullptr};
 #endif
@@ -454,6 +499,9 @@ class Device {
   std::array<Posted, kPostCapacity> posted_{};
   std::uint8_t posted_head_{0};
   std::uint8_t posted_count_{0};
+#if ROUTELOOM_DEVICE_SLEEP
+  bool sleep_post_blocked_{false};  // guarded by posted_lock_
+#endif
   portMUX_TYPE posted_lock_ = portMUX_INITIALIZER_UNLOCKED;
 };
 
