@@ -706,7 +706,8 @@ MonotonicMs SecurityCoordinator::next_deadline(const MonotonicMs now) const noex
   if (has_member_engine()) {
     sooner(member().engine.next_deadline(now));
     sooner(bank_.next_deadline());
-    if (bank_.demand_count() != 0) {
+    if (bank_.demand_count() != 0 &&
+        (deps_.crypto_worker == nullptr || deps_.crypto_worker->idle())) {
       // A missing binding can requeue a demand; it cannot run until an event.
       sooner(now > kJoinNoDeadline - 2 ? kJoinNoDeadline : now + 2);
     }
@@ -723,7 +724,11 @@ MonotonicMs SecurityCoordinator::next_deadline(const MonotonicMs now) const noex
                                       : last_authority_start_ + 1000;
         sooner(retry);
       } else {
-        sooner(small().authority.next_deadline());
+        // A blocked authority carrier can be waiting for the link job in
+        // the same mailbox. Completion/RX/TX wakes retry it, not a due-now
+        // deadline that starves the executor. Keep real authority timers.
+        const bool retry_port = deps_.crypto_worker == nullptr || deps_.crypto_worker->idle();
+        sooner(small().authority.next_deadline(retry_port));
       }
     }
   }

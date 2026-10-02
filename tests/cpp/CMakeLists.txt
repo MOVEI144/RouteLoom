@@ -358,14 +358,16 @@ if(ROUTELOOM_RESOURCE_PROFILE STREQUAL "endpoint")
 endif()
 
 add_executable(routeloom_espnow_owner_reapply_tests test_espnow_owner_reapply.cpp device_sleep_scenarios.cpp
+    owner_crypto_wait_scenarios.cpp
     espnow_idf_stubs/idf_stubs.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_power.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_device/src/device.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_security_owner.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_crypto_worker.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_sdkv1_store.cpp)
-target_link_libraries(routeloom_espnow_owner_reapply_tests PRIVATE routeloom_core)
+target_link_libraries(routeloom_espnow_owner_reapply_tests PRIVATE routeloom_core Threads::Threads)
 target_include_directories(routeloom_espnow_owner_reapply_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs
@@ -716,6 +718,7 @@ add_library(routeloom_owner_mesh_boot OBJECT owner_mesh_peer.cpp owner_mesh_c_ap
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_security_owner.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1_entropy.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_crypto_worker.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_sdkv1_store.cpp
     ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/nvs_boot_session.cpp
@@ -922,6 +925,18 @@ add_executable(routeloom_crypto_worker_tests test_crypto_worker.cpp)
 target_link_libraries(routeloom_crypto_worker_tests PRIVATE routeloom_core Threads::Threads)
 target_compile_options(routeloom_crypto_worker_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_crypto_worker_tests COMMAND routeloom_crypto_worker_tests)
+
+add_executable(routeloom_espnow_crypto_worker_tests test_espnow_crypto_worker.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_crypto_worker.cpp)
+target_link_libraries(routeloom_espnow_crypto_worker_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_espnow_crypto_worker_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+target_compile_definitions(routeloom_espnow_crypto_worker_tests PRIVATE
+    CONFIG_FREERTOS_SUPPORT_STATIC_ALLOCATION=1)
+target_compile_options(routeloom_espnow_crypto_worker_tests PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_espnow_crypto_worker_tests COMMAND routeloom_espnow_crypto_worker_tests)
 
 add_executable(routeloom_edhoc_tests test_edhoc.cpp edhoc_probe.c)
 target_link_libraries(routeloom_edhoc_tests PRIVATE routeloom_core routeloom_edhoc_headers

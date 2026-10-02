@@ -220,7 +220,11 @@ Status MeshNode::poll(const MonotonicMs now_ms) noexcept {
   // payloads/completions wait in the component event queue for take/complete.
   dispatch_next(now_ms);
   if (!paused(pause::kBackgroundWork)) {
-    note_deadline(next_route_advertisement_ms_);
+    // An elapsed advertisement cannot be admitted while the scheduler
+    // remains full. Its queued work already supplies the retry cadence;
+    // publishing the stale timestamp would keep Owner runnable forever.
+    if (!scheduler_.full() || next_route_advertisement_ms_ > now_ms)
+      note_deadline(next_route_advertisement_ms_);
     if (triggered_advertisement_) {
       note_deadline(std::max(triggered_at_ms_, next_triggered_ms_));
     }
