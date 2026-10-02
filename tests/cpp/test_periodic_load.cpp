@@ -6,12 +6,23 @@
 #include <set>
 #include <vector>
 
+#include "routeloom/profile.hpp"
 #include "test_sim.hpp"
 
 using namespace routeloom;
 using routeloom_test::SimWorld;
 
 int main() {
+  constexpr NodeId kNodeCount = 31;
+  // All nodes share one profile; the gateway needs a route to every other
+  // node. A leaf-sized table cannot represent this gateway/relay topology.
+  if constexpr (profile::kRouteEntries < kNodeCount - 1) {
+    std::fprintf(stderr,
+                 "SKIP K02: G + D*10 + R*20 needs %zu gateway route entries; "
+                 "resource profile provides %zu (leaf-sized table)\n",
+                 static_cast<std::size_t>(kNodeCount - 1), profile::kRouteEntries);
+    return 77;
+  }
   SimWorld w;
   w.net.record_sights = false;
   w.configure = [](NodeConfig& config) {
@@ -20,13 +31,13 @@ int main() {
     config.route_lifetime_ms = kScopedProductLifetimeMs;
     config.route_refresh_ticks = kScopedDefaultRefreshTicks;
   };
-  for (NodeId n = 1; n <= 31; ++n) w.add(n);
+  for (NodeId n = 1; n <= kNodeCount; ++n) w.add(n);
   w.start_all();
   w.link(1, 2, 1, 1);
   w.link(1, 3, 1, 1);
   w.link(1, 4, 1, 1);
   for (NodeId n = 5; n <= 21; ++n) w.link(2 + (n - 5) / 6, n, 1, 1);
-  for (NodeId n = 22; n <= 31; ++n) w.link(n - 10, n, 1, 1);
+  for (NodeId n = 22; n <= kNodeCount; ++n) w.link(n - 10, n, 1, 1);
   // K02 retains a second relay path during churn.
   w.link(2, 3, 1, 1);
   w.run(120000, 50);
@@ -52,7 +63,7 @@ int main() {
       ++fault_hits;
     }
     if (t == 65000) w.net.connect(1, 3);
-    for (NodeId n = 22; n <= 31; ++n) {
+    for (NodeId n = 22; n <= kNodeCount; ++n) {
       const MonotonicMs offset = (n - 22) * 400;
       const bool view = t % 5000 == offset;
       const bool status = t % 15000 == offset + 100 || t % 90000 == offset + 300;
@@ -76,7 +87,7 @@ int main() {
       if (status) ++status_sent;
     }
     w.run(0, 50);
-    for (NodeId n = 1; n <= 31; ++n) {
+    for (NodeId n = 1; n <= kNodeCount; ++n) {
       const auto& received = w.obs(n)->messages;
       for (std::size_t i = last_rx[n]; i < received.size(); ++i) {
         const auto& payload = received[i];
@@ -93,7 +104,9 @@ int main() {
   w.run(5000, 50);
   check(fault_hits == 1, "churn fired");
   check(w.obs(1)->messages.size() * 1000 >= status_sent * 995, "reliable status >=99.5%");
-  for (NodeId n = 22; n <= 31; ++n) check(w.now - last_view[n] < 20000, "final view fresh");
+  for (NodeId n = 22; n <= kNodeCount; ++n) {
+    check(w.now - last_view[n] < 20000, "final view fresh");
+  }
   const MonotonicMs elapsed = w.now - start;
   std::uint64_t total = 0;
   for (const auto& [node, tally] : w.net.route_control_tx) {
