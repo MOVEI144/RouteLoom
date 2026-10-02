@@ -3,6 +3,7 @@
 
 #include "routeloom/sdkv1_joiner.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -776,7 +777,20 @@ JoinSnapshot Joiner::snapshot() const noexcept {
 MonotonicMs Joiner::next_deadline() const noexcept {
   if (crypto_pending()) {
     if (crypto_.ready() || (signature_ != nullptr && signature_->ready())) return last_now_;
-    return overall_deadline_ == 0 ? kJoinNoDeadline : overall_deadline_;
+    // A cancelled loan has no remaining protocol timer. Completion wakes
+    // Owner to reclaim it; elapsed timers must not spin ahead of the worker.
+    if (crypto_.cancelled() || (signature_ != nullptr && signature_->cancelled()))
+      return kJoinNoDeadline;
+    MonotonicMs next = kJoinNoDeadline;
+    if (state_ == JoinState::WaitM2)
+      next = std::min(t2_deadline_, overall_deadline_);
+    else if (state_ == JoinState::WaitM4)
+      next = std::min(t4_deadline_, overall_deadline_);
+    else if (state_ == JoinState::SendM3 || state_ == JoinState::Decided)
+      next = overall_deadline_;
+    if (!direct_ && config_.smart_join && search_deadline_ != 0)
+      next = std::min(next, search_deadline_);
+    return next;
   }
   if (action_pending_) return last_now_;  // the Owner must take it first
   const auto state_deadline = [this]() noexcept -> MonotonicMs {
@@ -903,6 +917,9 @@ void Joiner::stage_rrs(const ByteView object) noexcept {
     sat_inc(counters_.rx_dropped);
     return;
   }
+  // Replaying a signature attempt must retain its input until completion.
+  // Later delivery can be retried through the member's RRS fetch path.
+  if (rrs_staged_len_ != 0 && signature_waiting()) return;
   if (object.size > rrs_staged_.size() || (object.size != 0 && object.data == nullptr)) {
     sat_inc(counters_.rx_dropped);
     return;

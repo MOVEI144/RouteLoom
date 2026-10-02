@@ -716,14 +716,16 @@ bool MembershipLifecycle::permits_recovery_control(
 }
 
 bool MembershipLifecycle::quiescent() const noexcept {
-  if (in_call_) return false;
+  if (in_call_ || crypto_waiting_ || crypto_pending()) return false;
   return !action_pending_ && !exchange_.busy() && !fetch_outstanding_ && !need_rrs() &&
          !pending_ack_ && phase_ != LifecyclePhase::ApplyingRrs;
 }
 
 MonotonicMs MembershipLifecycle::next_deadline() const noexcept {
   MonotonicMs next = 0xFFFFFFFFFFFFFFFFULL;
-  if (phase_ == LifecyclePhase::ApplyingRrs || phase_ == LifecyclePhase::Removing) return 0;
+  if (signature_ != nullptr && signature_->ready()) return 0;
+  if (!crypto_pending() &&
+      (phase_ == LifecyclePhase::ApplyingRrs || phase_ == LifecyclePhase::Removing)) return 0;
   if (phase_ == LifecyclePhase::Holdoff) {
     return holdoff_start_ <= 0xFFFFFFFFFFFFFFFFULL - config_.holdoff_ms
                ? holdoff_start_ + config_.holdoff_ms : 0xFFFFFFFFFFFFFFFFULL;
@@ -1731,7 +1733,14 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
 
 Status MembershipLifecycle::on_poll(const MonotonicMs now_ms) noexcept {
   if (phase_ == LifecyclePhase::Stopped) return Status::success();
-  if (phase_ == LifecyclePhase::ApplyingRrs) return apply_poll(now_ms);
+  if (phase_ == LifecyclePhase::ApplyingRrs) {
+    // Existing transfers and receipts keep their deadlines while the
+    // candidate's signature is computing; adoption remains in apply_poll.
+    exchange_.poll(now_ms);
+    if (fetch_outstanding_ && now_ms >= fetch_deadline_) clear_fetch(true, now_ms);
+    if (pending_ack_ && now_ms >= pending_ack_due_) send_pending_ack(now_ms);
+    return apply_poll(now_ms);
+  }
   if (phase_ == LifecyclePhase::Switching) return switch_poll(now_ms);
   if (phase_ == LifecyclePhase::Removing) return removal_poll(now_ms);
   if (phase_ == LifecyclePhase::Holdoff) {

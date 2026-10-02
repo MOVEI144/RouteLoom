@@ -1619,6 +1619,32 @@ void test_stop_retains_worker_workspace() {
     CHECK(coordinator.snapshot().link_sessions == 0);
     CHECK(coordinator.snapshot().end_sessions == 0);
   }
+  // Stop during the Joiner's stored-certificate verification, before Member adoption.
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  CryptoWorker worker;
+  auto deps = f.deps();
+  deps.crypto_worker = &worker;
+  SecurityCoordinator coordinator(deps);
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  CHECK(coordinator.step(poll_at(kT0 + 1)).ok());
+  CHECK(coordinator.mode() == CoordinatorMode::ZeroTouch && !worker.idle());
+  CoordinatorEvent stop{};
+  stop.kind = CoordinatorEventKind::Stop;
+  stop.now = kT0 + 2;
+  CHECK(coordinator.step(stop).code == StatusCode::Busy);
+  CHECK(worker.execute());
+  const Status retired = coordinator.step(poll_at(kT0 + 3));
+  CHECK(retired.ok() || retired.code == StatusCode::InvalidState);
+  CHECK(worker.idle());
+  CHECK(coordinator.mode() == CoordinatorMode::Fresh);
+  stop.now = kT0 + 4;
+  (void)coordinator.step(stop);
+  (void)worker.execute();
+  ++stop.now;
+  CHECK(coordinator.step(stop).ok());
 }
 
 void test_commit_veto() {

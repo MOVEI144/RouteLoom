@@ -250,7 +250,7 @@ bool SecurityCoordinator::workspace_crypto_pending() const noexcept {
 
 void SecurityCoordinator::drain_workspace_crypto(const MonotonicMs now) noexcept {
   if (workspace_mode_ == CoordinatorMode::ZeroTouch)
-    (void)ws_.joiner.poll(now);
+    (void)ws_.joiner.stop(now);
   else if (workspace_mode_ == CoordinatorMode::Member || workspace_mode_ == CoordinatorMode::Dev)
     (void)ws_.member.engine.poll(now);
 }

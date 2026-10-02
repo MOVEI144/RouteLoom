@@ -3001,6 +3001,7 @@ Status HandshakeEngine::poll_crypto(const MonotonicMs now) noexcept {
 
 MonotonicMs HandshakeEngine::next_deadline(const MonotonicMs now) const noexcept {
   if (!configured_) return UINT64_MAX;
+  if (crypto_.ready()) return now;
   if (has_pending_ || lookup_.kind != ResumeLookupWork::Kind::None) return now;
   MonotonicMs due = rlres1_.next_deadline();
   const auto sooner = [&](const MonotonicMs at) {
@@ -3018,7 +3019,8 @@ MonotonicMs HandshakeEngine::next_deadline(const MonotonicMs now) const noexcept
                 : now;
         sooner(record.retransmit_at > ecc_at ? record.retransmit_at : ecc_at);
       }
-    } else if ((record.state != RecordState::EdhocM4Sent || record.scope == SecurityScope::Link) &&
+    } else if (!(crypto_stage_active_ && record.token == crypto_token_) &&
+               (record.state != RecordState::EdhocM4Sent || record.scope == SecurityScope::Link) &&
                (record.last_tx_size != 0 ||
                 (edhoc_flight_.active && edhoc_flight_.owner_token == record.token &&
                  big_tx_owner_ == record.token && big_tx_size_ != 0))) {

@@ -457,14 +457,38 @@ void test_worker_lifecycle_adoption_and_apply() {
   }
   CHECK(worker.idle() && !f.lifecycle.crypto_waiting());
   CHECK(f.snap().phase == LifecyclePhase::Active);
+  std::array<std::uint8_t, kRrsRequestSize> request{};
+  CHECK_OK(rrs_request_encode(RrsRequest{3, 13}, request));
+  f.peer.sent.clear();
+  CHECK_OK(f.dispatch(LifecycleInput::PeerControl(stamp_for(kNodeB, 1), FrameType::Control,
+                                                 {request.data(), request.size()}), 2));
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 2));
+  autonomy::ControlObjectPayload manifest{};
+  CHECK(!f.peer.sent.empty());
+  if (f.peer.sent.empty()) return;
+  CHECK_OK(autonomy::control_object_decode(
+      {f.peer.sent[0].body.data(), f.peer.sent[0].body.size()}, manifest));
   const auto object = revocation_object(revocation_set(15, 2, 2));
   CHECK(f.dispatch(LifecycleInput::Authority(stamp_for(kNodeB, 1), kAuthorityTypeRevocation,
                                              object.view()),
                    2)
             .ok());
+  CHECK(f.dispatch(LifecycleInput::Poll(), 2).code == StatusCode::WouldBlock);
+  CHECK(f.lifecycle.next_deadline() > 2);
+  autonomy::ObjectAckPayload ack{};
+  ack.object_hash = manifest.object_hash;
+  ack.received_len = manifest.total_len;
+  ack.status = autonomy::ObjectAckStatus::Ok;
+  autonomy::EncodedPayload ack_bytes{};
+  CHECK_OK(autonomy::object_ack_encode(ack, ack_bytes));
+  CHECK(f.lifecycle.owns_rrs_chunk(kNodeB, 7, FrameType::ObjectAck, ack_bytes.view()));
+  const MonotonicMs expired = 2 + rrs_const::kFetchWindowMs;
+  CHECK(f.dispatch(LifecycleInput::Poll(), expired).code == StatusCode::WouldBlock);
+  CHECK(!f.lifecycle.owns_rrs_chunk(kNodeB, 7, FrameType::ObjectAck, ack_bytes.view()));
+  CHECK(f.revocations.rs_epoch() == 14 && f.lifecycle.crypto_pending());
   for (int i = 0; i < 50 && f.snap().phase == LifecyclePhase::ApplyingRrs; ++i) {
     (void)worker.execute();
-    const Status polled = f.dispatch(LifecycleInput::Poll(), 2);
+    const Status polled = f.dispatch(LifecycleInput::Poll(), expired);
     CHECK(polled.ok() || polled.code == StatusCode::WouldBlock);
     CHECK(f.snap().phase != LifecyclePhase::StorageBlocked);
   }
@@ -501,6 +525,8 @@ void test_worker_lifecycle_cancel_and_context() {
       CHECK(f.dispatch(LifecycleInput::Boot(true), 1).code == StatusCode::Expired);
     }
     CHECK(f.dispatch(LifecycleInput::Poll(), 2).code == StatusCode::WouldBlock);
+    CHECK(!f.lifecycle.quiescent());
+    CHECK(f.lifecycle.next_deadline() > 2);
     CHECK(worker.execute());
     CHECK(f.dispatch(LifecycleInput::Poll(), 2).ok());
     CHECK(worker.idle());

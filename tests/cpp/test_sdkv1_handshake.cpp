@@ -2248,6 +2248,15 @@ void test_worker_cancel_completed_m4() {
     CHECK(send.event == HandshakeEvent::Send && send.phase == 4 && send.step == step);
     CHECK_OK(from.engine.accept_send(send.token, send.phase, send.step));
     CHECK_OK(deliver_to(to, from, send, frozen, ++now));
+    if (step == 2) {
+      now += HandshakeEngine::kEdhocRetransmitMs;
+      CHECK_OK(to.engine.poll(now));
+      CHECK(to.engine.crypto_pending());
+      CHECK(to.engine.next_deadline(now) > now);
+      CHECK(worker_a.execute());
+      CHECK(to.engine.next_deadline(now) == now);
+      CHECK_OK(to.engine.poll(++now));
+    }
   }
   CHECK(pair.a->engine.crypto_pending());
   CHECK(worker_a.execute());
