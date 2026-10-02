@@ -1039,6 +1039,94 @@ void test_gateway_resume_lookup_budget() {
   }
 }
 
+void test_edhoc_resend_exhaustion_deadlines() {
+  for (const auto scope : {SecurityScope::Link, SecurityScope::EndToEnd}) {
+    Pair pair = Pair::make();
+    const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+    if (scope == SecurityScope::Link) {
+      CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+    } else {
+      HandshakeRequest request{};
+      request.scope = scope;
+      request.peer = kNodeB;
+      CHECK_OK(pair.a->engine.request(request, kT0));
+    }
+    HandshakeResult result{};
+    CHECK_OK(pair.a->engine.take_result(result));
+    CHECK(result.event == HandshakeEvent::Send && result.step == 1);
+    for (int retry = 1; retry <= 3; ++retry) {
+      CHECK_OK(pair.a->engine.poll(kT0 + retry * 400));
+      CHECK_OK(pair.a->engine.take_result(result));
+      CHECK(result.event == HandshakeEvent::Send && result.step == 1);
+    }
+    CHECK_OK(pair.a->engine.poll(kT0 + 1600));
+    if (scope == SecurityScope::EndToEnd) {
+      CHECK(pair.a->engine.take_result(result).code == StatusCode::NotFound);
+      CHECK(!pair.a->engine.quiescent());
+      CHECK_OK(pair.a->engine.poll(kT0 + 7999));
+      CHECK(pair.a->engine.take_result(result).code == StatusCode::NotFound);
+      CHECK_OK(pair.a->engine.poll(kT0 + 8000));
+    }
+    CHECK_OK(pair.a->engine.take_result(result));
+    CHECK(result.event == HandshakeEvent::Failed && result.failure == StatusCode::Expired);
+    CHECK(pair.a->engine.take_result(result).code == StatusCode::NotFound);
+    CHECK(pair.a->engine.quiescent());
+    CHECK(pair.a->sink.installs == 0);
+  }
+}
+
+void test_end_delayed_reply_deadline() {
+  for (const auto step : {2, 4}) {
+    for (const MonotonicMs arrival : {kT0 + 7999, kT0 + 8000}) {
+      Pair pair = Pair::make();
+      const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+      HandshakeRequest request{};
+      request.scope = SecurityScope::EndToEnd;
+      request.peer = kNodeB;
+      CHECK_OK(pair.a->engine.request(request, kT0));
+      HandshakeResult m1{}, reply{}, m3{}, result{};
+      CHECK_OK(pair.a->engine.take_result(m1));
+      CHECK_OK(deliver_to(*pair.b, *pair.a, m1, frozen, kT0 + 50));
+      CHECK_OK(pair.b->engine.take_result(reply));
+      MonotonicMs sent_at = kT0;
+      if (step == 4) {
+        CHECK_OK(deliver_to(*pair.a, *pair.b, reply, frozen, kT0 + 100));
+        CHECK_OK(pair.a->engine.take_result(m3));
+        CHECK_OK(deliver_to(*pair.b, *pair.a, m3, frozen, kT0 + 150));
+        CHECK_OK(pair.b->engine.take_result(reply));
+        sent_at += 100;
+      }
+      CHECK(reply.event == HandshakeEvent::Send && reply.step == step);
+      for (int retry = 1; retry <= 3; ++retry) {
+        CHECK_OK(pair.a->engine.poll(sent_at + retry * 400));
+        CHECK_OK(pair.a->engine.take_result(result));
+        CHECK(result.event == HandshakeEvent::Send && result.step == step - 1);
+        const HandshakeResult& sent = step == 2 ? m1 : m3;
+        CHECK(result.message_size == sent.message_size);
+        CHECK(std::memcmp(result.message.data(), sent.message.data(), sent.message_size) == 0);
+      }
+      CHECK_OK(pair.a->engine.poll(sent_at + 1600));
+      CHECK(pair.a->engine.take_result(result).code == StatusCode::NotFound);
+      // A valid reply after the resend budget still advances before the
+      // deadline; RX exactly at the deadline cannot beat poll expiry.
+      CHECK_OK(deliver_to(*pair.a, *pair.b, reply, frozen, arrival));
+      CHECK_OK(pair.a->engine.take_result(result));
+      if (arrival == kT0 + 8000) {
+        CHECK(result.event == HandshakeEvent::Failed && result.failure == StatusCode::Expired);
+        CHECK(pair.a->sink.installs == 0);
+        CHECK(pair.a->engine.quiescent());
+      } else if (step == 2) {
+        CHECK(result.event == HandshakeEvent::Send && result.step == 3);
+        CHECK(pair.a->sink.installs == 0);
+      } else {
+        CHECK(result.event == HandshakeEvent::Established);
+        CHECK(pair.a->sink.installs == 1);
+        CHECK(pair.a->engine.quiescent());
+      }
+    }
+  }
+}
+
 void test_routed_end_exchange() {
   Pair pair = Pair::make();
   HandshakeRequest request{};
@@ -2176,6 +2264,8 @@ int main() {
   }
   test_resume_after_edhoc();
   test_gateway_resume_lookup_budget();
+  test_edhoc_resend_exhaustion_deadlines();
+  test_end_delayed_reply_deadline();
   test_routed_end_exchange();
   test_resume_slot_replaced_before_commit();
   test_pending_send_invalidated_by_membership_loss();

@@ -1579,6 +1579,11 @@ Status HandshakeEngine::on_message(const HandshakeRx& rx, const ByteView message
       record = &candidate;
     }
   }
+  if (edhoc && record != nullptr && record->scope == SecurityScope::EndToEnd &&
+      (record->state == RecordState::EdhocWaitM2 ||
+       record->state == RecordState::EdhocWaitM4) && now >= record->deadline) {
+    return emit_failed(*record, StatusCode::Expired);
+  }
   if (edhoc) return on_edhoc_message(record, rx, message, now);
   return on_resume_message(record, rx, message, now);
 }
@@ -3085,6 +3090,14 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
                         big_tx_owner_ == record.token;
     if (!small_tx && !big_tx) continue;
     if (record.retransmits >= kMaxRetransmits) {
+      if (record.scope == SecurityScope::EndToEnd &&
+          (record.state == RecordState::EdhocWaitM2 ||
+           record.state == RecordState::EdhocWaitM4)) {
+        // Multi-hop chunk delivery can outlast the EDHOC resend budget.
+        // Stop sending, but retain the exchange until its bounded deadline.
+        record.retransmit_at = record.deadline;
+        continue;
+      }
       if (record.state == RecordState::ResumeWaitR2) {
         // R1 exhausted: stop hammering, let the rlres1 deadline drive
         // the EDHOC fallback.

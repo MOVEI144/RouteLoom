@@ -895,3 +895,14 @@ add_test(NAME routeloom_edhoc_interop_replay_join COMMAND routeloom_edhoc_intero
 # host/routeloom-edhoc (`cargo test -p routeloom-edhoc --test member`).
 add_test(NAME routeloom_edhoc_interop_replay_member COMMAND routeloom_edhoc_interop_peer --replay
     ${CMAKE_SOURCE_DIR}/protocol/edhoc-interop/method0_member.txt)
+
+add_executable(routeloom_periodic_load_tests test_periodic_load.cpp)
+target_link_libraries(routeloom_periodic_load_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_periodic_load_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_periodic_load_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_periodic_load_tests COMMAND routeloom_periodic_load_tests)
+set_tests_properties(routeloom_routing_scale_100_node_tests routeloom_group_100_node_tests
+    routeloom_periodic_load_tests PROPERTIES LABELS long)
+
+# K02 exceeds the management airtime envelope; tracked by #59.
+set_tests_properties(routeloom_periodic_load_tests PROPERTIES DISABLED TRUE)

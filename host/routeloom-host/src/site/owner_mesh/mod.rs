@@ -66,11 +66,16 @@ use crate::{now_ms, serve_client, DeviceSession, SessionPhase, State};
 
 mod boot;
 mod compat;
+mod consumer;
 mod crypto;
 mod cutover;
+mod daemon;
 mod device;
+mod end;
 mod fault;
 mod join;
+mod kg;
+mod load;
 mod membership;
 mod mesh;
 mod peer;

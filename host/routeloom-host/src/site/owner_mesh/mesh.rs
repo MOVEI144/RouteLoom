@@ -584,6 +584,10 @@ fn mesh_route_loss_advertisement_survives_queue_pressure() {
     else {
         return;
     };
+    // Delayed DATA completion fills the lane before the advertisement loss.
+    world.switch.callback_delay_kind = Some(WIRE_DATA);
+    world.switch.callback_delay_ms[2][0] = 100;
+    world.switch.callback_delay_ms[2][1] = 100;
     for index in 0..14 {
         let (ok, _) = world.peers[2].peer_slot(b'V', index);
         assert!(ok, "extra route record {index}");
@@ -594,21 +598,12 @@ fn mesh_route_loss_advertisement_survives_queue_pressure() {
         "multi-page queue reached 50%: {:?}",
         world.snaps[2]
     );
-    // Hold DATA callbacks long enough to establish queue pressure without
-    // relying on an EDHOC exchange being slow at this particular tick.
-    world.switch.callback_delay_kind = Some(WIRE_DATA);
-    world.switch.callback_delay_ms[2][0] = 500;
-    world.switch.callback_delay_ms[2][1] = 500;
     let (accepted, queued) = world.peers[2].app_burst(16, testkit::GATEWAY);
     assert_eq!(accepted, 8, "bounded application admission");
     assert!(queued >= 16);
-    world.pump_until(200, |snaps| snaps[2].queued >= 26);
-    assert!(
-        world.snaps[2].queued >= 26,
-        "queue reached 80%: {:?}",
-        world.snaps[2]
-    );
     let (accepted, _) = world.peers[0].app_burst(8, NODE_A);
+    world.pump_until(200, |snaps| snaps[2].queued >= 26);
+    assert!(world.snaps[2].queued >= 26, "queue reached 80%");
     let mut max_queue = world.snaps[2].queued;
     for _ in 0..200 {
         world.step(25);
@@ -882,13 +877,7 @@ pub(super) fn deliver_each(
 /// M01 (T3): G—A—B—C, three hops end to end. Twenty Reliable messages
 /// each way between the gateway and the far leaf arrive exactly once,
 /// and every frame crossed only the chain's legs.
-///
-/// Red today: the three-hop leaf's end-to-end handshake with the
-/// gateway expires (end_last_error Expired) — the chunked m2 needs longer
-/// over three hops than the initiator's resends last — and it never gets
-/// its authority channel (tests/e2e/scenarios.json M01-T3).
 #[test]
-#[ignore = "M01-T3 red: three-hop end-to-end handshake expires"]
 fn mesh_line_three_hops_delivers() {
     let Some(mut world) = MeshWorld::start("line-three-hops", Switch::new(&Topology::line(4)))
     else {

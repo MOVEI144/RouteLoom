@@ -475,6 +475,41 @@ void test_queue_penalty_ownership() {
 
 // ----------------------- node: measured exchange ratio (D4-05)
 
+void test_unresolved_exchange_keeps_nominal_cost() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  MeshNode* b = h.add(2);
+  h.link(1, 2);
+  const auto tick = [&] {
+    h.now += 5;
+    CHECK_OK(a->poll(h.now));
+    CHECK_OK(b->poll(h.now));
+    h.net.flush(h.now);
+  };
+  for (int i = 0; i < 20; ++i) tick();
+  for (int send = 0; send < 5; ++send) {
+    MessageId id{};
+    CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, id));
+    for (int i = 0; i < 20; ++i) tick();
+  }
+  CHECK(a->peer_link_cost(2) == 1);
+  MessageId id{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, id));
+  CHECK_OK(a->poll(h.now + 5));
+  // Physical completion is pending: the new work has no accept yet.
+  CHECK_OK(a->poll(h.now + 10));
+  CHECK(a->peer_link_cost(2) == 1);
+  h.now += 10;
+  h.net.flush(h.now);
+  // MAC completion arrived, but the receiver has not emitted HOP_ACCEPT.
+  CHECK_OK(a->poll(h.now + 5));
+  CHECK(a->peer_link_cost(2) == 1);
+  CHECK_OK(b->poll(h.now + 5));
+  h.net.flush(h.now + 5);
+  CHECK_OK(a->poll(h.now + 10));
+  CHECK(a->peer_link_cost(2) == 1);
+}
+
 void test_exchange_ratio_cost() {
   // D4-05: every-other physical attempt fails at the driver; the measured
   // ratio is eligible attempt work / authenticated accepts (2/1 here).
@@ -527,7 +562,7 @@ void test_exchange_ratio_cost() {
   // submissions can consume them.
   for (int i = 0; i < 20; ++i) { now += 5; tick(); }
 
-  for (int i = 0; i < 5; ++i) {
+  for (int i = 0; i < 8; ++i) {
     MessageId m{};
     radio1.fail_next = true;   // first physical attempt of this delivery fails
     CHECK_OK(a.send(2, payload_view(), SendOptions{}, now, m));
@@ -541,6 +576,27 @@ void test_exchange_ratio_cost() {
   // After 4+ authenticated accepts the ratio applies: ceil(1 * 2/1) = 2.
   // Queue delay is negligible (5ms steps) so no penalty term interferes.
   CHECK(a.peer_link_cost(2) >= 2);
+  for (int i = 0; i < 20; ++i) { now += 5; tick(); }
+  now = 2200;
+  tick();
+  CHECK(a.peer_link_cost(2) == 2);
+  CHECK(a.peer_tx_window(2) >= 2);
+  // Keep one healthy exchange awaiting its accept while a second fails.
+  // The unresolved submission must not hide the settled failure work.
+  MessageId pending{}, lost{};
+  CHECK_OK(a.send(2, payload_view(), SendOptions{}, now, pending));
+  CHECK_OK(a.poll(now + 5));
+  CHECK_OK(a.send(2, payload_view(), SendOptions{}, now + 5, lost));
+  radio1.fail_next = true;
+  now += 10;
+  net.flush(now);
+  CHECK(!radio1.failed.empty());
+  while (!radio1.failed.empty()) {
+    CHECK_OK(a.on_radio_tx_result(radio1.failed.front(), false, now));
+    radio1.failed.pop_front();
+  }
+  CHECK_OK(a.poll(now + 5));
+  CHECK(a.peer_link_cost(2) >= 3);
 }
 
 // ------------------ node: sustained egress load switches route (D4-01)
@@ -843,6 +899,7 @@ int main() {
   test_severe_busy_and_switch_hold();
   test_improvement_ad_gap();
   test_queue_penalty_ownership();
+  test_unresolved_exchange_keeps_nominal_cost();
   test_exchange_ratio_cost();
   test_sustained_load_switches_route();
   test_sustained_busy_switches_route();

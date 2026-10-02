@@ -1083,6 +1083,29 @@ impl MeshPeer {
         self.send(&command);
     }
 
+    /// G3: bounded application evidence; overflow is a failed observation.
+    pub(super) fn receipts(&mut self) -> Vec<(u64, u32, u64, Vec<u8>)> {
+        self.send(b"r");
+        let reply = self.recv().expect("application receipts");
+        assert_eq!(reply[0], b'r');
+        let mut pos = 1;
+        assert_eq!(get_u32(&reply, &mut pos), 0, "receipt ledger overflow");
+        let count = reply[pos];
+        pos += 1;
+        let mut receipts = Vec::new();
+        for _ in 0..count {
+            let source = get_u64(&reply, &mut pos);
+            let session = get_u32(&reply, &mut pos);
+            let seq = get_u64(&reply, &mut pos);
+            let len = reply[pos] as usize;
+            pos += 1;
+            receipts.push((source, session, seq, reply[pos..pos + len].to_vec()));
+            pos += len;
+        }
+        assert_eq!(pos, reply.len());
+        receipts
+    }
+
     /// Seals one end-protected frame of `frame_type` with this peer's live
     /// sessions, addressed via `next_hop` (P04). Nothing is transmitted:
     /// the caller injects the returned bytes at the next hop.
@@ -1138,6 +1161,30 @@ impl MeshPeer {
         assert_eq!(reply.len(), 3);
         assert_eq!(reply[0], b'h');
         (reply[1], reply[2])
+    }
+
+    pub(super) fn tracked_burst(&mut self, count: u8, dst: u64) -> Vec<(u8, u32, u64)> {
+        let mut command = vec![b'h', count];
+        command.extend_from_slice(&dst.to_le_bytes());
+        self.send(&command);
+        let reply = self.recv().expect("tracked burst reply");
+        assert_eq!(reply[0], b'h');
+        assert_eq!(reply[3], count);
+        let mut pos = 4;
+        let mut results = Vec::new();
+        for _ in 0..count {
+            let status = reply[pos];
+            pos += 1;
+            let session = get_u32(&reply, &mut pos);
+            let seq = get_u64(&reply, &mut pos);
+            results.push((status, session, seq));
+        }
+        assert_eq!(pos, reply.len());
+        assert_eq!(
+            results.iter().filter(|r| r.0 == 0).count(),
+            reply[1] as usize
+        );
+        results
     }
 
     pub(super) fn fail_driver_release(&mut self, fail: bool) {

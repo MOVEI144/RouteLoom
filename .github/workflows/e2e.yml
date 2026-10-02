@@ -1,0 +1,126 @@
+name: E2E scenario matrix
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 16 * * *'
+  workflow_dispatch:
+    inputs:
+      tier:
+        type: choice
+        options: [pr, nightly]
+        default: nightly
+permissions:
+  contents: read
+concurrency:
+  group: e2e-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tier: ${{ steps.mode.outputs.tier }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TIER: ${{ inputs.tier }}
+        run: |
+          tier=pr
+          if [ "$EVENT" = schedule ] || [ "$INPUT_TIER" = nightly ]; then tier=nightly; fi
+          sanitizers=ON
+          optimization=-O0
+          if [ "$tier" = nightly ]; then
+            optimization=-O2
+            if [ "$(date -u +%u)" != 7 ]; then sanitizers=OFF; fi
+          fi
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+          echo "SANITIZERS=$sanitizers" >> "$GITHUB_ENV"
+          echo "OPTIMIZATION=$optimization" >> "$GITHUB_ENV"
+      - name: Build real Owner peers and Rust test binary once
+        run: |
+          cmake -S . -B build-e2e -DROUTELOOM_ENABLE_SANITIZERS="$SANITIZERS" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="$OPTIMIZATION"
+          cmake --build build-e2e -j8 --target routeloom_owner_mesh_peer routeloom_joiner_interop_peer routeloom_routing_scale_tests routeloom_group_tests routeloom_periodic_load_tests
+          cd host
+          cargo --version
+          cargo +1.85.0 test -p routeloom-host --bins --no-run --message-format=json > ../build-e2e/rust-build.json
+          cd ..
+          python3 - <<'PY'
+          import json, pathlib, shutil
+          executables = [r['executable'] for line in pathlib.Path('build-e2e/rust-build.json').read_text().splitlines() if (r := json.loads(line)).get('reason') == 'compiler-artifact' and r.get('executable') and r.get('profile', {}).get('test')]
+          assert len(executables) == 1, executables
+          shutil.copy2(executables[0], 'build-e2e/routeloom-host-tests')
+          PY
+      - name: Preserve executable permissions and paths
+        run: tar -czf e2e-executables.tar.gz build-e2e/routeloom-host-tests build-e2e/tests/cpp/routeloom_*peer build-e2e/tests/cpp/routeloom_routing_scale_tests build-e2e/tests/cpp/routeloom_group_tests build-e2e/tests/cpp/routeloom_periodic_load_tests
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: e2e-executables
+          path: e2e-executables.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+  scenarios:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ needs.prepare.outputs.tier == 'nightly' && 60 || 10 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [mesh, join, fault]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: e2e-executables
+      - run: tar -xzf e2e-executables.tar.gz
+      - name: Shared matrix and HIL plan (no hardware)
+        run: |
+          python3 tools/check.py scenarios
+          python3 tools/hil/scenarios.py --rig tools/hil/rigs.yaml --bench bench-2026-09-29-h0 --dry-run M06
+      - name: Required live rows (a skip or missing case fails)
+        env:
+          ROUTELOOM_E2E_OUT: ${{ github.workspace }}/e2e-out
+        run: |
+          mkdir -p e2e-out
+          /usr/bin/time -v -o e2e-out/resources.txt python3 tools/check.py e2e --build-dir build-e2e --test-bin build-e2e/routeloom-host-tests --tier '${{ needs.prepare.outputs.tier }}' --shard '${{ matrix.shard }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: e2e-${{ matrix.shard }}-${{ needs.prepare.outputs.tier }}
+          path: e2e-out/
+          if-no-files-found: error
+          retention-days: 30
+  models:
+    if: needs.prepare.outputs.tier == 'nightly'
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: e2e-executables
+      - run: tar -xzf e2e-executables.tar.gz
+      - name: Existing product-timer scale models (M07-N remains pending)
+        env:
+          ROUTELOOM_E2E_NIGHTLY: '1'
+        run: |
+          mkdir -p e2e-out
+          /usr/bin/time -v -o e2e-out/routing-resources.txt build-e2e/tests/cpp/routeloom_routing_scale_tests scale > e2e-out/routing.log 2>&1
+          /usr/bin/time -v -o e2e-out/group-resources.txt build-e2e/tests/cpp/routeloom_group_tests scale > e2e-out/group.log 2>&1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: e2e-models-nightly
+          path: e2e-out/
+          if-no-files-found: error
+          retention-days: 30

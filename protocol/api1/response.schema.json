@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:routeloom:api1:response:1",
+  "title": "API1 response envelope v1",
+  "type": "object", "required": ["v", "request_id", "ok"],
+  "properties": {
+    "v": {"const": 1},
+    "request_id": {"type": ["string", "null"]},
+    "ok": {"type": "boolean"},
+    "result": {"type": "object"},
+    "error": {
+      "type": "object", "required": ["code", "detail", "retryable"],
+      "properties": {
+        "code": {"type": "string"},
+        "detail": {"type": "object", "required": ["message"], "properties": {"message": {"type": "string"}}},
+        "retryable": {"type": "boolean"}
+      }
+    }
+  },
+  "oneOf": [
+    {"properties": {"ok": {"const": true}}, "required": ["result"], "not": {"required": ["error"]}},
+    {"properties": {"ok": {"const": false}}, "required": ["error"], "not": {"required": ["result"]}}
+  ]
+}
