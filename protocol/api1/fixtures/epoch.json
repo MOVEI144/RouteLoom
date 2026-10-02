@@ -1,0 +1,26 @@
+{
+  "request": {
+    "v": 1,
+    "request_id": "epoch",
+    "method": "messages.read",
+    "params": {
+      "network": "00000000524c0001",
+      "cursor": "AQAAAABSTAABAAAAAAAAAAEBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE"
+    }
+  },
+  "response": {
+    "v": 1,
+    "request_id": "epoch",
+    "ok": false,
+    "error": {
+      "code": "CURSOR_EPOCH_CHANGED",
+      "detail": {
+        "message": "cursor belongs to a previous daemon epoch",
+        "oldest_cursor": "AQAAAABSTAABAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",
+        "tail_cursor": "AQAAAABSTAABAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",
+        "loss_count": null
+      },
+      "retryable": false
+    }
+  }
+}

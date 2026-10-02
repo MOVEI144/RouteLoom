@@ -1,78 +1,6 @@
 {
   "schema_version": 1,
   "supersedes": "docs/design/autonomous-mesh/scenarios.json",
-  "acceptance_pending": [
-    {
-      "id": "V1-F04",
-      "rows": [
-        "M02"
-      ],
-      "status": "pending",
-      "issues": [
-        "#150"
-      ],
-      "note": "予備経路への切替で暗号 handshake 0 件を直接数える half。配送の成功だけでは証明しない。"
-    },
-    {
-      "id": "V1-K05",
-      "rows": [
-        "J07",
-        "J09"
-      ],
-      "status": "pending",
-      "issues": [
-        "#150"
-      ],
-      "note": "同一 boot replay・tx_boot 後退・replay 表満杯の拒否を実 Owner 経由で全点照合する half。"
-    },
-    {
-      "id": "V1-K09",
-      "rows": [
-        "J07"
-      ],
-      "status": "pending",
-      "issues": [
-        "#150"
-      ],
-      "note": "削除した Member の DISCOVER の無言 drop（応答 0）を照合する half。"
-    },
-    {
-      "id": "V1-N06",
-      "rows": [
-        "F02"
-      ],
-      "status": "pending",
-      "issues": [
-        "#150"
-      ],
-      "note": "rlboot 欠落／後退／耐久化不明の全点で GroupEnd／GroupLink の送信 0 を照合する half。"
-    },
-    {
-      "id": "V1-F01",
-      "rows": [
-        "J01",
-        "M05",
-        "M06"
-      ],
-      "status": "pending",
-      "issues": [
-        "#150"
-      ],
-      "note": "fast resume で authority／KGuard 照会 0 件を数える half。再参加／配送の成功と区別する。"
-    },
-    {
-      "id": "V1-R06",
-      "rows": [
-        "J07",
-        "J09"
-      ],
-      "status": "pending",
-      "issues": [
-        "#150"
-      ],
-      "note": "偽 REVOKED hint と異現場 SAK 署名を注入し、site trust が消えないことを照合する half。"
-    }
-  ],
   "rows": [
     {"id": "M01", "family": "mesh", "variant": "直接と 2 hop、Phase 0 の複製", "tier": ["pr"], "layer": ["O"], "topology": "T1（3 台直接）、T2（G—B—A）", "faults": [], "pass": "全台が収束し、A→B と A→G（B 経由）が DELIVERED。USB の認証 1 回。複製した world は独立し、資格情報は private", "test": ["host/routeloom-host/src/site/owner_mesh/mesh.rs::mesh_direct_converges_and_delivers", "host/routeloom-host/src/site/owner_mesh/mesh.rs::mesh_forced_multihop_relays", "host/routeloom-host/src/site/owner_mesh/mesh.rs::mesh_provision_snapshot_reused_without_shared_world_state"], "prs": ["V2-04", "V2-06", "V2-07", "V2-09", "V2-20"], "issues": ["#169", "#150"], "hil": null, "status": "live"},
     {"id": "M01-T3", "family": "mesh", "variant": "3 hop、上り・下り各 20 件", "tier": ["pr"], "layer": ["O"], "topology": "line(4)：G—A—B—C", "faults": [], "pass": "各 20 件がちょうど 1 回届き、送信側が receipt を持つ。鎖の leg だけを通る", "test": ["host/routeloom-host/src/site/owner_mesh/mesh.rs::mesh_line_three_hops_delivers"], "prs": ["V2-04", "V2-06", "V2-07", "V2-09"], "issues": ["#169", "#150"], "hil": null, "status": "red", "note": "3 hop の葉の end-to-end handshake：分割した m2 が 3 hop を渡るのに約 1.6〜1.8 s かかり、initiator の再送の予算（400 ms ごと 3 回）が先に尽きて Expired を繰り返す。応答の到着で予算を延ばすと handshake は通るが、葉の DATA が最初の hop で HOP_ACCEPT_TIMEOUT になり続ける。次の PR で直して ignore を外す"},
@@ -134,7 +62,7 @@
     {"id": "K02", "family": "kg", "variant": "表示板 10〜30 台の airtime", "tier": ["pr", "nightly"], "layer": ["S"], "topology": "G＋D×10＋R×20", "faults": ["churn"], "pass": "1 台の airtime ≤ 1,000 µs/s。st ≥ 99.5%", "test": ["ctest:routeloom_periodic_load_tests"], "prs": ["V2-20"], "issues": ["#59"], "hil": null, "status": "red", "note": "#59: SimWorld 31 台、product timer、5 分で status 200/200、fault_hits 1。管理 airtime 259640 us/s（観測 305050 ms、drain を含む）（network 上限 100000 を超過）。DISABLED、直接実行で再現。閾値・容量は変更しない。"},
     {"id": "K03", "family": "kg", "variant": "30 宛先への一斉操作", "tier": ["pr", "nightly", "hil"], "layer": ["S", "O", "H"], "topology": "PR 6 process（5 宛先）、夜間 32 process（31 宛先）", "faults": ["reply_drop", "queue_full"], "pass": "group ≤ 5 s で 30/30。unicast ≤ 30 s で明示の結果。重複の作用 0", "test": ["host/routeloom-host/src/site/owner_mesh/kg.rs::mesh_k03_simultaneous_latest_and_group"], "prs": ["V2-03", "V2-05", "V2-14", "V2-20"], "issues": ["#195", "KG#112", "#127"], "hil": {"rounds": ["H2", "H4"], "run": "manual", "requires": [{"role": "bridge", "count": 1, "chips": ["esp32c3"]}, {"role": "reference", "count": 2, "chips": ["esp32c3"]}, {"role": "reference", "count": 2, "chips": ["esp32c6"]}]}, "status": "red", "note": "#195/#127: 認証済み network 000000030a1b2c3d を API1 が wire-v1 範囲外として拒否。実 Owner で再現済み。以降の負荷 assertion は未実施。G7 は API1 handler を同じ仮想時計で呼び、socket framing は既存 interop が担当。 PR の「6 宛先」と G1 の「上限 6 台」は同時に満たせないため PR は 5 宛先。受理応答 drop／宛先 queue 満杯は後続 #195。"},
     {"id": "K04", "family": "kg", "variant": "表示板の reset 20 回を 10 s 未満で復旧", "tier": ["pr", "nightly", "hil"], "layer": ["O", "H"], "topology": "K01 の world", "faults": ["power_cut"], "pass": "20/20 すべて < 10 s（新しい有効な view と st まで）", "test": [], "prs": ["V2-09", "V2-15", "V2-16"], "issues": ["KG#112", "#167"], "hil": {"rounds": ["H2", "H4"], "run": ["tools/hil/reset_cycles.py"], "requires": [{"role": "bridge", "count": 1, "chips": ["esp32c3"]}, {"role": "reference", "count": 2, "chips": ["esp32c3"]}, {"role": "reference", "count": 2, "chips": ["esp32c6"]}]}, "status": "pending", "blocked_by": ["V2-15", "V2-16"], "note": "V2-15 の期限駆動と V2-16 worker の merge 待ち。復旧の終点は新 view と対応する status、20/20 を測る。"},
-    {"id": "K05", "family": "kg", "variant": "受信の cursor と consumer の再起動", "tier": ["pr", "nightly", "hil"], "layer": ["O", "H"], "topology": "T1（G＋D×2）", "faults": ["consumer_crash", "daemon_restart"], "pass": "CURSOR_GAP 0。再起動は CURSOR_EPOCH_CHANGED を検出", "test": ["host/routeloom-host/src/site/owner_mesh/kg.rs::mesh_k05_cursor_replay_gap_and_epoch_change"], "prs": ["V2-03", "V2-11", "V2-21"], "issues": ["#127", "KG IO-02", "KG IO-05"], "hil": {"rounds": ["H4"], "run": "manual", "requires": [{"role": "bridge", "count": 1, "chips": ["esp32c3", "esp32s3", "esp32c5", "esp32c6"]}, {"role": "reference", "count": 2, "chips": ["esp32c3", "esp32s3", "esp32c5", "esp32c6"]}]}, "status": "red", "note": "#195/#127: 認証済み network 000000030a1b2c3d を API1 が wire-v1 範囲外として拒否。実 Owner で再現済み。以降の負荷 assertion は未実施。G7 は API1 handler を同じ仮想時計で呼び、socket framing は既存 interop が担当。"},
+    {"id": "K05", "family": "kg", "variant": "受信の cursor と consumer の再起動", "tier": ["pr", "nightly", "hil"], "layer": ["O", "H"], "topology": "T1（G＋D×2）", "faults": ["consumer_crash", "daemon_restart"], "pass": "CURSOR_GAP 0。再起動は CURSOR_EPOCH_CHANGED を検出", "test": ["host/routeloom-host/src/site/owner_mesh/kg.rs::mesh_k05_cursor_replay_gap_and_epoch_change", "host/routeloom-host/src/site/owner_mesh/consumer.rs::mesh_k05_member_full_network_consumer"], "prs": ["V2-03", "V2-11", "V2-21"], "issues": ["#127", "KG IO-02", "KG IO-05"], "hil": {"rounds": ["H4"], "run": "manual", "requires": [{"role": "bridge", "count": 1, "chips": ["esp32c3", "esp32s3", "esp32c5", "esp32c6"]}, {"role": "reference", "count": 2, "chips": ["esp32c3", "esp32s3", "esp32c5", "esp32c6"]}]}, "status": "live", "note": "Memberのfull networkで保存・再読込・60s停止・gap・daemon epoch変更を検証。H4のprocess kill／実機は未実施。"},
     {"id": "K06", "family": "kg", "variant": "24 h の soak（KG の PoC 基準）", "tier": ["hil"], "layer": ["H"], "topology": "実機 5 台", "faults": ["reset", "cutover", "revoke"], "pass": "§3 の KG PoC 基準を全部満たす", "test": [], "prs": ["V2-20", "V2-22"], "issues": ["KG#112"], "hil": {"rounds": ["H4"], "run": ["tools/hil/submit_traffic.py", "tools/hil/analyze_longrun.py"], "requires": [{"role": "bridge", "count": 1, "chips": ["esp32c3"]}, {"role": "reference", "count": 2, "chips": ["esp32c3"]}, {"role": "reference", "count": 2, "chips": ["esp32c6"]}]}, "status": "pending", "blocked_by": ["KG#112"], "note": " HIL／長い variant は未実施。"},
     {"id": "P01", "family": "product", "variant": "partition と起動、NVS の保持", "tier": ["hil"], "layer": ["H"], "topology": "実機 5 台", "faults": ["bad_partition"], "pass": "全台が起動。保持すべき NVS の hash 100% 一致。誤った構成で RF を始めない", "test": [], "prs": ["V2-01", "V2-22"], "issues": ["#171", "#22"], "hil": {"rounds": ["H0"], "run": "manual", "requires": [{"role": "bridge", "count": 1, "chips": ["esp32c3"]}, {"role": "reference", "count": 2, "chips": ["esp32c3"]}, {"role": "reference", "count": 2, "chips": ["esp32c6"]}]}, "status": "pending", "blocked_by": ["#171", "#22"], "note": " HIL／長い variant は未実施。"},
     {"id": "P02", "family": "product", "variant": "容量 profile・役割・feature gate（build 行列）", "tier": ["pr", "nightly", "hil"], "layer": ["O", "H"], "topology": "PR の O の行", "faults": ["capacity_bounds"], "pass": "PR の O の行が全部通る。使用中の追出し 0", "test": ["ctest:routeloom_sdkv1_session_bank_tests", "ctest:routeloom_sdkv1_coordinator_tests", "ctest:routeloom_sdkv1_owner_sleep_tests", "ctest:routeloom_espnow_role_mismatch_tests", "host/routeloom-host/src/site/owner_mesh/mesh.rs::mesh_direct_converges_and_delivers", "host/routeloom-host/src/site/owner_mesh/mesh.rs::mesh_forced_multihop_relays", "host/routeloom-host/src/site/owner_mesh/join.rs::mesh_group_key_rotate_acknowledged", "host/routeloom-host/src/site/owner_mesh/cutover.rs::mesh_cutover_prepare_commit_applied", "host/routeloom-host/src/site/owner_mesh/mesh.rs::mesh_profile_role_above_profile_refused", "ctest:routeloom_usb_tests", "host/routeloom-protocol/src/host_ops.rs::ingress_assurance_tail_decodes_the_cpp_layout"], "prs": ["V2-02", "V2-05", "V2-10"], "issues": ["#166", "#37", "#152"], "hil": {"rounds": ["H1a"], "run": "manual", "requires": [{"role": "bridge", "count": 1, "chips": ["esp32c3"]}, {"role": "reference", "count": 2, "chips": ["esp32c3"]}, {"role": "reference", "count": 2, "chips": ["esp32c6"]}]}, "status": "live"},
@@ -151,6 +79,11 @@
     {"id": "P06-U", "family": "product", "variant": "USB secret 未設定の起動拒否", "tier": ["pr"], "layer": ["O"], "topology": "gateway 1 台（DevRam／MemberEdhoc）", "faults": ["missing_usb_secret"], "pass": "USB stream 接続時の空の secret を Device::begin が USB_SECRET_REQUIRED で拒否。Owner／RF 起動前に停止", "test": ["host/routeloom-host/src/site/owner_mesh/device.rs::mesh_p06_usb_secret_required"], "prs": ["V2-17"], "issues": ["#21"], "hil": null, "status": "live"},
     {"id": "P06", "family": "product", "variant": "外部の consumer・standalone の親機・配布物", "tier": ["pr", "hil"], "layer": ["O", "H"], "topology": "2〜3 台", "faults": [], "pass": "外部 build 4/4。文書の手順の再現 1/1。standalone 10/10", "test": [], "prs": ["V2-17", "V2-21", "V2-22"], "issues": ["#21", "#163", "#165", "#23", "#24"], "hil": {"rounds": ["H2", "H4"], "run": "manual", "requires": [{"role": "bridge", "count": 1, "chips": ["esp32c3", "esp32s3", "esp32c5", "esp32c6"]}, {"role": "reference", "count": 2, "chips": ["esp32c3", "esp32s3", "esp32c5", "esp32c6"]}]}, "status": "pending", "blocked_by": ["V2-21", "H4: #23"], "note": "V2-22 の配布基盤は merge 済み。V2-21 の文書手順と H4 の rc 配布物の実起動は未実施。公開 consumer build と standalone host smoke は既存 CI／P06-O。"},
     {"id": "G7-RX", "family": "fault", "variant": "認証済み DataFromMesh が production record_frame と daemon receive log へ届く", "tier": ["pr", "nightly"], "layer": ["O"], "topology": "T1（3 台）", "faults": [], "pass": "payload と origin を照合、1 件だけ保持。API1 の epoch-qualified network の INVALID_ARGUMENT を明示（K 行の合格ではない）", "test": ["host/routeloom-host/src/site/owner_mesh/kg.rs::mesh_g7_authenticated_receive_reaches_daemon_store"], "prs": ["V2-20"], "issues": ["#195", "#127"], "hil": null, "status": "live"},
-    {"id": "P04-N1", "family": "product", "variant": "N-1 records and HostLink major refusal", "tier": ["pr"], "layer": ["O", "S"], "topology": "T1 and boundary fixtures", "faults": ["old_hostlink_major"], "pass": "Previous record formats read or migrate with a backup. HostLink 1 cannot become ACTIVE; fresh HostLink 2 authenticates within 5 s.", "test": ["ctest:routeloom_sdkv1_golden_tests", "ctest:routeloom_config_tests", "ctest:routeloom_migration_tests", "host/routeloom-host/src/site/owner_mesh/fault.rs::mesh_hostlink_v2_auth_negatives"], "prs": ["V2-22"], "issues": ["#22"], "hil": null, "status": "live", "note": "tools/check.py compat also runs Rust record boundaries, SQLite schema-2 migration, and a valid-CRC HostLink parser refusal. Mixed previous SDK release peers are optional after v2.0.0."}
+    {"id": "P04-N1", "family": "product", "variant": "N-1 records and HostLink major refusal", "tier": ["pr"], "layer": ["O", "S"], "topology": "T1 and boundary fixtures", "faults": ["old_hostlink_major"], "pass": "Previous record formats read or migrate with a backup. HostLink 1 cannot become ACTIVE; fresh HostLink 2 authenticates within 5 s.", "test": ["ctest:routeloom_sdkv1_golden_tests", "ctest:routeloom_config_tests", "ctest:routeloom_migration_tests", "host/routeloom-host/src/site/owner_mesh/fault.rs::mesh_hostlink_v2_auth_negatives"], "prs": ["V2-22"], "issues": ["#22"], "hil": null, "status": "live", "note": "tools/check.py compat also runs Rust record boundaries, SQLite schema-2 migration, and a valid-CRC HostLink parser refusal. Mixed previous SDK release peers are optional after v2.0.0."},
+    {"id": "K01-D", "family": "kg", "variant": "汎用表示板の DevRam Device 周期送信と API1 受信", "tier": ["pr"], "layer": ["O"], "topology": "5台（G、R×2、Dは2/3hop）", "faults": ["leg_noise"], "pass": "vt5分、seed21の1%損失が実際に発生。view鮮度<20s、st/tr配送≥99.5%、API1 readのgap0。host送信受付／全slot／nightlyはK01に残る", "test": ["host/routeloom-host/src/site/owner_mesh/consumer.rs::mesh_k01_display_periodic_load_and_api1_consumer"], "prs": ["V2-21"], "issues": ["#195"], "hil": null, "status": "red", "note": "BEST_EFFORT coalesceの負荷前にDevRam 3-hop warm-upがDEADLINE_EXPIREDで失敗。Memberの5台構成も参加収束に失敗。閾値は緩めず、既存M01-T3と併せて別PRで修正。直接構成はK01-Sで検証。"},
+    {"id": "K01-S", "family": "kg", "variant": "表示板の直接構成の文書smoke", "tier": ["pr"], "layer": ["O"], "topology": "T1（G＋D×2、DevRam）", "faults": ["leg_noise"], "pass": "vt5分、1%損失下でview<20s、st/tr≥99.5%、API1 cursor gap0。K01の5台／3hop受入の代替ではない", "test": ["host/routeloom-host/src/site/owner_mesh/consumer.rs::mesh_k01_display_direct_smoke"], "prs": ["V2-21"], "issues": ["#195"], "hil": null, "status": "live"},
+    {"id": "K05-D", "family": "kg", "variant": "DevRamの文書consumer保存と再開", "tier": ["pr"], "layer": ["O"], "topology": "T1（G＋D×2、DevRam）", "faults": ["consumer_crash", "daemon_restart"], "pass": "実Ownerの2件を保存、再読込の重複保存0。60s停止でgap0、production保持のreclaim後はCURSOR_GAP、daemon再起動後はCURSOR_EPOCH_CHANGED。保存失敗の原子性はPython境界試験。", "test": ["host/routeloom-host/src/site/owner_mesh/consumer.rs::mesh_p06_k05_documented_consumer_commits_and_resumes"], "prs": ["V2-21"], "issues": ["#127"], "hil": null, "status": "live"},
+    {"id": "K05-M", "family": "kg", "variant": "Member full networkのAPI1 consumer", "tier": ["pr"], "layer": ["O"], "topology": "T1（G＋D×2）", "faults": [], "pass": "Memberの認証済みfull networkで実Ownerの2件を文書consumerが保存。再読込の重複保存0、60s停止でgap0、保持切れとdaemon再起動を明示的に検出。", "test": ["host/routeloom-host/src/site/owner_mesh/consumer.rs::mesh_k05_member_full_network_consumer"], "prs": ["V2-21"], "issues": ["#127"], "hil": null, "status": "live"},
+    {"id": "P06-D", "family": "product", "variant": "文書の DevRam→send→API1 consumer の host smoke", "tier": ["pr"], "layer": ["O"], "topology": "T1（G＋D×2）", "faults": ["consumer_crash", "daemon_restart"], "pass": "実 Owner の2件を文書のPython consumerが保存。保存前の再読込と保存後の再起動で重複の永続化0。実機／rc配布物はP06に残る", "test": ["host/routeloom-host/src/site/owner_mesh/consumer.rs::mesh_p06_k05_documented_consumer_commits_and_resumes"], "prs": ["V2-21"], "issues": ["#163", "#165"], "hil": null, "status": "live"}
   ]
 }

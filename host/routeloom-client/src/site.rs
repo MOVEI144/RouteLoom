@@ -8,15 +8,15 @@
 //!
 //! | facade | API1 (RouteLoom backend) |
 //! |---|---|
-//! | [`SiteAdmin::site_status`] | `site.status` |
-//! | [`SiteAdmin::join_requests`] | `join.requests.list` |
-//! | [`SiteAdmin::decide`] | `join.decide` |
-//! | [`SiteAdmin::discovered`] | `devices.discovered.list` (all pages) |
-//! | [`SiteAdmin::members`] / [`SiteAdmin::member`] | `members.list` / `members.get` |
-//! | [`SiteAdmin::revoke`] | `membership.revoke` |
-//! | [`SiteAdmin::group_key_status`] | `group_keys.status` |
-//! | [`SiteAdmin::rotate_group_key`] | `group_keys.rotate` |
-//! | [`SiteAdmin::site_events`] | `messages.subscribe {stream:"events", filter.kinds: SITE_EVENT_KINDS}` |
+//! | [`crate::site::SiteAdmin::site_status`] | `site.status` |
+//! | [`crate::site::SiteAdmin::join_requests`] | `join.requests.list` |
+//! | [`crate::site::SiteAdmin::decide`] | `join.decide` |
+//! | [`crate::site::SiteAdmin::discovered`] | `devices.discovered.list` (all pages) |
+//! | [`crate::site::SiteAdmin::members`] / [`crate::site::SiteAdmin::member`] | `members.list` / `members.get` |
+//! | [`crate::site::SiteAdmin::revoke`] | `membership.revoke` |
+//! | [`crate::site::SiteAdmin::group_key_status`] | `group_keys.status` |
+//! | [`crate::site::SiteAdmin::rotate_group_key`] | `group_keys.rotate` |
+//! | [`crate::site::SiteAdmin::site_events`] | `messages.subscribe {stream:"events", filter.kinds: SITE_EVENT_KINDS}` |
 //!
 //! Grants (routeloom-host `--api-acl-file`, on the site's wire network):
 //! `MEMBERSHIP_READ` for reads and events, `MEMBERSHIP_DECIDE` for
