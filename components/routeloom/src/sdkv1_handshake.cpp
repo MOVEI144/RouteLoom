@@ -2831,7 +2831,7 @@ MonotonicMs HandshakeEngine::next_deadline(const MonotonicMs now) const noexcept
                 : now;
         sooner(record.retransmit_at > ecc_at ? record.retransmit_at : ecc_at);
       }
-    } else if (record.state != RecordState::EdhocM4Sent &&
+    } else if ((record.state != RecordState::EdhocM4Sent || record.scope == SecurityScope::Link) &&
                (record.last_tx_size != 0 ||
                 (edhoc_flight_.active && edhoc_flight_.owner_token == record.token &&
                  big_tx_owner_ == record.token && big_tx_size_ != 0))) {
