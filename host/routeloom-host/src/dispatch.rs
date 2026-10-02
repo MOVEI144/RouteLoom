@@ -3022,6 +3022,30 @@ mod tests {
             record.dispatch.as_ref().unwrap().device_reason.as_deref(),
             Some("NO_ROUTE")
         );
+        dispatcher.tick(&mut store, &link(), 31_001);
+        let out = dispatcher.tick(&mut store, &link(), 31_002);
+        let skip = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_SKIP)
+            .expect("expired hole owes SKIP");
+        dispatcher.handle_reply(
+            &mut store,
+            skip.request,
+            &receipt(
+                SUB_SKIP,
+                HostOpsResult::Ok,
+                SlotState::Skipped,
+                1,
+                Evidence::None,
+                [0; 32],
+            ),
+            31_020,
+        );
+        let record = op(&store, seq);
+        let attachment = record.dispatch.as_ref().unwrap();
+        assert!(attachment.device_terminal);
+        assert_eq!(attachment.device_state.as_deref(), Some("submit_refused"));
+        assert_eq!(attachment.device_reason.as_deref(), Some("NO_ROUTE"));
     }
 
     /// Same for QUERY responses: hash + operation id are verified on Ok.
