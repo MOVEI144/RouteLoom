@@ -15,7 +15,23 @@ void check(bool ok) {
 
 class Stream final : public ByteStream {
  public:
+  bool blocked{false};
+  std::size_t auth_ok{0};
+  std::size_t grants{0};
   Status write(ByteView bytes, std::size_t& written) noexcept override {
+    if (blocked) {
+      written = 0;
+      return Status::error(StatusCode::WouldBlock, "blocked");
+    }
+    std::array<std::uint8_t, 128> decoded{};
+    std::size_t size = 0;
+    check(bytes.size > 1 && bytes.data[bytes.size - 1] == 0);
+    check(cobs_decode(ByteView{bytes.data, bytes.size - 1},
+                      MutableByteView{decoded.data(), decoded.size()}, size).ok());
+    check(size >= kHeaderSize);
+    if (decoded[5] == static_cast<std::uint8_t>(FrameKind::HelloAck) &&
+        decoded[7] == kFlagAuth) ++auth_ok;
+    if (decoded[5] == static_cast<std::uint8_t>(FrameKind::Credit)) ++grants;
     written = bytes.size;
     return Status::success();
   }
@@ -90,9 +106,17 @@ void boot_gate(bool timeout) {
     bridge.poll(5022);
     check(bridge.state() == SessionState::Disconnected);
   } else {
+    stream.blocked = true;
+    for (unsigned i = 0; i < 8; ++i) {
+      feed(bridge, kFlagAuth, ByteView{bad.data(), bad.size()}, 100);
+    }
     owner.ready = true;
     bridge.poll(101);
     check(bridge.state() == SessionState::Active);
+    stream.blocked = false;
+    for (unsigned i = 0; i < 8; ++i) bridge.poll(102);
+    std::fprintf(stderr, "AUTH_OK=%zu grants=%zu\n", stream.auth_ok, stream.grants);
+    check(stream.auth_ok == 1 && stream.grants == 1);
   }
   clear_session_proof(proof);
 }

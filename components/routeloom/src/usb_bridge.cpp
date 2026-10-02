@@ -541,9 +541,6 @@ void UsbBridge::handle_auth(const UsbFrame& frame, const MonotonicMs now_ms) noe
     if (auth_attempts_ >= kAuthAttemptsMax) reset_session_state();
     return;
   }
-  // A valid AUTH supersedes queued pre-auth errors. Both AUTH_OK and the
-  // initial receive grant must fit before the session becomes active.
-  control_q_.clear();
   // A restored member's worker may still be verifying its durable site.
   // Keep sends on the host until the Owner has started the mesh node.
   if (join_owner_ != nullptr && !join_owner_->host_session_ready()) {
@@ -578,6 +575,9 @@ void UsbBridge::begin_auth_session(const SessionTag& auth_ok_tag,
   stall_reported_ = false;
   credit_queries_ = 0;
 
+  // AUTH_OK and the initial grant supersede pre-auth errors, including
+  // errors queued while local boot was still pending.
+  control_q_.clear();
   // AUTH_OK (HelloAck + kFlagAuth): auth_ok_tag || session_id.
   std::array<std::uint8_t, kAuthOkBodySize> ack{};
   std::memcpy(ack.data(), auth_ok_tag.data(), kTagSize);
