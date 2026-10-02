@@ -538,7 +538,6 @@ class Scenarios(unittest.TestCase):
         for row_id in ("K01", "K01-D", "K03"):
             for case in check.rust_cases(self.rows(row_id)[0]["test"]):
                 self.assertNotIn(case, all_cases)
-        self.assertIn("site::owner_mesh::mesh::mesh_line_three_hops_delivers", all_cases)
         self.assertIn("site::owner_mesh::kg::mesh_k05_cursor_replay_gap_and_epoch_change",
                       all_cases)
         self.assertIn("site::owner_mesh::mesh::mesh_line_three_hops_delivers", all_cases)
