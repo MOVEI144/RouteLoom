@@ -2310,7 +2310,9 @@ impl Dispatcher {
             let concluded = o.concluded();
             let prepared = o.dispatch_state == DispatchState::DispatchPrepared;
             let d = o.dispatch.as_mut().expect("checked above");
-            if state != SlotState::Empty && d.device_state.as_deref() == Some("submit_refused") {
+            if !matches!(state, SlotState::Empty | SlotState::Skipped)
+                && d.device_state.as_deref() == Some("submit_refused")
+            {
                 d.device_state = None;
                 d.device_reason = None;
             }

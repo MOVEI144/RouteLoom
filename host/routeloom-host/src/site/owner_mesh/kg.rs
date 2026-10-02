@@ -34,11 +34,23 @@ fn open_epoch(world: &MeshWorld) -> String {
         .to_string()
 }
 
-fn submit(world: &MeshWorld, epoch: &str, key: u64, dest: u64, payload: &[u8]) -> Json {
+fn submit(
+    world: &MeshWorld,
+    epoch: &str,
+    key: u64,
+    dest: u64,
+    payload: &[u8],
+    latest: bool,
+) -> Json {
+    let (delivery, queue) = if latest {
+        ("BEST_EFFORT", "LATEST_PER_DESTINATION")
+    } else {
+        ("RELIABLE", "FIFO")
+    };
     daemon(world).api(
         "messages.submit",
         &format!(
-            r#"{{"network":"{:016x}","admission_epoch":"{epoch}","key":"{key:032x}","destination":{{"kind":"node","id":"{dest:016x}"}},"payload_hex":"{}","payload_len":{},"options":{{"storage":"RAM_ONLY","delivery":"BEST_EFFORT","queue_mode":"LATEST_PER_DESTINATION","ttl_ms":5000}}}}"#,
+            r#"{{"network":"{:016x}","admission_epoch":"{epoch}","key":"{key:032x}","destination":{{"kind":"node","id":"{dest:016x}"}},"payload_hex":"{}","payload_len":{},"options":{{"storage":"RAM_ONLY","delivery":"{delivery}","queue_mode":"{queue}","ttl_ms":5000}}}}"#,
             network(world), hex(payload), payload.len(),
         ),
         world.now,
@@ -60,11 +72,41 @@ fn load_world(tag: &str, nodes: usize) -> Option<MeshWorld> {
     let topology = Topology {
         nodes,
         edges: (1..nodes)
-            .map(|n| (if n < 3 { 0 } else { 1 + n % 2 }, n))
+            .map(|n| {
+                (
+                    if nodes == 5 && n == 2 {
+                        1
+                    } else if n < 3 {
+                        0
+                    } else {
+                        1 + n % 2
+                    },
+                    n,
+                )
+            })
             .collect(),
     };
     let mut world =
         MeshWorld::start_plan(tag, Switch::new(&topology), &staggered_boot(nodes), false)?;
+    for gated in 2..nodes {
+        world.gate[gated] = true;
+    }
+    for ready in 2..=nodes {
+        world.pump_until(2400, |snaps| {
+            snaps[..ready]
+                .iter()
+                .all(|s| s.authority_ready && s.join_confirmed)
+        });
+        assert!(
+            world.snaps[..ready]
+                .iter()
+                .all(|s| s.authority_ready && s.join_confirmed),
+            "staged load world {tag}, ready {ready}"
+        );
+        if ready < nodes {
+            world.gate[ready] = false;
+        }
+    }
     converge(&mut world, tag);
     world.usb_host.daemon = Some(daemon::MeshDaemon::new(world.now));
     world.pump_until(80, |_| false);
@@ -72,27 +114,54 @@ fn load_world(tag: &str, nodes: usize) -> Option<MeshWorld> {
 }
 
 #[test]
-#[ignore = "#195/#127: operations.open_epoch still rejects the full 64-bit network"]
 fn mesh_k01_periodic_latest_status_and_events() {
     let Some(mut world) = load_world("k01", 5) else {
         return;
     };
     let epoch = open_epoch(&world);
+
     let start = world.now;
     let mut key = 100;
     let mut cursor = None;
     let mut seen = std::collections::BTreeSet::new();
     let mut latency = Vec::new();
     let mut expected = 0;
+    let mut content_received = 0;
+    let mut last_view = [world.now; 5];
+    let mut last_rx = [0; 5];
     for slot in 0..60_u64 {
+        if slot == 12 {
+            world.switch.set_noise(
+                LegNoise {
+                    loss_ppm: 10_000,
+                    ..LegNoise::default()
+                },
+                21,
+            );
+        }
         let mut view = [0_u8; 10];
         view[..8].copy_from_slice(&slot.to_be_bytes());
+        if slot % 12 == 0 {
+            for index in [3, 4] {
+                key += 1;
+                let mut content = [0_u8; 127];
+                content[..8].copy_from_slice(&slot.to_be_bytes());
+                result(&submit(
+                    &world,
+                    &epoch,
+                    key,
+                    world.nodes[index],
+                    &content,
+                    false,
+                ));
+            }
+        }
         for index in [3, 4] {
             key += 1;
-            let response = submit(&world, &epoch, key, world.nodes[index], &view);
+            let response = submit(&world, &epoch, key, world.nodes[index], &view, true);
             result(&response);
         }
-        if slot % 3 == 0 || slot % 9 == 1 {
+        if slot % 3 == 0 || slot % 18 == 1 {
             for index in [3, 4] {
                 let mut status = [0_u8; 34];
                 status[..8].copy_from_slice(&world.now.to_be_bytes());
@@ -105,6 +174,17 @@ fn mesh_k01_periodic_latest_status_and_events() {
         let until = start + (slot + 1) * 5_000;
         while world.now < until {
             world.step(25);
+            for index in [3, 4] {
+                let snap = &world.snaps[index];
+                if snap.rx_count != last_rx[index] && snap.rx.len() == 10 {
+                    last_view[index] = world.now;
+                }
+                last_rx[index] = snap.rx_count;
+                assert!(
+                    world.now - last_view[index] < 20_000,
+                    "continuous view freshness"
+                );
+            }
             if world.now % 1000 < 25 {
                 let response = read(&world, cursor.as_deref());
                 let page = result(&response);
@@ -127,14 +207,27 @@ fn mesh_k01_periodic_latest_status_and_events() {
             }
         }
         for index in [3, 4] {
-            assert_eq!(world.snaps[index].rx, view, "latest value in its 5 s slot");
+            let received = world.peers[index].receipts();
+            content_received += received.iter().filter(|r| r.3.len() == 127).count();
+            if slot < 12 {
+                assert!(
+                    received.iter().any(|r| r.3 == view),
+                    "latest value in its normal 5 s slot"
+                );
+            }
         }
     }
+    assert_eq!(content_received, 10, "127 B content every 60 s");
     assert_eq!(
         seen.len(),
         expected,
         "all reliable status and change events retained"
     );
+    assert!(world.switch.noise_hits.lost > 0, "leg noise fired");
+    assert!(world
+        .snaps
+        .iter()
+        .all(|s| s.mode == MODE_MEMBER && s.phase == PHASE_ACTIVE));
     latency.sort_unstable();
     let p99 = latency[(99 * latency.len()).div_ceil(100) - 1];
     assert!(p99 < 2_000, "status p99 {p99} ms");
@@ -188,22 +281,59 @@ fn mesh_k05_cursor_replay_gap_and_epoch_change() {
 }
 
 #[test]
-#[ignore = "#195/#127: operations.open_epoch still rejects the full 64-bit network"]
 fn mesh_k03_simultaneous_latest_and_group() {
     let nodes = if max_nodes() == 32 { 32 } else { 6 };
     let Some(mut world) = load_world("k03", nodes) else {
         return;
     };
+    let full = nodes - 1;
     let epoch = open_epoch(&world);
     let before: Vec<_> = world.snaps.iter().map(|s| s.group_delivered).collect();
-    world.peers[0].group_send(1, b"all-disabled");
+    world.peers[0].group_send(0xFFFF, b"all-disabled");
     let start = world.now;
     let mut accepted = 0;
     let mut refused = 0;
     for index in 1..nodes {
-        let response = submit(&world, &epoch, index as u64, world.nodes[index], b"latest");
+        if index == full {
+            world.pump_until(200, |snaps| {
+                snaps
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .take(nodes - 2)
+                    .all(|(i, s)| s.rx == b"latest" && s.group_delivered == before[i] + 1)
+            });
+            assert!(world.peers[0]
+                .tracked_burst(8, u64::MAX - 1)
+                .iter()
+                .all(|r| r.0 == 0));
+        }
+        let response = submit(
+            &world,
+            &epoch,
+            index as u64,
+            world.nodes[index],
+            b"latest",
+            true,
+        );
         if response.get("ok").and_then(Json::as_bool) == Some(true) {
             accepted += 1;
+            if index == 1 {
+                let retry = submit(
+                    &world,
+                    &epoch,
+                    index as u64,
+                    world.nodes[index],
+                    b"latest",
+                    true,
+                );
+                assert_eq!(
+                    result(&response).get("operation_id"),
+                    result(&retry).get("operation_id"),
+                    "lost admission response reuses the operation"
+                );
+            }
+            world.peers[index].app_send(testkit::GATEWAY, b"parallel-status");
         } else {
             let error = response.get("error").unwrap();
             assert!(
@@ -242,7 +372,24 @@ fn mesh_k03_simultaneous_latest_and_group() {
         .skip(1)
         .filter(|s| s.rx == b"latest")
         .count();
-    assert_eq!(accepted, delivered);
+    assert_eq!(
+        accepted - 1,
+        delivered,
+        "one full destination, others delivered"
+    );
+    let outcome = daemon(&world).api(
+        "operations.get_by_key",
+        &format!(
+            r#"{{"network":"{:016x}","admission_epoch":"{epoch}","key":"{full:032x}"}}"#,
+            network(&world)
+        ),
+        world.now,
+    );
+    assert_ne!(
+        result(&outcome).get("device_outcome"),
+        Some(&Json::Null),
+        "full destination has an explicit device outcome: {outcome:?}"
+    );
     assert_eq!(accepted + refused, nodes - 1);
 }
 

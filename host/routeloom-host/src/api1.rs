@@ -1651,7 +1651,7 @@ fn messages_submit<S: OperationStore>(
         .expect("operation store poisoned");
     // The monotonic stamp rides alongside the wall admit time so a
     // wall-clock rewind can never stretch the dispatch deadline.
-    match store.submit_at_principal(uid, &req, ctx.now_ms, crate::mono_ms()) {
+    match store.submit_at_principal(uid, &req, ctx.now_ms, ctx.now_mono) {
         SubmitOutcome::Accepted { seq } => {
             // Latest-value discipline (D10): once the replacement is
             // committed, retire still-queued older values to the same

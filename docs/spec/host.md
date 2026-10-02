@@ -24,6 +24,8 @@ Linux常駐、macOS/Windows開発利用を設計対象にする。USB device pat
 
 ## 3. Host API
 
+API1 の operation と message の `network` は、認証済み HelloAck と同じ epoch を含む64 bitの16桁hexを使う。下位32 bitが0の値は予約値として拒否する。mesh header と既存 canonical schema の wire network は下位32 bitのままで、operation identity と ACL は full network を照合する。受理と dispatch は同じ単調時計を使い、壁時計の巻戻りで期限を伸ばさない。
+
 初期の操作意味は以下とし、RPC schemaを版管理する。
 
 | 操作 | 意味 |
