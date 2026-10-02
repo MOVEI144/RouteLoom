@@ -1165,6 +1165,16 @@ impl MeshPeer {
         self.send(&command);
     }
 
+    pub(super) fn next_hop(&mut self, destination: u64) -> u64 {
+        let mut command = vec![b'v'];
+        command.extend_from_slice(&destination.to_le_bytes());
+        self.send(&command);
+        let reply = self.recv().expect("route selection");
+        assert_eq!(reply[0], b'v');
+        assert_eq!(reply.len(), 9);
+        get_u64(&reply, &mut 1)
+    }
+
     /// G3: bounded application evidence; overflow is a failed observation.
     pub(super) fn receipts(&mut self) -> Vec<(u64, u32, u64, Vec<u8>)> {
         self.send(b"r");

@@ -164,6 +164,23 @@ fn db_position(db: &std::path::Path) -> (usize, String) {
 fn devram_world(tag: &str, switch: Switch) -> MeshWorld {
     let mut world = MeshWorld::start_with_args(tag, switch, &["--devram"], &["--devram"])
         .expect("documented smoke requires real Owner peers");
+    let nodes = world.peers.len();
+    for gated in 2..nodes {
+        world.gate[gated] = true;
+    }
+    for ready in 2..=nodes {
+        world.pump_until(2400, |snaps| {
+            snaps[..ready]
+                .iter()
+                .all(|s| s.mode == 3 && s.link_sessions > 0)
+        });
+        assert!(world.snaps[..ready]
+            .iter()
+            .all(|s| s.mode == 3 && s.link_sessions > 0));
+        if ready < nodes {
+            world.gate[ready] = false;
+        }
+    }
     world.pump_until(4000, |snaps| {
         snaps.iter().all(|s| s.mode == 3 && s.link_sessions > 0)
     });
@@ -253,7 +270,6 @@ fn documented_consumer(mut world: MeshWorld) {
 }
 
 #[test]
-#[ignore = "3-hop warm-up expires; tracked as K01-D red in scenarios.json"]
 fn mesh_k01_display_periodic_load_and_api1_consumer() {
     let topology = Topology {
         nodes: 5,

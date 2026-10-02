@@ -11,8 +11,8 @@ pub(super) struct Persona {
     pub(super) gateway: bool,
 }
 
-/// World size caps (G1): PR worlds up to 6 nodes, nightly up to 32
-/// (`ROUTELOOM_E2E_NIGHTLY` set).
+/// Default scalable scenario budgets: PR up to 6 nodes, nightly up to 32.
+/// K02 uses its fixed 31-node product topology within the 32-node harness.
 pub(super) fn max_nodes() -> usize {
     if std::env::var_os("ROUTELOOM_E2E_NIGHTLY").is_some() {
         32
@@ -708,9 +708,8 @@ impl MeshWorld {
     ) -> Option<Self> {
         let nodes = switch.nodes();
         assert!(
-            (2..=max_nodes()).contains(&nodes),
-            "{nodes} nodes exceed the world cap {}",
-            max_nodes()
+            (2..=32).contains(&nodes),
+            "{nodes} nodes exceed the 32-node harness capacity"
         );
         assert_eq!(boot_ms.len(), nodes, "one boot time per node");
         if !peers_present() {
@@ -988,6 +987,13 @@ impl MeshWorld {
             let Some(tick) = tick else { continue };
             for tx in &tick.tx {
                 self.switch.radio_bytes += tx.bytes.len() as u64;
+                if tx.bytes.starts_with(b"RLD1")
+                    || (tx.bytes.len() > 4
+                        && tx.bytes[..4] == *b"RL\x02\0"
+                        && matches!(tx.bytes[4], 23 | 24 | 32..=35 | 40 | 41))
+                {
+                    self.switch.management_us[from] += (tx.bytes.len() as u64 + 96) * 32;
+                }
                 self.switch.c7_observe(from, tx.dst_mac, &tx.bytes, b_mac);
                 if tx.dst_mac == BROADCAST_MAC {
                     self.callbacks[from].push((self.now, 1));

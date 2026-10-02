@@ -16,6 +16,7 @@ impl MeshDaemon {
         )
         .unwrap();
         let state = State {
+            host_boot: now,
             acl,
             receive_log: Mutex::new(crate::receive_log::ReceiveLog::new(crate::mint_id128())),
             rate_limiter: Mutex::new(send_store::AdmissionLimiter::with_profile(

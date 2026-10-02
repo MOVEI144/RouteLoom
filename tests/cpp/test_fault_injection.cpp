@@ -627,7 +627,7 @@ void test_clock_faults_decay_windows_bounded() {
 
 // A stalled clock must not manufacture expiries — and must not let bounded
 // pools silently overwrite live work: admissions keep succeeding until the
-// delivery table is honestly full, then refuse with NoCapacity.
+// delivery table is honestly full, then refuse with Busy.
 void test_clock_stall_bounded_admission() {
   SinkRadio radio;
   TestSecurity security;
@@ -655,7 +655,7 @@ void test_clock_stall_bounded_admission() {
   }
   MessageId extra{};
   CHECK(node.send(2, payload_view(), options, 1000, extra).code ==
-        StatusCode::NoCapacity);
+        StatusCode::Busy);
   // Stalled polls never expire, never fabricate results, never overwrite.
   for (int i = 0; i < 50; ++i) node.poll(1000);
   std::size_t live = 0;

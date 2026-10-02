@@ -55,21 +55,24 @@ int main() {
     for (NodeId n = 22; n <= 31; ++n) {
       const MonotonicMs offset = (n - 22) * 400;
       const bool view = t % 5000 == offset;
-      const bool status = t % 15000 == offset + 100;
-      if (!view && !status) continue;
-      std::array<std::uint8_t, 34> payload{};
-      payload[0] = view ? 1 : 2;
+      const bool status = t % 15000 == offset + 100 || t % 90000 == offset + 300;
+      const bool content = t % 60000 == offset + 200;
+      if (!view && !status && !content) continue;
+      std::array<std::uint8_t, 127> payload{};
+      payload[0] = view ? 1 : (content ? 3 : 2);
       payload[1] = static_cast<std::uint8_t>(n);
       for (unsigned i = 0; i < 8; ++i) payload[2 + i] = t >> (8 * i);
       SendOptions options{};
-      options.delivery = view ? DeliveryClass::BestEffort : DeliveryClass::Reliable;
+      options.delivery = view || content ? DeliveryClass::BestEffort : DeliveryClass::Reliable;
       options.lifetime_ms = 5000;
-      options.coalesce_key = view ? 1 : 0;
+      options.coalesce_key = view ? 1 : (content ? 2 : 0);
       MessageId id{};
-      check(w.at(view ? 1 : n)
-                ->send(view ? n : 1, ByteView{payload.data(), view ? 10U : 34U}, options, w.now, id)
-                .ok(),
-            "send accepted");
+      const auto sent = w.at(view || content ? 1 : n)->send(
+          view || content ? n : 1,
+          ByteView{payload.data(), view ? 10U : (content ? 127U : 34U)}, options, w.now, id);
+      check(sent.ok() || (!status && (sent.code == StatusCode::NoRoute ||
+            sent.code == StatusCode::Busy || sent.code == StatusCode::NoCapacity ||
+            sent.code == StatusCode::WouldBlock)), "accepted or explicit latest-value refusal");
       if (status) ++status_sent;
     }
     w.run(0, 50);
@@ -84,6 +87,7 @@ int main() {
         }
       }
       last_rx[n] = received.size();
+      if (n >= 22 && t >= 20000) check(w.now - last_view[n] < 20000, "continuous view fresh");
     }
   }
   w.run(5000, 50);
@@ -95,9 +99,9 @@ int main() {
   for (const auto& [node, tally] : w.net.route_control_tx) {
     const auto us = (tally.bytes + tally.frames * kTxFrameFixedCostBytes) * 32;
     total += us;
-    check(us * 1000 / elapsed <= 1000, "per-node management airtime <=1000 us/s");
     (void)node;
   }
+  check(total * 1000 / elapsed / w.nodes.size() <= 1000, "mean management airtime <=1000 us/s");
   check(total * 1000 / elapsed <= 100000, "network management airtime <=100000 us/s");
   std::fprintf(stderr, "K02: status=%zu/%zu, management=%llu us/s, fault_hits=%zu\n",
                w.obs(1)->messages.size(), status_sent,

@@ -296,16 +296,6 @@ impl UsbHost {
             if inbound.session_lost {
                 self.session_losses += 1;
             }
-            if let Some(daemon) = &self.daemon {
-                let mut info = daemon.state.session.lock().unwrap();
-                info.authenticated = self.session.phase == SessionPhase::Active;
-                info.id = self.auth_sessions.last().copied();
-                info.node = self.hello_node;
-                info.boot = self.hello_boot;
-                info.network = self.hello_network;
-                info.capability = self.hello_capability;
-                info.version = Some(2);
-            }
             let Some(inner) = inbound.inner else { continue };
             if let Some(daemon) = &self.daemon {
                 crate::record_frame(&daemon.state, &frame, &inner, now);
@@ -406,6 +396,15 @@ impl UsbHost {
             }
         }
         if let Some(daemon) = &mut self.daemon {
+            *daemon.state.session.lock().unwrap() = crate::SessionInfo {
+                authenticated: self.session.phase == SessionPhase::Active,
+                id: self.auth_sessions.last().copied(),
+                node: self.hello_node,
+                boot: self.hello_boot,
+                network: self.hello_network,
+                capability: self.hello_capability,
+                version: Some(2),
+            };
             for frame in daemon.tick(now) {
                 self.pending.push(PendingFrame {
                     frame,

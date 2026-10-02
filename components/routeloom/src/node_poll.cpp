@@ -55,10 +55,7 @@ void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
       // APPLIED (01 §1.3): a transmitted APPLIED request may already have
       // executed at the destination — post-TX expiry is Indeterminate,
       // never the unproven Failed and never END_RECEIVED-promoted.
-      if (delivery.options.delivery == DeliveryClass::Applied &&
-          (delivery.state == DeliveryState::WaitingForMac ||
-           delivery.state == DeliveryState::WaitingForHopAccept ||
-           delivery.state == DeliveryState::WaitingForEndReceipt)) {
+      if (delivery.options.delivery == DeliveryClass::Applied && delivery.transmitted) {
         set_delivery_state(delivery, DeliveryState::Indeterminate,
                            "APP_RESULT_TIMEOUT");
         return;
