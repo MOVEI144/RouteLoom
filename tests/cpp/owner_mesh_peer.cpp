@@ -1611,6 +1611,13 @@ int main(int argc, char** argv) {
     fatal("boot security profile is not visible");
   }
   EspNowSecurityOwner& owner = DeviceTestAccess::owner(device);
+  const SecurityProfile expected_profile =
+      setup.devram ? SecurityProfile::Development : SecurityProfile::Candidate;
+  if (owner.security_profile() != expected_profile ||
+      owner.session_provider().security_profile() != expected_profile ||
+      device.capabilities().security_profile != expected_profile) {
+    fatal("boot security profile does not match the selected mode");
+  }
   Sdkv1Stores& stores = DeviceTestAccess::stores(device);
   EspNowRuntime& runtime = DeviceTestAccess::runtime(device);
   UsbBridge* bridge = DeviceTestAccess::bridge(device);

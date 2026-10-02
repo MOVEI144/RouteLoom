@@ -756,6 +756,7 @@ Status EspNowSecurityOwner::adopt_dev(const DevConfig& config,
     return Status::error(StatusCode::RecoveryRequired, "dev adopt failed");
   }
   booted_ = true;  // the pump now drives the dev-armed coordinator
+  security_profile_ = SecurityProfile::Development;
   ESP_LOGI(config_.log_tag, "dev adopted (node 0x%llx, boot %lu)",
            static_cast<unsigned long long>(config.node),
            static_cast<unsigned long>(config.boot));
@@ -1805,9 +1806,9 @@ Status EspNowSecurityOwner::send_relay_abort_to_host(
 }
 
 SecurityProfile EspNowSecurityOwner::security_profile() const noexcept {
-  // EXPERIMENTAL until P8 declares production (§15): the node surfaces
-  // SECURITY_PROFILE_EXPERIMENTAL and nothing claims production status.
-  return SecurityProfile::Development;
+  // The selected profile survives recovery; membership is not qualification.
+  // MemberEdhoc remains Candidate until all production gates are met.
+  return security_profile_;
 }
 
 bool EspNowSecurityOwner::binds_scope() const noexcept {

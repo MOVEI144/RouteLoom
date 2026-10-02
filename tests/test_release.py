@@ -108,6 +108,9 @@ class ReleaseTests(unittest.TestCase):
         for image, symbols, settings in (
                 (b'image' + key, [], member), (key.hex().upper().encode(), [], member),
                 (b'clean', ['_ZN9routeloom5sdkv116DevGroupProviderE'], member),
+                (b'clean', ['DevConfigAuthorityVerifier'], member),
+                (b'clean', ['DevMembershipHooks'], member),
+                (b'clean', ['DevPskAuthenticator'], member),
                 (b'clean', [], ['CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y']),
                 (b'clean', [], member + ['CONFIG_ROUTELOOM_DEV_KCONFIG_IDENTITY=y']),
                 (b'custom' + b'\x55' * 32, [], member +
@@ -139,6 +142,13 @@ class ReleaseTests(unittest.TestCase):
         matrix = release.firmware_matrix()
         self.assertEqual(len(matrix), 24)
         self.assertEqual(len({e['id'] for e in matrix}), 24)
+        cells = {c['id']: c for c in json.loads((ROOT / 'tools/ci/cells.json').read_text())['cells']}
+        for entry in matrix:
+            security = 'MEMBER_EDHOC' if entry['mode'] == 'member' else 'DEV_RAM'
+            self.assertIn(f'CONFIG_ROUTELOOM_SECURITY_MODE_{security}=y', entry['overlay'])
+            cell = cells[entry['cell']]
+            self.assertIn(f'CONFIG_ROUTELOOM_SECURITY_MODE_{security}=y',
+                          cell['overlay'] + cell.get('expect', []))
 
     def test_complete_assembly_provenance_promotion_and_corruption(self):
         data = copy.deepcopy(release.manifest())

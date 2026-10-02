@@ -166,6 +166,11 @@ if(COMMAND idf_component_register)
     ROUTELOOM_APP_OBJECT_TRANSFER=${_routeloom_object_enabled})
   target_compile_definitions(${COMPONENT_LIB} PRIVATE ${ROUTELOOM_UECC_DEFS}
     ${ROUTELOOM_EDHOC_C_DEFS})
+  # Member images must not retain the quick-start PSK providers. Host builds
+  # keep both modes so the same Owner harness covers Member and DevRam.
+  if(CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE ROUTELOOM_DEV_RAM=0)
+  endif()
   # -Wpedantic is C++-only here: ESP-IDF's libc wrappers (esp_libc
   # platform_include stdio.h/time.h) use #include_next and reach C
   # translation units as ordinary -I headers, so C -Wpedantic under ESP-IDF's

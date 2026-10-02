@@ -380,6 +380,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   usb::UsbBridge* bridge_{nullptr};
   bool begun_{false};
   bool booted_{false};
+  SecurityProfile security_profile_{SecurityProfile::Candidate};
   std::uint32_t boot_witness_{0};
   std::uint32_t local_join_relay_id_{0};  // 0 = no LocalJoin attempt
   Tune tune_{};
