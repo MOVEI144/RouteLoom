@@ -82,7 +82,7 @@ peer windowは初期2、最小1、最大4かつglobal awaiting-hop枠以内。BU
 
 ### 6.2 queue penaltyの所有者
 
-A→Bのlink costに加えるのは、**AのB向けegress queue**の持続遅延だけ。Bのegress queueはBが広告する自身の経路metricに含まれる。Bの広告metricとBのqueue自己申告の両方を加えて二重計上しない。
+A→Bのlink costに加えるのは、**AのB向けegress queue**の持続遅延だけ。Bのegress queueはBが広告する自身の経路metricに含まれる。Bの広告metricとBのqueue自己申告の両方を加えて二重計上しない。 AppObjectの制御優先／airtime pacingで意図的に待つ時間はlink costから除き、telemetryの実queue sojournには含める。
 
 初期式：`p = b * min(4, ceil(max(0, Q_ms - 50) / 50))`、`link_cost = saturating_add(b, p)`、`route_metric = saturating_add(B.advertised, link_cost)`。
 

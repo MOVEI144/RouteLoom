@@ -516,11 +516,13 @@ class Scenarios(unittest.TestCase):
                 self.assertNotIn("ROUTELOOM_MESH_PEER_GW", other.env)
 
     def test_object_rows_are_live_and_use_feature_peers(self):
-        for row_id in ("M10", "P04-O"):
+        for row_id in ("M10", "M10-HFIX-OBJECT", "P04-O"):
             self.assertEqual(self.rows(row_id)[0]["status"], "live")
         steps = check.e2e("pr", "mesh", "build-e2e", None)
         case = "site::owner_mesh::object::mesh_m10_three_hop_with_control"
         obj = next(step for step in steps if case in (step.require or ()))
+        self.assertIn("site::owner_mesh::object::load::mesh_m10_immediate_objects_with_1hz_control",
+                      obj.require)
         self.assertIn("--include-ignored", obj.argv)
         self.assertIn("build-e2e-object", obj.env["ROUTELOOM_MESH_PEER"])
         self.assertEqual(obj.env["ROUTELOOM_MESH_PEER_B"],

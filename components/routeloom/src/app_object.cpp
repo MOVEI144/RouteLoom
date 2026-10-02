@@ -11,13 +11,9 @@ using object_wire::AckStatus;
 constexpr std::uint8_t kManifest = 255;
 constexpr MonotonicMs kNoProgressMs = 10000;
 constexpr MonotonicMs kRecordSlackMs = 30000;
-bool same_start(const object_wire::Start& a, const object_wire::Start& b) noexcept {
-  return a.id == b.id && a.total == b.total && a.chunks == b.chunks &&
-         a.app_tag == b.app_tag && a.encoding == b.encoding && a.digest == b.digest;
-}
 std::uint64_t all_bits(std::uint8_t chunks) noexcept { return (std::uint64_t{1} << chunks) - 1; }
 MonotonicMs retry_delay(std::uint8_t sends, ObjectId id) noexcept {
-  const MonotonicMs base = std::min<MonotonicMs>(4000, 1000ULL << (sends - 1));
+  const MonotonicMs base = 1000ULL << std::min<unsigned>(sends - 1, 2);
   return base * (90 + id % 21) / 100;
 }
 }
@@ -165,7 +161,9 @@ void AppObject::start_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
   const Key k = key(frame, start.id);
   for (auto& record : records_) {
     if (!record.used || !(record.key == k)) continue;
-    if (!same_start(record.start, start)) {
+    if (record.total != start.total || record.chunks != start.chunks ||
+        record.app_tag != start.app_tag || record.encoding != start.encoding ||
+        record.digest != start.digest) {
       for (auto& rx : rx_) {
         if (rx.assembler.active() && records_[rx.record].key == k) finish_rx(rx, AckStatus::Conflict);
       }
@@ -239,7 +237,9 @@ void AppObject::start_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
   floor->highest = start.id; floor->boot = k.boot;
   slot->progress_ms = now_ms;
   slot->record = static_cast<std::uint8_t>(record_index);
-  records_[record_index] = {k, start, deadline + kRecordSlackMs, AckStatus::Incomplete, 0, true, true};
+  records_[record_index] = {k, start.digest, deadline + kRecordSlackMs, 0,
+                            start.total, start.app_tag, start.chunks, start.encoding,
+                            AckStatus::Incomplete, true, true};
 }
 void AppObject::chunk_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noexcept {
   object_wire::Chunk chunk{};
@@ -257,7 +257,7 @@ void AppObject::chunk_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noex
     if (rx.assembler.received() != before) rx.progress_ms = now_ms;
     auto& record = records_[rx.record]; record.bitmap = bits(rx); record.ack_pending = true;
     if (rx.assembler.complete()) {
-      if (!rx.assembler.verify({records_[rx.record].start.digest.data(), records_[rx.record].start.digest.size()})) {
+      if (!rx.assembler.verify({records_[rx.record].digest.data(), records_[rx.record].digest.size()})) {
         finish_rx(rx, AckStatus::Failed); return;
       }
     }
@@ -286,9 +286,19 @@ void AppObject::ack_rx(const wire::PlainFrame& frame, MonotonicMs now_ms) noexce
     if (ack.bitmap == all_bits(tx_.start.chunks)) finish_tx(ObjectState::Delivered, StatusCode::Ok);
     return;
   }
+  if (ack.status == AckStatus::Busy) {
+    // A delayed refusal cannot undo a later authenticated admission.
+    if (tx_.manifest_acked) return;
+    // Busy did not admit the manifest. Keep the immutable loan and original
+    // deadline; authenticated backpressure may outlast the progress timeout.
+    tx_.busy_retries = std::min<unsigned>(tx_.busy_retries + 1, 3);
+    tx_.retry_after_ms = now_ms + retry_delay(tx_.busy_retries, tx_.start.id);
+    tx_.progress_ms = now_ms;
+    tx_.flight = {};
+    return;
+  }
   if (ack.status != AckStatus::Incomplete) {
     finish_tx(ack.status == AckStatus::Unsupported ? ObjectState::Unsupported : ObjectState::Failed,
-              ack.status == AckStatus::Busy ? StatusCode::RemoteBusy :
               ack.status == AckStatus::NoBuffer ? StatusCode::NoCapacity :
               ack.status == AckStatus::Expired ? StatusCode::Expired :
               ack.status == AckStatus::Unsupported ? StatusCode::Unsupported : StatusCode::ProtocolError);
@@ -341,6 +351,7 @@ void AppObject::on_config_job_done(const MessageId& id, bool accepted, const cha
   if (fallback_ != nullptr) fallback_->on_config_job_done(id, accepted, reason, now_ms);
 }
 void AppObject::pump(MonotonicMs now_ms) noexcept {
+  if (now_ms < tx_.retry_after_ms) return;
   for (auto& flight : tx_.flight) {
     if (!flight.used) continue;
     if (flight.queued || (flight.sent_ms != 0 && now_ms - flight.sent_ms < retry_delay(flight.sends, tx_.start.id))) continue;
@@ -397,8 +408,8 @@ void AppObject::poll(MonotonicMs now_ms) noexcept {
     }
     if (rx.assembler.complete() && observer_.object_receive_ready()) {
       const auto& record = records_[rx.record];
-      const ObjectRxInfo info{record.key.peer, record.start.id, record.key.boot, record.key.epoch,
-                              record.start.app_tag, record.start.encoding};
+      const ObjectRxInfo info{record.key.peer, record.key.id, record.key.boot, record.key.epoch,
+                              record.app_tag, record.encoding};
       in_call_ = true; observer_.on_object(info, rx.assembler.data()); in_call_ = false;
       finish_rx(rx, AckStatus::Complete);
     }
@@ -408,7 +419,7 @@ void AppObject::poll(MonotonicMs now_ms) noexcept {
     if (now_ms >= record.until_ms || !live(record.key)) { record = {}; continue; }
     if (!record.ack_pending || now_ms < send_after_ms_) continue;
     std::uint8_t missing = 0;
-    while (missing < record.start.chunks && (record.bitmap & (std::uint64_t{1} << missing)) != 0) ++missing;
+    while (missing < record.chunks && (record.bitmap & (std::uint64_t{1} << missing)) != 0) ++missing;
     std::array<std::uint8_t, object_wire::kAckBytes> bytes{}; std::size_t size = 0; MessageId id{};
     if (object_wire::encode(Ack{record.key.id, record.status, missing, record.bitmap},
                             {bytes.data(), bytes.size()}, size) &&
