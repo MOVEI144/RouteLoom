@@ -9,7 +9,7 @@ sdk.yml firmware matrix is generated from.
 
     check.py quick                  docs + portable C/C++ tests
     check.py ci [--dry-run]         every stage CI runs, in order
-    check.py core|docs|golden|rust|interop|profile-mesh|fuzz
+    check.py core|docs|golden|rust|interop|compat|profile-mesh|fuzz
     check.py profiles [--build DIR]  portable suites per resource profile
     check.py scenarios              tests/e2e/scenarios.json rows
     check.py firmware --list [--format github]
@@ -157,6 +157,30 @@ def interop() -> list[Step]:
         Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::owner_mesh::",
               "--", "--nocapture"], cwd="host", env=mesh_env, forbid=SKIP_MARK,
              require=live_cases(rows, "site/owner_mesh/")),
+    ]
+
+
+def compat() -> list[Step]:
+    """N-1 records migrate; HostLink 1 is refused by the real USB Owner."""
+    env = {"ROUTELOOM_OWNER_PEER": str(ROOT / PEER),
+           "ROUTELOOM_MESH_PEER": str(ROOT / MESH_PEER), "UBSAN_OPTIONS": "halt_on_error=1"}
+    case = "site::owner_mesh::fault::mesh_hostlink_v2_auth_negatives"
+    return [
+        Step(["cmake", "-S", ".", "-B", "build", "-DROUTELOOM_ENABLE_SANITIZERS=ON",
+              "-DCMAKE_BUILD_TYPE=Debug"]),
+        Step(["cmake", "--build", "build", "--parallel", JOBS, "--target",
+              "routeloom_sdkv1_golden_tests", "routeloom_config_tests", "routeloom_migration_tests",
+              "routeloom_joiner_interop_peer", "routeloom_owner_mesh_peer"]),
+        Step(["ctest", "--test-dir", "build", "--output-on-failure", "-R",
+              "routeloom_(sdkv1_golden|config|migration)_tests"]),
+        Step(["cargo", "test", "-p", "routeloom-protocol", "--test", "compat"], cwd="host"),
+        Step(["cargo", "test", "-p", "routeloom-provision", "--test", "sdkv1_golden"], cwd="host"),
+        Step(["cargo", "test", "-p", "routeloom-host", "--bins",
+              "site::store::tests::migration_advances_a_v2_database_and_keeps_a_copy"], cwd="host"),
+        Step(["assert-peer-version", PEER, PEER_VERSION]),
+        Step(["assert-peer-version", MESH_PEER, MESH_PEER_VERSION]),
+        Step(["cargo", "test", "-p", "routeloom-host", "--bins", case, "--", "--nocapture"],
+             cwd="host", env=env, forbid=SKIP_MARK, require={case}),
     ]
 
 
@@ -661,7 +685,7 @@ def stream(step: Step, cwd: Path, env: dict) -> tuple[int, str, set[str]]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="stage", required=True)
-    for name in ("quick", "ci", "docs", "golden", "rust", "interop", "profile-mesh", "fuzz"):
+    for name in ("quick", "ci", "docs", "golden", "rust", "interop", "compat", "profile-mesh", "fuzz"):
         sub.add_parser(name).add_argument("--dry-run", action="store_true")
     p_profiles = sub.add_parser("profiles")
     p_profiles.add_argument("--dry-run", action="store_true")
@@ -717,7 +741,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_firmware(cells, args.dry_run, data)
 
     stages = {"core": lambda: core(getattr(args, "sanitizers", "ON")), "docs": docs,
-              "golden": golden, "rust": rust, "interop": interop,
+              "golden": golden, "rust": rust, "interop": interop, "compat": compat,
               "profiles": lambda: profiles(getattr(args, "build", None)),
               "profile-mesh": profile_mesh, "fuzz": fuzz,
               "firmware": lambda: [s for c in data["cells"] for s in firmware_steps(c)]}
