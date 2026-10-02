@@ -161,8 +161,9 @@ def interop() -> list[Step]:
               "--", "--nocapture"], cwd="host", env=env, forbid=SKIP_MARK,
              require=live_cases(rows, "site/joiner_interop.rs")),
         Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::owner_mesh::",
-              "--", "--nocapture"], cwd="host", env=mesh_env, forbid=SKIP_MARK,
-             require=live_cases(rows, "site/owner_mesh/")),
+              "--", "--nocapture", "--skip", "site::owner_mesh::object::"], cwd="host", env=mesh_env, forbid=SKIP_MARK,
+             require=[case for case in live_cases(rows, "site/owner_mesh/")
+                      if "::object::" not in case]),
     ]
 
 
@@ -288,23 +289,22 @@ def object_mesh() -> list[Step]:
               "-DCMAKE_BUILD_TYPE=Debug", "-DROUTELOOM_APP_OBJECT_TRANSFER=ON", "-DROUTELOOM_DEDUP_PROFILE=leaf"]),
         Step(["cmake", "--build", build, "--parallel", JOBS, "--target",
               "routeloom_owner_mesh_peer", "routeloom_joiner_interop_peer"]),
-        Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::owner_mesh::object::mesh_m10",
-              "--", "--ignored", "--nocapture", "--skip", "mesh_m10_three_hop_with_control"], cwd="host", env=env, forbid=SKIP_MARK,
-             require=("site::owner_mesh::object::mesh_m10_app_objects",
-                      "site::owner_mesh::object::mesh_m10_object_deadline_busy_and_cancel",
-                      "site::owner_mesh::object::mesh_m10_object_reorder_duplicate_and_conflict",
-                      "site::owner_mesh::object::mesh_m10_host_usb_object_upload",
-                      "site::owner_mesh::object::mesh_m10_c_object_apis",
-                      "site::owner_mesh::object::mesh_m10_concurrent_usb_ingress",
-                      "site::owner_mesh::object::mesh_m10_boot_revoke_and_route_repair",
-                      "site::owner_mesh::object::mesh_m10_completion_record_pressure",
-                      "site::owner_mesh::object::mesh_m10_object_queue_pressure",
-                      "site::owner_mesh::object::mesh_m10_control_p99")),
-        Step(["cargo", "test", "-p", "routeloom-host", "--bins", "site::owner_mesh::object::mesh_p04_object_off_terminal",
-              "--", "--ignored", "--nocapture"], cwd="host",
-             env={**env, "ROUTELOOM_MESH_PEER_GW": str(ROOT / "build" / peer)}, forbid=SKIP_MARK,
-             require=("site::owner_mesh::object::mesh_p04_object_off_terminal",)),
-    ]
+    ] + object_steps(live_cases(load_scenarios(), "site/owner_mesh/object.rs"), env,
+                     ["cargo", "test", "-p", "routeloom-host", "--bins", "--"], "host")
+
+
+def object_steps(cases: list[str], env: dict, argv: list[str], cwd: str) -> list[Step]:
+    steps = []
+    for terminal_off in (False, True):
+        selected = [case for case in cases if ("mesh_p04" in case) == terminal_off]
+        if not selected:
+            continue
+        peers = dict(env)
+        if terminal_off:
+            peers["ROUTELOOM_MESH_PEER_GW"] = env["ROUTELOOM_MESH_PEER_B"]
+        steps.append(Step([*argv, "--include-ignored", "--nocapture", "--test-threads=2", *selected],
+                          cwd=cwd, env=peers, forbid=SKIP_MARK, require=selected))
+    return steps
 
 
 def fuzz() -> list[Step]:
@@ -484,7 +484,8 @@ def e2e(tier: str, shard: str, build: str, test_bin: str | None) -> list[Step]:
     errors = scenario_errors(rows)
     if errors:
         raise SystemExit("\n".join(errors))
-    cases = e2e_cases(rows, tier, shard)
+    all_cases = e2e_cases(rows, tier, shard)
+    cases = [case for case in all_cases if "::object::" not in case]
     env = {"ROUTELOOM_OWNER_PEER": str(ROOT / build / "tests/cpp/routeloom_joiner_interop_peer"),
            "ROUTELOOM_MESH_PEER": str(ROOT / build / "tests/cpp/routeloom_owner_mesh_peer"),
            "UBSAN_OPTIONS": "halt_on_error=1", "ROUTELOOM_E2E_TIER": tier}
@@ -492,10 +493,15 @@ def e2e(tier: str, shard: str, build: str, test_bin: str | None) -> list[Step]:
         env["ROUTELOOM_E2E_NIGHTLY"] = "1"
     argv = ([str(ROOT / test_bin)] if test_bin else
             ["cargo", "test", "-p", "routeloom-host", "--bins", "--"])
-    return [Step(["assert-peer-version", env["ROUTELOOM_OWNER_PEER"], PEER_VERSION]),
+    steps = [Step(["assert-peer-version", env["ROUTELOOM_OWNER_PEER"], PEER_VERSION]),
             Step(["assert-peer-version", env["ROUTELOOM_MESH_PEER"], MESH_PEER_VERSION]),
             Step([*argv, "--nocapture", f"--test-threads={1 if tier == 'nightly' else 2}", *cases],
                  cwd="." if test_bin else "host", env=env, forbid=SKIP_MARK, require=cases)]
+    object_env = {**env,
+                  "ROUTELOOM_MESH_PEER": str(ROOT / (build + "-object") / "tests/cpp/routeloom_owner_mesh_peer"),
+                  "ROUTELOOM_MESH_PEER_B": env["ROUTELOOM_MESH_PEER"]}
+    return steps + object_steps([case for case in all_cases if "::object::" in case],
+                                object_env, argv, "." if test_bin else "host")
 
 
 # --- firmware cells -------------------------------------------------------

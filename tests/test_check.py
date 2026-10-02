@@ -434,6 +434,20 @@ class Scenarios(unittest.TestCase):
         code, _, err = run_main(["scenarios"])
         self.assertEqual((code, err), (0, ""))
 
+    def test_object_rows_are_live_and_use_feature_peers(self):
+        for row_id in ("M10", "P04-O"):
+            self.assertEqual(self.rows(row_id)[0]["status"], "live")
+        steps = check.e2e("pr", "mesh", "build-e2e", None)
+        case = "site::owner_mesh::object::mesh_m10_three_hop_with_control"
+        obj = next(step for step in steps if case in (step.require or ()))
+        self.assertIn("--include-ignored", obj.argv)
+        self.assertIn("build-e2e-object", obj.env["ROUTELOOM_MESH_PEER"])
+        self.assertEqual(obj.env["ROUTELOOM_MESH_PEER_B"],
+                         str(ROOT / "build-e2e/tests/cpp/routeloom_owner_mesh_peer"))
+        off = next(step for step in steps if
+                   "site::owner_mesh::object::mesh_p04_object_off_terminal" in (step.require or ()))
+        self.assertEqual(off.env["ROUTELOOM_MESH_PEER_GW"], obj.env["ROUTELOOM_MESH_PEER_B"])
+
     def test_duplicate_id_and_missing_test_fail(self):
         row = dict(self.rows("M01")[0])
         self.data["rows"].append(row)
@@ -470,6 +484,7 @@ class Scenarios(unittest.TestCase):
                       check.scenario_errors(self.data))
 
     def test_planned_and_hil_rows(self):
+        self.rows("M10")[0]["status"] = "planned"
         self.rows("M10")[0]["test"] = self.rows("M01")[0]["test"]
         self.rows("M05")[0]["hil"]["run"] = ["tools/hil/no_such_script.py"]
         self.rows("M03")[0]["hil"] = {"rounds": ["H0"], "run": "manual"}
@@ -505,7 +520,7 @@ class Scenarios(unittest.TestCase):
         self.assertTrue(any("mesh_j08_k1b_pull_answers_dropped" in c for c in cases[2]))
         all_cases = set.union(*cases)
         self.assertIn("site::owner_mesh::consumer::mesh_k01_display_direct_smoke", all_cases)
-        for row_id in ("K01", "K01-D", "K03", "M01-T3"):
+        for row_id in ("K01", "K01-D", "K03"):
             for case in check.rust_cases(self.rows(row_id)[0]["test"]):
                 self.assertNotIn(case, all_cases)
         self.assertIn("site::owner_mesh::kg::mesh_k05_cursor_replay_gap_and_epoch_change",

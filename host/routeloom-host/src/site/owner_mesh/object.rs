@@ -260,7 +260,6 @@ fn mesh_m10_host_usb_object_upload() {
 }
 
 #[test]
-#[ignore = "M01-T3 prerequisite: three-hop end handshake expires before AppObject admission"]
 fn mesh_m10_three_hop_with_control() {
     let topology = switch::Topology::line(4);
     let mut world = MeshWorld::start_plan(
