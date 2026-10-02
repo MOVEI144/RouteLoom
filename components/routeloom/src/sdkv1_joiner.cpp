@@ -1019,10 +1019,10 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
     return Status::success();
   }
   const IdentityRecord& identity = identity_.identity();
-  const Status id_valid = identity_validate(identity);
-  if (!id_valid || identity.node_id != config_.node ||
-      identity.key_location == CredentialKeyLocation::None) {
-    last_error_ = !id_valid ? id_valid.code : StatusCode::InvalidArgument;
+  // IdentityStore already validated the keypair at readback. Repeating
+  // its scalar multiplication here would occupy the live Owner.
+  if (identity.node_id != config_.node || identity.key_location == CredentialKeyLocation::None) {
+    last_error_ = StatusCode::InvalidArgument;
     set_state(JoinState::Stopped);
     return Status::success();
   }
@@ -1162,6 +1162,12 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
 }
 
 void Joiner::begin_direct_attempt() noexcept {
+  if (aead_ != nullptr && (aead_->seal == nullptr || aead_->open == nullptr)) {
+    last_error_ = StatusCode::Unsupported;
+    teardown_attempt();
+    set_state(JoinState::Stopped);
+    return;
+  }
   JoinHandshakeConfig hs{};
   hs.node = config_.node;
   hs.direct_transport = true;  // zero observed hints: USB selects the site
@@ -1171,14 +1177,8 @@ void Joiner::begin_direct_attempt() noexcept {
   hs.last_site_id = evidence_valid_ ? evidence_.site_id : 0;
   hs.last_generation = evidence_valid_ ? evidence_.generation : 0;
   hs.usable_channel_mask = config_.usable_channel_mask;
-  const Status begin = handshake_.begin(hs, identity_.identity(), entropy_, aead_);
-  if (!begin) {
-    // No candidate table in a direct run: terminal, the Owner restarts.
-    last_error_ = begin.code;
-    teardown_attempt();
-    set_state(JoinState::Stopped);
-    return;
-  }
+  crypto_handshake_config_ = hs;
+  crypto_begin_ = true;
   attempt_ = JoinAttempt{};  // inactive: no table begin/apply, no avoidance
   attempt_record_ = nullptr;
   attempt_key_ = JoinCandidateKey{};
@@ -1425,10 +1425,8 @@ Status Joiner::drive_refresh(const MonotonicMs now) noexcept {
   hs.last_generation = evidence_valid_ ? evidence_.generation : 0;
   hs.last_network = evidence_valid_ && recovery_only_ ? evidence_.network : 0;
   hs.usable_channel_mask = config_.usable_channel_mask;
-  if (!handshake_.begin(hs, identity_.identity(), entropy_, aead_)) {
-    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
-    return Status::success();
-  }
+  crypto_handshake_config_ = hs;
+  crypto_begin_ = true;
   sat_inc(counters_.attempts);
   event_.key = attempt_key_;
   event_.proxy = attempt_proxy_;
@@ -1443,6 +1441,13 @@ Status Joiner::run_crypto(void* context) noexcept {
   const ByteView input{owner.msg_.data(), owner.crypto_message_size_};
   switch (owner.crypto_op_) {
     case CryptoOp::M1:
+      if (owner.crypto_begin_) {
+        owner.crypto_begin_ = false;
+        const Status begun =
+            owner.handshake_.begin(owner.crypto_handshake_config_, owner.identity_.identity(),
+                                   owner.entropy_, owner.aead_);
+        if (!begun) return begun;
+      }
       return owner.handshake_.compose_m1(output, owner.crypto_length_);
     case CryptoOp::M2:
       return owner.handshake_.process_m2(input);

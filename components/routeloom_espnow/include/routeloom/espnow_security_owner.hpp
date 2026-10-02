@@ -75,6 +75,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
     // gateway-scoped anchors. Board config (D02) or a Kconfig opt-in sets
     // this; default keeps the gateway-scoped profile.
     bool flat_group_routing{false};
+    CryptoWorker* crypto_worker{nullptr};
   };
 
   EspNowSecurityOwner() noexcept = default;
@@ -94,6 +95,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // not start before. The coordinator mux serves both profiles from
   // here on.
   SecurityProvider& session_provider() noexcept;
+  CryptoWorker* crypto_worker() noexcept { return crypto_worker_; }
   sdkv1::SecurityCoordinator& coordinator() noexcept;
   sdkv1::MembershipLifecycle& lifecycle() noexcept;
   // Late bindings (each once, before boot): the radio (RLD1 TX, channel
@@ -310,6 +312,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
     EspNowSecurityOwner& owner_;
   };
 
+  static void crypto_completed(void* context) noexcept;
   sdkv1::HmacJoinCookie& sealer() noexcept;
   sdkv1::StoreCredentialVerifier& verifier() noexcept;
   MeshConfigPort* mesh_port() noexcept;
@@ -380,6 +383,12 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   usb::UsbBridge* bridge_{nullptr};
   bool begun_{false};
   bool booted_{false};
+  bool boot_pending_{false};
+  bool boot_usb_direct_{false};
+  bool member_ready_pending_{false};
+  std::uint32_t member_ready_fetch_{0};
+  sdkv1::SignatureProgress lifecycle_signature_{};
+  CryptoWorker* crypto_worker_{nullptr};
   std::uint32_t boot_witness_{0};
   std::uint32_t local_join_relay_id_{0};  // 0 = no LocalJoin attempt
   Tune tune_{};
@@ -468,11 +477,15 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
     std::uint32_t binding{0};
   };
   std::array<PeerTxStage, 4> peer_tx_staged_{};
-  bool completed_object_valid_{false};  // latest-wins completed RRS1
+  bool completed_object_valid_{false};  // retained until lifecycle acceptance
+  bool removal_notice_pending_{false};
+  std::array<std::uint8_t, sdkv1::kRemovalNoticeObjectSize> removal_notice_{};
   NodeId completed_object_peer_{kInvalidNodeId};
   std::array<std::uint8_t, sdkv1::kRevocationObjectMax> completed_object_{};
   std::size_t completed_object_size_{0};
   std::uint64_t lifecycle_recovery_token_{0};  // outstanding recovery action, if any
+  bool lifecycle_recovery_pending_{false};
+  bool lifecycle_recovery_success_{false};
   std::uint32_t gossip_dropped_{0};
   struct AuthorityRxStage {
     bool used{false};

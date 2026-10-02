@@ -40,8 +40,8 @@ class SignatureProgress final : public Es256Verifier {
   mutable Digest256 digest_{};
   mutable Es256Signature signature_{};
   mutable Digest256 identity_{};
-  // One retained join verifies SiteCert, MemberCert and its staged RRS1.
-  mutable std::array<Result, 3> results_{};
+  // A cutover checks the current and next certificate chains, proof and RRS1.
+  mutable std::array<Result, 6> results_{};
   mutable std::size_t result_count_{0};
   mutable bool verified_{false};
   mutable bool waiting_{false};

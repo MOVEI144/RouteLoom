@@ -151,6 +151,7 @@ class EspNowRuntime final : public RadioPort,
   // job. Thin peek: the event stays queued for poll_once's ordered drain
   // (reserved completions still run first).
   void wait_for_event(MonotonicMs timeout_ms) noexcept;
+  void notify_owner() noexcept;
 
   // Attach the autonomy stack: `engine` must be constructed with this
   // runtime as its DiscoveryPort and must outlive the runtime. Installs the
@@ -332,7 +333,7 @@ class EspNowRuntime final : public RadioPort,
   static void note_max(std::uint32_t& slot, const std::uint64_t value) noexcept {
     if (value > slot) slot = value > UINT32_MAX ? UINT32_MAX : static_cast<std::uint32_t>(value);
   }
-  enum class EventKind : std::uint8_t { Rx, Tx };
+  enum class EventKind : std::uint8_t { Rx, Tx, Wake };
   // TX completion provenance (02-telemetry §2.2): which lane a send callback
   // belongs to. Stale/fenced completions are evidence under their ORIGINAL
   // generations — they resolve nothing in the node.

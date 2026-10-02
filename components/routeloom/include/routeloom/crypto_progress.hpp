@@ -49,6 +49,10 @@ class CryptoProgress final {
   void cancel() noexcept {
     if (pending_) cancelled_ = true;
   }
+  void clear_cancelled() noexcept {
+    assert(!pending_);
+    cancelled_ = false;
+  }
   bool pending() const noexcept { return pending_; }
   bool cancelled() const noexcept { return cancelled_; }
   bool ready() const noexcept { return pending_ && worker_->ready(); }

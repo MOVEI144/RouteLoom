@@ -7,6 +7,7 @@ namespace routeloom::sdkv1 {
 
 Status SignatureProgress::reset() noexcept {
   if (pending()) return Status::error(StatusCode::Busy, "signature loan active");
+  progress_.clear_cancelled();
   secure_clear(key_);
   secure_clear(digest_);
   secure_clear(signature_);

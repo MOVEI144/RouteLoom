@@ -162,13 +162,19 @@ class IdentityStore {
   bool quarantined() const noexcept { return pair_.quarantined(); }
   bool uncertain() const noexcept { return pair_.uncertain(); }
   const IdentityRecord& identity() const noexcept { return identity_; }
+  std::uint64_t context_revision() const noexcept { return context_revision_; }
 
  private:
+  static Status decode(ByteView record, void* context) noexcept;
+  static const SealedRecordFormat kFormat;
   Status encode(const IdentityRecord& record, std::size_t& used_len) noexcept;
 
   ByteBuffer<kIdentitySlotBytes> scratch_{};
   SealedSlotPair pair_;
   IdentityRecord identity_{};
+  std::uint64_t context_revision_{0};
+  Digest256 validated_record_{};
+  bool validated_record_live_{false};
 };
 
 // --- RLS1: site membership (A/B alternating) ----------------------------------

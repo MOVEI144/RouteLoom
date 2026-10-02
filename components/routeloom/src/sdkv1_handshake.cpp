@@ -2932,7 +2932,7 @@ Status HandshakeEngine::crypto_call(const CryptoOp op, const ByteView input,
     const auto* record = find_record_by_token(crypto_token_);
     if (record == nullptr) return Status::error(StatusCode::InvalidState, "crypto flight orphan");
     crypto_peer_ = record->peer;
-    if (crypto_.asynchronous() && !verifier_.worker_context(crypto_peer_context_)) {
+    if (crypto_.asynchronous() && !dev_armed_ && !verifier_.worker_context(crypto_peer_context_)) {
       return Status::error(StatusCode::Unsupported, "crypto credential snapshot unavailable");
     }
   }

@@ -7,6 +7,9 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#if CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
+#include "esp_log.h"
+#endif
 
 namespace routeloom::espnow {
 namespace {
@@ -23,6 +26,10 @@ void run(void*) noexcept {
   for (;;) {
     (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     (void)mailbox.execute();
+#if CONFIG_ROUTELOOM_HIL_EDHOC_TIMING
+    ESP_LOGI("rl_crypto", "HIL CRYPTO stack_free_bytes=%u",
+             static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+#endif
   }
 }
 

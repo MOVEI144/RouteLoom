@@ -296,6 +296,7 @@ Status Device::begin(DeviceConfig& config, const MonotonicMs now_ms) noexcept {
   static espnow::EspOwnerEntropy entropy;
   static espnow::EspNowSecurityOwner owner;
   espnow::EspNowSecurityOwner::Config owner_config{};
+  owner_config.crypto_worker = config.crypto_worker;
   owner_config.local_node = node.node;
   owner_config.local_mac = config.mac;
   owner_config.joiner.node = node.node;

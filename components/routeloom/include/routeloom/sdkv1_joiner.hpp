@@ -418,6 +418,8 @@ class Joiner final {
     return signature_ == nullptr ? Status::success() : signature_->cancel();
   }
   CryptoOp crypto_op_{CryptoOp::M1};
+  JoinHandshakeConfig crypto_handshake_config_{};
+  bool crypto_begin_{false};
   std::size_t crypto_length_{0};
   std::size_t crypto_message_size_{0};
   JoinDecideInput crypto_input_{};

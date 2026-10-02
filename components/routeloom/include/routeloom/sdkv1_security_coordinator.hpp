@@ -372,6 +372,7 @@ class SecurityCoordinator final : public BootstrapSink,
     profile::Role allowed_role{profile::kMaxRole};
     NodeId local_node{kInvalidNodeId};
     JoinerConfig joiner_config{};
+    CryptoWorker* crypto_worker{nullptr};
   };
 
   explicit SecurityCoordinator(const Deps& deps) noexcept;
@@ -984,22 +985,25 @@ class SecurityCoordinator final : public BootstrapSink,
 
   // --- mode workspace (exactly one live; see above) ---
   void destroy_workspace() noexcept;
+  bool workspace_crypto_pending() const noexcept;
+  void drain_workspace_crypto(MonotonicMs now) noexcept;
+  bool cancel_for_swap() noexcept;
   void create_joiner() noexcept;
   void create_member() noexcept;
   Joiner& joiner() noexcept {
-    assert(mode_ == CoordinatorMode::ZeroTouch);
+    assert(workspace_mode_ == CoordinatorMode::ZeroTouch);
     return ws_.joiner;
   }
   const Joiner& joiner() const noexcept {
-    assert(mode_ == CoordinatorMode::ZeroTouch);
+    assert(workspace_mode_ == CoordinatorMode::ZeroTouch);
     return ws_.joiner;
   }
   MemberEngine& member() noexcept {
-    assert(has_member_engine());
+    assert(workspace_mode_ == CoordinatorMode::Member || workspace_mode_ == CoordinatorMode::Dev);
     return ws_.member;
   }
   const MemberEngine& member() const noexcept {
-    assert(has_member_engine());
+    assert(workspace_mode_ == CoordinatorMode::Member || workspace_mode_ == CoordinatorMode::Dev);
     return ws_.member;
   }
   // --- mode sides (exactly one live; see above) ---
@@ -1014,6 +1018,11 @@ class SecurityCoordinator final : public BootstrapSink,
 
   Deps deps_{};
   CoordinatorMode mode_{CoordinatorMode::Fresh};
+  CoordinatorMode workspace_mode_{CoordinatorMode::Fresh};
+  bool workspace_retiring_{false};
+  bool swap_waiting_{false};
+  bool refresh_waiting_{false};
+  SignatureProgress join_signature_{};
   SdkMembershipHooks hooks_;
   NullJoinObserver joiner_observer_{};
   // The bank stays outside the union: the firmware binds the session

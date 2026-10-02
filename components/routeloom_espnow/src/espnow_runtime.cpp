@@ -998,6 +998,7 @@ void EspNowRuntime::poll_once() noexcept {
     if (depth > owner_stats_.rx_queue_max) owner_stats_.rx_queue_max = depth;
     if (xQueueReceive(event_queue_, &event, 0) != pdTRUE) break;
     ++drained;
+    if (event.kind == EventKind::Wake) continue;
     if (event.kind == EventKind::Tx) {
       // Telemetry gets every completion lane; the node's job resolution only
       // ever sees the Reserved lane — raw/stale completions resolve nothing
@@ -1261,6 +1262,13 @@ void EspNowRuntime::poll_bootstrap(const MonotonicMs now) noexcept {
       reconcile_autonomy(now);
     }
   }
+}
+
+void EspNowRuntime::notify_owner() noexcept {
+  if (event_queue_ == nullptr) return;
+  Event event{};
+  event.kind = EventKind::Wake;
+  (void)xQueueSend(event_queue_, &event, 0);
 }
 
 void EspNowRuntime::wait_for_event(const MonotonicMs timeout_ms) noexcept {

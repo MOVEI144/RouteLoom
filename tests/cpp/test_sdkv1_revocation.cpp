@@ -441,6 +441,73 @@ void test_rrs_wire_codecs() {
 
 // --- Boot adoption -------------------------------------------------------------------------
 
+void test_worker_lifecycle_adoption_and_apply() {
+  NodeFixture f{};
+  CHECK(f.provision(5, 14));
+  CryptoWorker worker;
+  SignatureProgress signature;
+  CHECK(f.lifecycle.bind_crypto_worker(&worker, signature).ok());
+  CHECK(f.dispatch(LifecycleInput::Boot(true), 1).code == StatusCode::WouldBlock);
+  for (int i = 0; i < 10 && f.lifecycle.crypto_waiting(); ++i) {
+    CHECK(worker.execute());
+    const Status resumed = f.dispatch(LifecycleInput::Boot(true), 1);
+    CHECK(resumed.ok() || resumed.code == StatusCode::WouldBlock);
+    CHECK(f.snap().phase != LifecyclePhase::StorageBlocked);
+  }
+  CHECK(worker.idle() && !f.lifecycle.crypto_waiting());
+  CHECK(f.snap().phase == LifecyclePhase::Active);
+  const auto object = revocation_object(revocation_set(15, 2, 2));
+  CHECK(f.dispatch(LifecycleInput::Authority(stamp_for(kNodeB, 1), kAuthorityTypeRevocation,
+                                             object.view()),
+                   2)
+            .ok());
+  for (int i = 0; i < 50 && f.snap().phase == LifecyclePhase::ApplyingRrs; ++i) {
+    (void)worker.execute();
+    const Status polled = f.dispatch(LifecycleInput::Poll(), 2);
+    CHECK(polled.ok() || polled.code == StatusCode::WouldBlock);
+    CHECK(f.snap().phase != LifecyclePhase::StorageBlocked);
+  }
+  CHECK(f.revocations.rs_epoch() == 15);
+  CHECK(f.site.site().rs_epoch_floor == 15);
+  CHECK(f.snap().phase == LifecyclePhase::Active);
+  CHECK(worker.idle());
+}
+
+void test_worker_lifecycle_cancel_and_context() {
+  for (const bool leave : {false, true}) {
+    NodeFixture f{};
+    CHECK(f.provision(5, 14));
+    CryptoWorker worker;
+    SignatureProgress signature;
+    CHECK(f.lifecycle.bind_crypto_worker(&worker, signature).ok());
+    ByteBuffer<kRemovalNoticeObjectSize> notice{};
+    if (leave) {
+      ByteBuffer<kRemovalNoticePayloadSize> payload{};
+      CHECK_OK(removal_notice_payload_encode(
+          RemovalNotice{RevocationReason::Removed, kSiteId, kNode, 5, 14}, payload));
+      ByteBuffer<kRemovalNoticeAadSize> aad{};
+      CHECK_OK(removal_notice_aad(kNetwork, aad));
+      Es256Signature sig{};
+      sign_payload(sak(), payload.view(), aad.view(), sig);
+      CHECK_OK(removal_notice_assemble(payload.view(), ByteView{sig.data(), sig.size()}, notice));
+      CHECK(f.dispatch(LifecycleInput::RemovalRequired(notice.view()), 1).code ==
+            StatusCode::WouldBlock);
+      CHECK(f.dispatch(LifecycleInput::LocalLeave(), 1).ok());
+      CHECK(f.snap().phase == LifecyclePhase::Removing);
+    } else {
+      CHECK(f.dispatch(LifecycleInput::Boot(true), 1).code == StatusCode::WouldBlock);
+      CHECK(f.identity.commit(identity_for(f.config.self)).ok());
+      CHECK(f.dispatch(LifecycleInput::Boot(true), 1).code == StatusCode::Expired);
+    }
+    CHECK(f.dispatch(LifecycleInput::Poll(), 2).code == StatusCode::WouldBlock);
+    CHECK(worker.execute());
+    CHECK(f.dispatch(LifecycleInput::Poll(), 2).ok());
+    CHECK(worker.idle());
+    CHECK(!f.lifecycle.crypto_pending());
+    CHECK(!f.lifecycle.crypto_waiting());
+  }
+}
+
 void test_boot_adoption() {
   // Healthy stores, RRS ahead of the floor: the boot re-runs enforcement
   // and catches the floor up, then opens.
@@ -3364,6 +3431,8 @@ int main() {
   test_switching_intent_reboots_closed();
   test_rrs_wire_codecs();
   test_revocation_wire_vectors();
+  test_worker_lifecycle_adoption_and_apply();
+  test_worker_lifecycle_cancel_and_context();
   test_boot_adoption();
   test_first_join_adopts_live();
   test_removed_site_is_not_first_join();

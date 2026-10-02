@@ -1,5 +1,14 @@
 menu "RouteLoom"
 
+    config ROUTELOOM_CRYPTO_WORKER
+        bool "Run EDHOC and COSE P-256 on a low-priority worker"
+        default y
+        help
+            A static single-job worker keeps the Owner available for
+            forwarding, ACKs and deadlines during P-256 operations.
+            Disable only for the synchronous comparison workload.
+
+
     config ROUTELOOM_TRACE
         bool "Periodic Owner trace logs"
         default n
