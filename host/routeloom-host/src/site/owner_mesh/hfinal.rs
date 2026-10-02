@@ -349,45 +349,48 @@ fn fill_terminal_quota(world: &mut MeshWorld) {
 }
 
 #[test]
-fn mesh_hfinal_terminal_quota_retry_preserves_end_replay() {
-    let mut world = MeshWorld::start("hfinal-quota-retry", Switch::direct())
+fn mesh_hfinal_terminal_quota_verifies_end_before_admission() {
+    let mut world = MeshWorld::start("hfinal-quota-auth", Switch::direct())
         .expect("HFINAL requires real Owner peers");
     world.pump_until(9000, all_ready);
     assert!(all_ready(&world.snaps));
-    let filled_at = world.now;
     fill_terminal_quota(&mut world);
     let source = world.macs[1];
     let destination = world.macs[0];
-    // Refuse a fresh End envelope while every pin is still retained.
-    world.now = filled_at + 34_990;
-    for peer in &mut world.peers {
-        assert_eq!(peer.sleep(4, world.now, 0).0, 0);
-    }
-    let frame = world.peers[1].craft_frame(
+    world.peers[1].craft_frame(
         testkit::GATEWAY,
         testkit::GATEWAY,
         WIRE_DATA,
         0,
         0,
-        b"quota-retry",
+        b"quota-auth",
     );
-    world.peers[0].send_rx(&source, &destination, &frame);
-    world.step(1);
-    assert!(
-        world.peers[0].receipts().is_empty(),
-        "full quota refuses before expiry"
-    );
-    // The first pin expires at filled_at + 35_001 ms. The same End
-    // envelope must remain admissible after legitimate quota recovery.
-    for _ in 0..500 {
-        world.step(1);
-    }
-    // A bad End tag under a valid Link wrapper must release its reservation
-    // and leave the End counter available for the authenticated retry.
-    let invalid = world.peers[1].retry_crafted_frame(4_499, true);
+    // A valid Link wrapper cannot make a bad End tag use a terminal pin.
+    let invalid = world.peers[1].retry_crafted_frame(4_999, true);
     world.peers[0].send_rx(&source, &destination, &invalid);
     world.step(1);
     assert!(world.peers[0].receipts().is_empty());
+    // RX after a clock-only advance precedes the periodic expiry sweep.
+    // Authentication must still precede reclamation of an expired pin.
+    world.now += 35_000;
+    for peer in &mut world.peers {
+        assert_eq!(peer.sleep(4, world.now, 0).0, 0);
+    }
+    // Mint a fresh envelope for this clock; the earlier 5 s message has expired.
+    world.peers[1].craft_frame(
+        testkit::GATEWAY,
+        testkit::GATEWAY,
+        WIRE_DATA,
+        0,
+        0,
+        b"quota-auth",
+    );
+    let invalid = world.peers[1].retry_crafted_frame(4_998, true);
+    world.peers[0].send_rx(&source, &destination, &invalid);
+    world.step(1);
+    assert!(world.peers[0].receipts().is_empty());
+    // Drain control work scheduled by the clock jump before reply admission.
+    run_for(&mut world, 500);
     let retry = world.peers[1].retry_crafted_frame(4_498, false);
     world.peers[0].send_rx(&source, &destination, &retry);
     world.step(1);
@@ -395,16 +398,13 @@ fn mesh_hfinal_terminal_quota_retry_preserves_end_replay() {
     assert_eq!(
         receipts.len(),
         1,
-        "same End counter retries after quota expiry"
+        "bad End tags leave the counter available"
     );
-    assert_eq!(receipts[0].3, b"quota-retry");
+    assert_eq!(receipts[0].3, b"quota-auth");
     let duplicate = world.peers[1].retry_crafted_frame(4_497, false);
     world.peers[0].send_rx(&source, &destination, &duplicate);
     world.step(1);
-    assert!(
-        world.peers[0].receipts().is_empty(),
-        "accepted retry delivers once"
-    );
+    assert!(world.peers[0].receipts().is_empty(), "delivers once");
 }
 
 #[test]
