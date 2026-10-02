@@ -1,11 +1,11 @@
 use super::super::recovery::all_ready;
 use super::*;
 
-fn next_hops(world: &mut MeshWorld) -> Vec<u64> {
+fn next_hops(world: &mut MeshWorld, source: usize) -> Vec<u64> {
     // Issue all read-only route queries before waiting on the peers.
     for (index, peer) in world.peers.iter_mut().enumerate() {
         let destination = if index == 0 {
-            world.nodes[1]
+            world.nodes[source]
         } else {
             testkit::GATEWAY
         };
@@ -30,9 +30,11 @@ fn control_load(
     object_bytes: Option<usize>,
     blocked_foreground: bool,
     target_controls: usize,
+    source: usize,
+    target_objects: u32,
 ) -> (u64, u32, usize) {
     let start = world.now;
-    let hops = next_hops(world);
+    let hops = next_hops(world, source);
     let timeouts: Vec<_> = world
         .snaps
         .iter()
@@ -48,7 +50,7 @@ fn control_load(
     loop {
         if let Some(bytes) = object_bytes {
             if object_pending {
-                let (_, results, state, _) = world.peers[1].object_snapshot();
+                let (_, results, state, _) = world.peers[source].object_snapshot();
                 if results != 0 {
                     assert_eq!(results, 1);
                     objects += 1;
@@ -73,35 +75,39 @@ fn control_load(
                     object_pending = false;
                 }
             }
-            if !object_pending && objects < 100 {
+            if !object_pending && objects < target_objects {
                 assert_eq!(
-                    world.peers[1].object_send(testkit::GATEWAY, &data[..bytes], 30000),
+                    world.peers[source].object_send(testkit::GATEWAY, &data[..bytes], 30000),
                     0
                 );
                 object_pending = true;
             }
         }
         if control_pending.is_none() && world.now >= next_control {
+            assert!(
+                world.now - next_control <= 5,
+                "1 Hz control submission stalled"
+            );
             let last = world.snaps[0]
                 .app_tx
                 .iter()
                 .map(|tx| tx.seq)
                 .max()
                 .unwrap_or(0);
-            world.peers[0].app_send(world.nodes[1], b"control");
+            world.peers[0].app_send(world.nodes[source], b"control");
             if blocked_foreground && (next_control - start) % 30000 == 0 {
                 // An accepted Reliable send to an absent destination has no
                 // frame ready to transmit during its route/retry wait.
-                world.peers[1].app_send(0xffff, b"waiting for route");
+                world.peers[source].app_send(0xffff, b"waiting for route");
             }
-            control_pending = Some((world.now, world.snaps[1].rx_count, last));
+            control_pending = Some((world.now, world.snaps[source].rx_count, last));
             next_control += 1000;
         }
         world.step(5);
-        assert_eq!(next_hops(world), hops, "route flap");
+        assert_eq!(next_hops(world, source), hops, "route flap");
         world.usb_host.object_frames.clear();
         if let Some((sent, received, last)) = control_pending {
-            if world.snaps[1].rx_count == received + 1
+            if world.snaps[source].rx_count == received + 1
                 && world.snaps[0]
                     .app_tx
                     .iter()
@@ -114,7 +120,7 @@ fn control_load(
             }
         }
         let done = if object_bytes.is_some() {
-            objects == 100
+            objects == target_objects
         } else {
             latency.len() >= target_controls
         };
@@ -130,7 +136,7 @@ fn control_load(
             .enumerate()
             .map(|(index, snap)| {
                 // Only the injected route wait may expire; controls originate at G.
-                let end_failed = if blocked_foreground && index == 1 {
+                let end_failed = if blocked_foreground && index == source {
                     timeouts[index].0
                 } else {
                     snap.end_failed
@@ -148,8 +154,8 @@ fn control_load(
             "exactly one callback per delivered object"
         );
         assert!(
-            successes >= 99,
-            "continuous objects: {successes}/100 delivered"
+            u64::from(successes) * 100 >= u64::from(target_objects) * 99,
+            "continuous objects: {successes}/{target_objects} delivered"
         );
     }
     eprintln!(
@@ -200,6 +206,8 @@ fn mesh_m10_immediate_objects_with_1hz_control() {
                 with_object.then_some(bytes),
                 false,
                 control_samples,
+                1,
+                100,
             );
             control_samples = samples;
             eprintln!(
@@ -264,6 +272,8 @@ fn mesh_m10_objects_progress_while_foreground_waits_for_route() {
             with_object.then_some(2048),
             true,
             control_samples,
+            1,
+            100,
         );
         control_samples = samples;
         assert!(
@@ -279,5 +289,40 @@ fn mesh_m10_objects_progress_while_foreground_waits_for_route() {
     assert!(
         p99[0] * 100 <= p99[1] * 120,
         "control p99 increase exceeds 20%: {p99:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires ROUTELOOM_APP_OBJECT_TRANSFER=ON real Owner mesh peer"]
+fn mesh_h7r3_thirty_three_hop_objects_with_1hz_control() {
+    let worker = ["--crypto-ms", "154"];
+    let mut world = MeshWorld::start_with_args(
+        "h7r3-three-hop-object",
+        Switch::new(&Topology::line(4)),
+        &worker,
+        &worker,
+    )
+    .expect("H7R3 requires real Owner peers");
+    world.pump_until(9000, all_ready);
+    assert!(all_ready(&world.snaps), "three-hop mesh ready");
+    assert!(world
+        .snaps
+        .iter()
+        .all(|snap| snap.crypto_submitted > 0 && snap.crypto_completed > 0));
+    assert_eq!(world.peers[0].object_buffer(), 0);
+    for row in &mut world.switch.delay_ms {
+        row.fill(10);
+    }
+    for row in &mut world.switch.callback_delay_ms {
+        row.fill(10);
+    }
+    let (baseline, _, baseline_controls) = control_load(&mut world, None, false, 20, 3, 30);
+    assert_eq!(baseline_controls, 20);
+    let (loaded, objects, loaded_controls) = control_load(&mut world, Some(2048), false, 20, 3, 30);
+    eprintln!("H7R3 three hop: objects={objects}/30 control={loaded_controls}/{loaded_controls} p99={baseline}->{loaded} ms");
+    assert_eq!(objects, 30);
+    assert!(
+        loaded * 100 <= baseline * 120,
+        "control p99 increase exceeds 20%"
     );
 }
