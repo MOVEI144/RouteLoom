@@ -295,6 +295,25 @@ target_compile_definitions(routeloom_espnow_runtime_tests PRIVATE
     CONFIG_ROUTELOOM_TRACE=1 CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY=1)
 add_test(NAME routeloom_espnow_runtime_tests COMMAND routeloom_espnow_runtime_tests)
 
+foreach(mode IN ITEMS empty filtered)
+  set(hil_test routeloom_hil_rx_${mode}_tests)
+  add_executable(${hil_test} test_hil_rx_allow_list.cpp espnow_idf_stubs/idf_stubs.cpp
+      ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp)
+  target_link_libraries(${hil_test} PRIVATE routeloom_core)
+  target_include_directories(${hil_test} PRIVATE espnow_idf_stubs
+      ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include
+      ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src)
+  target_compile_options(${hil_test} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  if(mode STREQUAL "empty")
+    target_compile_definitions(${hil_test} PRIVATE CONFIG_ROUTELOOM_HIL_RX_ALLOW_MACS="")
+  else()
+    target_compile_definitions(${hil_test} PRIVATE
+        CONFIG_ROUTELOOM_HIL_RX_ALLOW_MACS="02:aa:bb:cc:dd:01,02:aa:bb:cc:dd:02"
+        CONFIG_ROUTELOOM_HIL_DROP_RX_MAC="02:aa:bb:cc:dd:02")
+  endif()
+  add_test(NAME ${hil_test} COMMAND ${hil_test})
+endforeach()
+
 if(ROUTELOOM_RESOURCE_PROFILE STREQUAL "endpoint")
   add_executable(routeloom_espnow_role_mismatch_tests test_espnow_role_mismatch.cpp
       espnow_idf_stubs/idf_stubs.cpp

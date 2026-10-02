@@ -1,5 +1,7 @@
 #include "routeloom/espnow_runtime.hpp"
 
+#include "hil_rx_allow_list.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -2720,6 +2722,14 @@ void EspNowRuntime::enqueue_rx(
       length > static_cast<int>(kMaxEspNowBody)) {
     return;
   }
+  // Both unicast and broadcast are filtered by source before either lane.
+#if defined(CONFIG_ROUTELOOM_HIL_RX_ALLOW_MACS)
+  static constexpr auto allowed = parse_hil_rx_allow_list(CONFIG_ROUTELOOM_HIL_RX_ALLOW_MACS);
+  static_assert(allowed.valid, "ROUTELOOM_HIL_RX_ALLOW_MACS requires at most 8 comma-separated MACs");
+  if constexpr (allowed.count != 0) {
+    if (!allowed.allows(info->src_addr)) return;
+  }
+#endif
   // Optional bench topology control: an exact source-MAC drop is applied
   // before both RLD1 and Wire lanes. The default empty string compiles away.
 #if defined(CONFIG_ROUTELOOM_HIL_DROP_RX_MAC)
