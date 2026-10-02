@@ -1,0 +1,3 @@
+- AppObject now retries authenticated receiver Busy replies with bounded backoff inside the original deadline. Compact completion metadata retains 12 objects without retaining their receive buffers; the replay floor and retention period are unchanged.
+- Object uses a single-frame send window; dispatch waits for queued control and route maintenance, including blocked control flows. A real-Owner regression covers 100 immediate transfers alongside 1 Hz Reliable control on one/two-hop routes.
+- The stronger 1 Hz two-hop control latency acceptance remains unmet; hardware requalification is pending.
