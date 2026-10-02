@@ -600,3 +600,36 @@ fn live_profile(peer_bin: &str, profile: Profile) {
         assert_eq!(std::fs::read_to_string(profile.transcript()).unwrap(), text);
     }
 }
+
+#[test]
+fn live_multibyte_integer_shaped_connection_ids() {
+    let Ok(peer_bin) = std::env::var("ROUTELOOM_EDHOC_PEER") else {
+        eprintln!("ROUTELOOM_EDHOC_PEER not set: live CID interop skipped");
+        return;
+    };
+    let profile = Profile::KidOnly;
+    let f = fixture(profile);
+    let mut inputs = inputs_text(&f);
+    let mut cases = directions();
+    for (prefix, d) in &mut cases {
+        // These byte strings happen to be complete CBOR integers, but
+        // RFC 9528 §3.3.2 compacts only one-byte identifiers.
+        d.c_i = vec![0x18, 0x18];
+        d.c_r = vec![0x19, 0x01, 0x00];
+        inputs.insert(format!("{prefix}c_i"), hex(&d.c_i));
+        inputs.insert(format!("{prefix}c_r"), hex(&d.c_r));
+    }
+    let dir = std::env::temp_dir().join(format!("routeloom-edhoc-cid-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("inputs.txt");
+    let body = inputs.iter().fold(String::new(), |mut out, (k, v)| {
+        use std::fmt::Write as _;
+        writeln!(&mut out, "{k} = {v}").unwrap();
+        out
+    });
+    std::fs::write(&path, body).unwrap();
+    for (prefix, d) in cases {
+        live(&peer_bin, path.to_str().unwrap(), prefix, profile, &f, &d);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
