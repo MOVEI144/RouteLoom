@@ -1058,8 +1058,8 @@ fn mesh_j10_closed_policy_keeps_cutover_rescue() {
 }
 
 /// Shared C3–C7 drive: converge, stage the cutover, drain every
-/// PREPARED receipt at 25 ms, fast-forward the prepare window on
-/// quiet air, then run until the authority durably commits and the
+/// PREPARED receipt at 25 ms, keep that cadence through the prepare
+/// window, then run until the authority durably commits and the
 /// grace opens. Returns (operation, next_gk, new_network,
 /// old_network, grace_start).
 pub(super) fn cutover_through_commit(
@@ -1114,20 +1114,10 @@ pub(super) fn cutover_finish_prepare(
         })
         .0;
     let window_end = staged_at + crate::site::cutover::CUTOVER_PREPARE_WINDOW_MS;
-    let mut quiet_ms = 0u64;
+    // Quiet air does not imply idle Owners. Skipping their next work can
+    // expire queued carriers and the route reports needed for leaf-first COMMIT.
     while world.now + 10_000 < window_end {
-        let delivered_before = world.switch.delivered;
-        // RouteState queries start in the last minute. Keep their
-        // carrier hops at the normal 25 ms radio cadence.
-        let jump = quiet_ms >= 3_000
-            && world.now
-                < window_end.saturating_sub(crate::site::cutover::CUTOVER_ROUTE_QUERY_WINDOW_MS);
-        world.step(if jump { 1_000 } else { 25 });
-        quiet_ms = if world.switch.delivered == delivered_before {
-            quiet_ms.saturating_add(if jump { 1_000 } else { 25 })
-        } else {
-            0
-        };
+        world.step(25);
     }
     for _ in 0..4000 {
         world.step(25);
