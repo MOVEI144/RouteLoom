@@ -288,13 +288,29 @@ class HilMatrix(unittest.TestCase):
             env = {**os.environ, "PATH": f"{work}:{os.environ['PATH']}"}
             cases = (("bench_node", "esp32c6", []),
                      ("reference_node", "esp32c3",
-                      ['CONFIG_ROUTELOOM_HIL_DROP_RX_MAC="94:a9:90:6a:ee:c4"']))
+                      ['CONFIG_ROUTELOOM_HIL_DROP_RX_MAC="94:a9:90:6a:ee:c4"']),
+                     ("bridge_node", "esp32c3", ['CONFIG_ROUTELOOM_HIL_RX_ALLOW_MACS=""']),
+                     ("reference_node", "esp32s3",
+                      ['CONFIG_ROUTELOOM_HIL_RX_ALLOW_MACS="AA:bb:cc:dd:ee:ff,11:22:33:44:55:66"']))
             for app, target, overlay in cases:
                 with self.subTest(app=app, target=target):
                     result = subprocess.run([str(script), app, target, str(work / "bundle"),
                                              str(work / "key"), "test", *overlay], env=env,
                                             capture_output=True, text=True)
                     self.assertEqual(result.returncode, 7, result.stderr)
+
+    def test_builder_rejects_invalid_allow_lists_before_docker(self):
+        script = ROOT / "tools" / "meshviz" / "build_bundle.sh"
+        for value in ("aa:bb:cc:dd:ee:ff,", "aa:bb:cc:dd:ee:fz",
+                      ",".join(["aa:bb:cc:dd:ee:ff"] * 9),
+                      "aa:bb:cc:dd:ee:ff\nCONFIG_SECURE_BOOT=y"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                result = subprocess.run([str(script), "bridge_node", "esp32c3", tmp + "/out",
+                                         tmp + "/key", "test",
+                                         f'CONFIG_ROUTELOOM_HIL_RX_ALLOW_MACS="{value}"'],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("unsupported or unsafe", result.stderr)
 
 
 class Budget(unittest.TestCase):
