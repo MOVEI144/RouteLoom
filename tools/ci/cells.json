@@ -31,8 +31,8 @@
     {
       "id": "bridge_node-esp32c3-normal-off-off", "app": "bridge_node", "target": "esp32c3",
       "overlay": [],
-      "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL=y"],
-      "budget": {"app_bin_max": 1216976, "static_free_min": 51192, "rtc_used_max": 6632}
+      "expect": ["CONFIG_ROUTELOOM_CRYPTO_WORKER=y", "CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL=y"],
+      "budget": {"app_bin_max": 1234304, "static_free_min": 46328, "rtc_used_max": 6632}
     },
     {
       "id": "bench_node-esp32c3-normal-off-off", "app": "bench_node", "target": "esp32c3",
@@ -218,14 +218,16 @@
     },
     {
       "id": "reference_node-esp32c3-normal-off-owner_member", "app": "reference_node", "target": "esp32c3",
+      "expect": ["CONFIG_ROUTELOOM_CRYPTO_WORKER=y"],
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1141792, "static_free_min": 64004, "rtc_used_max": 6632}
+      "budget": {"app_bin_max": 1156176, "static_free_min": 57260, "rtc_used_max": 6632}
     },
     {
       "id": "bridge_node-esp32c3-normal-off-owner_member", "app": "bridge_node", "target": "esp32c3",
+      "expect": ["CONFIG_ROUTELOOM_CRYPTO_WORKER=y"],
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
-      "budget": {"app_bin_max": 1217248, "static_free_min": 51192, "rtc_used_max": 6632}
+      "budget": {"app_bin_max": 1231712, "static_free_min": 46328, "rtc_used_max": 6632}
     },
     {
       "id": "reference_node-esp32s3-normal-off-owner_member", "app": "reference_node", "target": "esp32s3",
@@ -293,8 +295,9 @@
     {
       "id": "experimental-c6-bridge_node-member", "app": "bridge_node", "target": "esp32c6",
       "artifact": "experimental-c6-bridge_node-member",
+      "expect": ["CONFIG_ROUTELOOM_CRYPTO_WORKER=y"],
       "overlay": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
-      "budget": {"app_bin_max": 1339152, "static_free_min": 96529, "rtc_used_max": 136}
+      "budget": {"app_bin_max": 1352208, "static_free_min": 91361, "rtc_used_max": 136}
     },
     {
       "id": "experimental-c6-reference_node-member", "app": "reference_node", "target": "esp32c6",
