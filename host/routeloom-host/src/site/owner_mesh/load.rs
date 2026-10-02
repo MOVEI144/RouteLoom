@@ -85,24 +85,70 @@ fn mesh_f04_receive_flood_does_not_starve_delivery() {
     let Some(mut world) = route_loss_world("f04", Switch::forced_multihop(), true) else {
         return;
     };
+    super::mesh::deliver_each(&mut world, 1, 0, 1, b"flood-warm");
     for peer in &mut world.peers {
         peer.receipts();
     }
     let source = world.macs[1];
     let relay = world.macs[2];
-    let polls = world.snaps[2].owner_polls;
-    for _ in 0..200 {
-        world.peers[2].send_rx(&source, &relay, b"malformed");
-    }
-    world.peers[1].app_send(testkit::GATEWAY, b"after-flood");
-    world.pump_until(400, |_| false);
-    assert!(world.snaps[2].owner_polls > polls);
-    assert_eq!(world.peers[0].receipts().len(), 1);
-    assert_eq!(world.snaps[0].rx, b"after-flood");
-    assert_eq!(
-        world.snaps[1].app_tx.last().unwrap().state,
-        DELIVERY_DELIVERED
+    let duplicate = world.peers[1].craft_frame(
+        NODE_B,
+        testkit::GATEWAY,
+        WIRE_DATA,
+        0,
+        0,
+        b"flood-duplicate",
     );
+    let polls = world.snaps[2].owner_polls;
+    for _ in 0..100 {
+        world.peers[2].send_rx(&source, &relay, b"malformed");
+        world.peers[2].send_rx(&source, &relay, &duplicate);
+    }
+    let results = world.peers[1].tracked_burst(16, testkit::GATEWAY);
+    let mut expected = std::collections::BTreeMap::new();
+    for (index, (status, session, seq)) in results.into_iter().enumerate() {
+        if status == 0 {
+            expected.insert((session, seq), index as u8);
+        } else {
+            assert!(
+                matches!(status, 7 | 21),
+                "capacity or busy refusal: {status}"
+            );
+        }
+    }
+    assert!(!expected.is_empty(), "legitimate burst accepted");
+    world.pump_until(1200, |_| false);
+    assert!(world.snaps[2].owner_polls > polls);
+    let mut duplicate_receives = 0;
+    let accepted = expected.len();
+    for (origin, session, seq, payload) in world.peers[0].receipts() {
+        assert_eq!(origin, NODE_A);
+        if payload == b"flood-duplicate" {
+            duplicate_receives += 1;
+        } else {
+            assert_eq!(
+                payload,
+                [expected
+                    .remove(&(session, seq))
+                    .expect("accepted key, once")]
+            );
+            let tx = world.snaps[1]
+                .app_tx
+                .iter()
+                .find(|tx| tx.seq == seq)
+                .unwrap();
+            assert_eq!(tx.state, DELIVERY_DELIVERED, "burst sender has end receipt");
+        }
+    }
+    assert_eq!(
+        duplicate_receives, 1,
+        "authenticated duplicates deliver once"
+    );
+    assert!(
+        expected.is_empty(),
+        "all accepted burst messages have end receipts"
+    );
+    eprintln!("F04: fault_hits=200, burst={accepted}/{accepted} within 30 s, duplicate receives=1");
     let peak = world.snaps[2].rx_queue_max;
     assert!(peak > 0 && peak <= 48, "bounded queue high-water: {peak}");
     world.peers[1].app_send(testkit::GATEWAY, b"second-send");
