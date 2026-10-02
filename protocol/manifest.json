@@ -17,9 +17,9 @@
     {"id": "rld1_carrier", "label": "RLD1 carrier", "value": 1, "c": "ROUTELOOM_RLD1_VERSION", "rust": "RLD1_VERSION",
      "cpp_check": "routeloom::autonomy::kRld1Version", "cpp_include": "routeloom/autonomy_wire.hpp",
      "source": "components/routeloom/include/routeloom/autonomy_wire.hpp", "rule": "classified once by magic+version"},
-    {"id": "rld1_zt_body", "label": "RLD1 ZeroTouch body", "value": 3, "c": "ROUTELOOM_RLD1_ZT_BODY", "rust": "RLD1_ZT_BODY",
+    {"id": "rld1_zt_body", "label": "RLD1 ZeroTouch body", "value": 4, "c": "ROUTELOOM_RLD1_ZT_BODY", "rust": "RLD1_ZT_BODY",
      "cpp_check": "routeloom::sdkv1::kZtBodyVersion", "cpp_include": "routeloom/sdkv1_join_transport.hpp",
-     "source": "components/routeloom/include/routeloom/sdkv1_join_transport.hpp", "rule": "unknown body versions are dropped"},
+     "source": "components/routeloom/include/routeloom/sdkv1_join_transport.hpp", "rule": "smart probes use 4; legacy 3 remains readable; other versions are dropped"},
     {"id": "hostlink", "label": "HostLink (RLU1) protocol", "value": 2, "c": "ROUTELOOM_HOSTLINK_PROTOCOL", "rust": "HOSTLINK_PROTOCOL",
      "cpp_check": "routeloom::usb::kProtocolVersion", "cpp_include": "routeloom/usb_codec.hpp", "rust_check": "routeloom_protocol::VERSION",
      "source": "components/routeloom/include/routeloom/usb_codec.hpp", "rule": "strict equality; bound into the HELLO transcript"},
@@ -40,6 +40,10 @@
      "source": "host/routeloom-host/src/api1.rs", "rule": "bumped when an existing capability's meaning changes"}
   ],
   "persisted": [
+    {"id": "proxy_policy_format", "label": "Proxy policy record", "value": 2, "c": "ROUTELOOM_STORE_PROXY_POLICY_FORMAT", "rust": "STORE_PROXY_POLICY_FORMAT",
+     "source": "components/routeloom/src/sdkv1_records.cpp", "rule": "format 1 reads without an expected list; format 2 stores the bounded list; others refused"},
+    {"id": "join_policy_format", "label": "Device join policy record", "value": 2, "c": "ROUTELOOM_STORE_JOIN_POLICY_FORMAT", "rust": "STORE_JOIN_POLICY_FORMAT",
+     "source": "components/routeloom/src/sdkv1_records.cpp", "rule": "format 1 reads with legacy defaults; format 2 adds finite smart search; others refused"},
     {"id": "authority_ledger_format", "label": "Authority ledger format", "value": 1, "c": "ROUTELOOM_STORE_AUTHORITY_LEDGER_FORMAT", "rust": "STORE_AUTHORITY_LEDGER_FORMAT",
      "source": "components/routeloom/src/authority.cpp", "rule": "unknown format rejected"},
     {"id": "authority_ledger", "label": "Authority ledger (device)", "value": 1, "c": "ROUTELOOM_STORE_AUTHORITY_LEDGER", "rust": "STORE_AUTHORITY_LEDGER",

@@ -1,0 +1,8 @@
+{
+  "codec": "zt_discover_frame",
+  "encoded_hex": "524c44310101002c005300000000000018191a1b1c1d1e1f101112131415161718191a1b1c1d1e1f00000000040300000000000149746ee20000000000000000000000002ba5e460cd3b818348abba42e668e2",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "name": "zt_smart_discover_short",
+  "note": "v4 mark truncated"
+}

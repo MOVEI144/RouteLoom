@@ -818,6 +818,22 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::tx_epoch(SecurityScope scope, N
 }
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
+Status SessionBank<kLinkCapacity, kEndCapacity>::current_rx_epoch(
+    const SecurityScope scope, const NodeId peer, std::uint32_t& epoch) const noexcept {
+  epoch = 0;
+  if (reentered()) return Status::error(StatusCode::Busy, "session bank re-entered");
+  if (!configured_) return Status::error(StatusCode::InvalidState, "session bank not configured");
+  if (!unicast_scope(scope)) return Status::error(StatusCode::Unsupported, "session scope");
+  if (!id_valid(peer)) return Status::error(StatusCode::InvalidArgument, "session peer invalid");
+  const SessionBankEntry* entry = find_current(scope, peer);
+  if (entry == nullptr || !entry_usable(*entry)) {
+    return Status::error(StatusCode::AuthRequired, "session establishment required");
+  }
+  epoch = entry->rx_cid;
+  return Status::success();
+}
+
+template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
 ContextState SessionBank<kLinkCapacity, kEndCapacity>::context_state(
     const SecurityScope scope, const NodeId peer) const noexcept {
   if (!configured_) return ContextState::None;

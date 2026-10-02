@@ -555,6 +555,38 @@ void test_boot_silent_adoption() {
   CHECK(coordinator.snapshot().demands == 1);
 }
 
+void test_smart_boot_at_clock_origin() {
+  current = "smart_boot_at_clock_origin";
+  for (const std::uint32_t listen : {0U, 1000U}) {
+    Fixture f{};
+    CHECK(f.init_stores());
+    auto identity = identity_record();
+    identity.node_id = kNode + 1;
+    identity.devcert = issue(devcert_claims(identity.node_id), device_ca());
+    auto site = site_record();
+    site.member_cert = issue(membercert_claims(site.assignment_generation, site.network,
+                                              identity.node_id), sak());
+    CHECK(f.identity.commit(identity).ok());
+    CHECK(f.site.commit(site).ok());
+    auto deps = f.deps();
+    deps.local_node = identity.node_id;
+    deps.joiner_config.node = identity.node_id;
+    deps.joiner_config.smart_join = true;
+    deps.joiner_config.listen_ms = listen;
+    SecurityCoordinator coordinator(deps);
+    CHECK(coordinator.step(boot_event(0, kBoot)).ok());
+    for (int i = 0; i < 50 && coordinator.snapshot().mode != CoordinatorMode::Member; ++i) {
+      CHECK(coordinator.step(poll_at(0)).ok());
+      CoordinatorAction action{};
+      while (coordinator.take_action(action).ok()) {}
+    }
+    CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+    CHECK(complete_member_apply(coordinator, 0, f.site.site().channel));
+    CHECK(coordinator.step(poll_at(static_cast<MonotonicMs>(listen) + 1)).ok());
+    CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  }
+}
+
 void test_site_role_above_profile_is_not_adopted() {
   if (profile::kGateway) return;
   current = "site_role_above_profile_is_not_adopted";
@@ -3005,6 +3037,7 @@ void test_milestones_confirmed_gap_past_18h() {
 
 int main() {
   test_boot_silent_adoption();
+  test_smart_boot_at_clock_origin();
   test_site_role_above_profile_is_not_adopted();
   test_member_apply_failure_is_closed();
   test_rld1_demux_gates();

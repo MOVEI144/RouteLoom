@@ -236,6 +236,10 @@ class PeerSite {
     }
   }
 
+  void set_expected(const ExpectedJoinList& expected, std::uint64_t expires) {
+    expected_ = expected;
+    for (auto& proxy : proxies_) proxy->engine.set_expected(&expected_, expires);
+  }
   void set_proxy_muted(std::size_t index, bool muted) {
     if (index < proxies_.size()) proxies_[index]->muted = muted;
   }
@@ -307,6 +311,7 @@ class PeerSite {
     return config;
   }
 
+  ExpectedJoinList expected_{};
   SimSiteParams params_;
   SimWirePort gateway_wire_;
   JoinRelayGateway gateway_;
@@ -1181,6 +1186,28 @@ class PeerWorld {
     }
   }
 
+  void smart_join(const std::uint8_t expected_site, const std::uint32_t search_ms) {
+    JoinerConfig policy{};
+    policy.requested_role = kMemberRoleEndpoint;
+    policy.smart_join = true;
+    policy.listen_ms = 1000;
+    policy.search_ms = search_ms;
+    policy.start_jitter_ms = 2000;
+    if (!device_->joiner.apply_policy(policy)) fatal("smart join policy");
+    for (std::size_t i = 0; i < sites_.size(); ++i) {
+      ExpectedJoinList expected{};
+      expected.ttl_s = 300;
+      if (i == expected_site) {
+        expected.count = 1;
+        if (!identity_join_mark(device_->identity_store.identity(), expected.marks[0])) {
+          // BootCheck has not run yet: initialize the production identity store.
+          if (!device_->identity_store.initialize() ||
+              !identity_join_mark(device_->identity_store.identity(), expected.marks[0])) fatal("join mark");
+        }
+      }
+      sites_[i]->set_expected(expected, now_ + 300000);
+    }
+  }
   void queue_down(std::uint8_t site, NodeId to_proxy, Bytes object) {
     downs_.push_back(QueuedDown{site, to_proxy, std::move(object)});
   }
@@ -1462,6 +1489,10 @@ int run(int argc, char** argv) {
         world.emit_owner();
         if (!write_frame(Bytes{'D'})) fatal("D write failed");
         (void)std::fflush(stdout);
+      } else if (tag == 'S') {
+        if (frame.size() != 6) fatal("bad S");
+        std::size_t pos = 2;
+        world.smart_join(frame[1], get_u32(frame, pos));
       } else if (tag == 'C') {
         if (frame.size() < 3) fatal("bad C");
         world.queue_authority_down(frame[1], Bytes(frame.begin() + 2, frame.end()));

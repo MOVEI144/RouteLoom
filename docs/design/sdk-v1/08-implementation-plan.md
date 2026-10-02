@@ -82,7 +82,7 @@ F04にはhost試験がない。N06は`rlboot`欠落・後退・耐久化不明�
 4. P8-2の独立レビュー（[#100](https://github.com/MOVEI144/RouteLoom/issues/100)）で未解決の重大指摘が無い。
 5. 配備tier（T1/T2）、Device CA／Site CAの鍵保管・custody、製造／注入／移管手順（[04 provisioning §4.10](../sdk-completion/04-provisioning-lifecycle.md)）が決定・検証済み。
 
-**現状は未達**。PR #155／#156／#158で先行する独立レビューの指摘を修正したが、P8-2の受入記録と静的受け入れ検査、HIL（条件3）、鍵custody／tier（条件5）が未了であり、host受入も§3の部分証拠に留まる。`EspNowSecurityOwner::security_profile()`は`Development`を返し、Nodeは`SECURITY_PROFILE_EXPERIMENTAL`を出す。DevRamが公開既定、LegacyFixtureは明示選択のみ。Member EDHOC構成を含め`Production`と表示せず、KGuardの本番配備に使わない。
+**現状は未達**。PR #155／#156／#158で先行する独立レビューの指摘を修正したが、P8-2の受入記録、HIL（条件3）、鍵 custody／tier（条件5）が未了であり、host 受入も§3の部分証拠に留まる。`EspNowSecurityOwner::security_profile()` は DevRam で `Development`、MemberEdhoc で `Candidate` を返す。配布 image は MemberEdhoc、quick start と example は DevRam が既定（[実装案内](../../implementation/README.md)）。Node は引き続き `SECURITY_PROFILE_EXPERIMENTAL` を出し、`Production` と認定しない。既定化の merge には H2 の Member 全回帰合格記録が必要。
 
 **閉じる Issue と v2 へ移すもの（2026-09-28）**
 

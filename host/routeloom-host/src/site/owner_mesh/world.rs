@@ -981,6 +981,7 @@ impl MeshWorld {
         for (from, tick) in ticks.iter().enumerate() {
             let Some(tick) = tick else { continue };
             for tx in &tick.tx {
+                self.switch.radio_bytes += tx.bytes.len() as u64;
                 if tx.bytes.starts_with(b"RLD1")
                     || (tx.bytes.len() > 4
                         && tx.bytes[..4] == *b"RL\x02\0"
