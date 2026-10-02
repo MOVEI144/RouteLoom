@@ -71,6 +71,13 @@ pub(super) fn repeated_bursts(delay_ms: u64) {
             world.switch.delay_ms[from][to] = delay_ms;
         }
     }
+    let connectivity_events: Vec<_> = world
+        .snaps
+        .iter()
+        .skip(1)
+        .map(|s| s.connectivity_events)
+        .collect();
+    assert!(world.snaps.iter().skip(1).all(|s| s.connectivity == 1));
     let mut expected = std::collections::BTreeMap::new();
     let mut received = std::collections::BTreeSet::new();
     let mut terminal = std::collections::BTreeMap::new();
@@ -108,6 +115,13 @@ pub(super) fn repeated_bursts(delay_ms: u64) {
             for (peer, &hop) in world.peers.iter_mut().skip(1).zip(&routes) {
                 assert_eq!(peer.next_hop(testkit::GATEWAY), hop, "no route flap");
             }
+            for (snap, &events) in world.snaps.iter().skip(1).zip(&connectivity_events) {
+                assert_eq!(
+                    snap.connectivity, 1,
+                    "sender remains authenticated Reachable"
+                );
+                assert_eq!(snap.connectivity_events, events, "no connectivity flap");
+            }
             assert!(
                 world
                     .snaps
@@ -138,7 +152,8 @@ pub(super) fn repeated_bursts(delay_ms: u64) {
         .filter(|&&s| s == DELIVERY_DELIVERED)
         .count();
     eprintln!(
-        "M08: accepted={}, refused={refused}, received={}, delivered={delivered}, terminal={}",
+        "M08: attempted={}, admitted={}, Busy/refused={refused}, received={}, delivered={delivered}, terminal={}",
+        30 * (nodes - 1) * 16,
         expected.len(),
         received.len(),
         terminal.len()

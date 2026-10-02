@@ -271,6 +271,15 @@ def profile_mesh() -> list[Step]:
               *PROFILE_MESH_TESTS], cwd="host", env=env, forbid=SKIP_MARK,
              require=PROFILE_MESH_TESTS),
     ]
+    hfinal = "site::owner_mesh::hfinal::mesh_hfinal_m08_delayed_bursts"
+    hfinal_env = {**env, "ROUTELOOM_MESH_PEER_B":
+                  str(ROOT / "build-relay96" / peer)}
+    steps += [profile_configure("build-relay96"),
+              Step(["cmake", "--build", "build-relay96", "--parallel", str(min(int(JOBS), 4)),
+                    "--target", "routeloom_owner_mesh_peer"]),
+              Step(["cargo", "test", "-p", "routeloom-host", "--bins", hfinal,
+                    "--", "--nocapture", "--test-threads=2"], cwd="host", env=hfinal_env,
+                   forbid=SKIP_MARK, require=[hfinal])]
     return steps
 
 
