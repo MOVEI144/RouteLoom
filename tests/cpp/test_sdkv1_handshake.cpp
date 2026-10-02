@@ -1073,10 +1073,12 @@ void test_edhoc_resend_exhaustion_deadlines() {
     HandshakeResult result{};
     CHECK_OK(pair.a->engine.take_result(result));
     CHECK(result.event == HandshakeEvent::Send && result.step == 1);
+    CHECK_OK(pair.a->engine.accept_send(result.token, result.phase, result.step));
     for (int retry = 1; retry <= 3; ++retry) {
       CHECK_OK(pair.a->engine.poll(kT0 + retry * 400));
       CHECK_OK(pair.a->engine.take_result(result));
       CHECK(result.event == HandshakeEvent::Send && result.step == 1);
+      CHECK_OK(pair.a->engine.accept_send(result.token, result.phase, result.step));
     }
     CHECK_OK(pair.a->engine.poll(kT0 + 1600));
     if (scope == SecurityScope::EndToEnd) {
@@ -1094,6 +1096,52 @@ void test_edhoc_resend_exhaustion_deadlines() {
   }
 }
 
+void test_end_local_refusal_preserves_resend_budget() {
+  for (const auto step : {1, 3}) {
+    Pair pair = Pair::make();
+    const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+    HandshakeRequest request{};
+    request.scope = SecurityScope::EndToEnd;
+    request.peer = kNodeB;
+    CHECK_OK(pair.a->engine.request(request, kT0));
+    HandshakeResult send{}, reply{};
+    CHECK_OK(pair.a->engine.take_result(send));
+    MonotonicMs sent_at = kT0;
+    if (step == 3) {
+      CHECK_OK(pair.a->engine.accept_send(send.token, send.phase, send.step));
+      CHECK_OK(deliver_to(*pair.b, *pair.a, send, frozen, kT0 + 50));
+      CHECK_OK(pair.b->engine.take_result(reply));
+      CHECK_OK(deliver_to(*pair.a, *pair.b, reply, frozen, kT0 + 100));
+      CHECK_OK(pair.a->engine.take_result(send));
+      sent_at += 100;
+    }
+    const HandshakeResult original = send;
+    // No admission while the route/pool is unavailable. Four local refusals
+    // must not consume the three on-transport retransmissions.
+    for (int retry = 1; retry <= 4; ++retry) {
+      CHECK_OK(pair.a->engine.poll(sent_at + retry * 400));
+      CHECK_OK(pair.a->engine.take_result(send));
+      CHECK(send.event == HandshakeEvent::Send && send.step == step);
+      CHECK(send.exchange_id == original.exchange_id && send.token == original.token);
+      CHECK(send.message_size == original.message_size);
+      CHECK(std::memcmp(send.message.data(), original.message.data(), original.message_size) == 0);
+    }
+    CHECK_OK(pair.a->engine.accept_send(send.token, send.phase, send.step));
+    for (int retry = 5; retry <= 7; ++retry) {
+      CHECK_OK(pair.a->engine.poll(sent_at + retry * 400));
+      CHECK_OK(pair.a->engine.take_result(send));
+      CHECK(send.event == HandshakeEvent::Send && send.step == step);
+      CHECK_OK(pair.a->engine.accept_send(send.token, send.phase, send.step));
+    }
+    CHECK_OK(pair.a->engine.poll(sent_at + 3200));
+    CHECK(pair.a->engine.take_result(send).code == StatusCode::NotFound);
+    CHECK_OK(pair.a->engine.poll(kT0 + HandshakeEngine::kLinkTimeoutMs));
+    CHECK_OK(pair.a->engine.take_result(send));
+    CHECK(send.event == HandshakeEvent::Failed && send.failure == StatusCode::Expired);
+    CHECK(pair.a->engine.quiescent() && pair.a->sink.installs == 0);
+  }
+}
+
 void test_end_delayed_reply_deadline() {
   for (const auto step : {2, 4}) {
     for (const MonotonicMs arrival : {kT0 + 7999, kT0 + 8000}) {
@@ -1105,12 +1153,14 @@ void test_end_delayed_reply_deadline() {
       CHECK_OK(pair.a->engine.request(request, kT0));
       HandshakeResult m1{}, reply{}, m3{}, result{};
       CHECK_OK(pair.a->engine.take_result(m1));
+      CHECK_OK(pair.a->engine.accept_send(m1.token, m1.phase, m1.step));
       CHECK_OK(deliver_to(*pair.b, *pair.a, m1, frozen, kT0 + 50));
       CHECK_OK(pair.b->engine.take_result(reply));
       MonotonicMs sent_at = kT0;
       if (step == 4) {
         CHECK_OK(deliver_to(*pair.a, *pair.b, reply, frozen, kT0 + 100));
         CHECK_OK(pair.a->engine.take_result(m3));
+        CHECK_OK(pair.a->engine.accept_send(m3.token, m3.phase, m3.step));
         CHECK_OK(deliver_to(*pair.b, *pair.a, m3, frozen, kT0 + 150));
         CHECK_OK(pair.b->engine.take_result(reply));
         sent_at += 100;
@@ -1120,6 +1170,7 @@ void test_end_delayed_reply_deadline() {
         CHECK_OK(pair.a->engine.poll(sent_at + retry * 400));
         CHECK_OK(pair.a->engine.take_result(result));
         CHECK(result.event == HandshakeEvent::Send && result.step == step - 1);
+        CHECK_OK(pair.a->engine.accept_send(result.token, result.phase, result.step));
         const HandshakeResult& sent = step == 2 ? m1 : m3;
         CHECK(result.message_size == sent.message_size);
         CHECK(std::memcmp(result.message.data(), sent.message.data(), sent.message_size) == 0);
@@ -2295,6 +2346,7 @@ int main() {
   test_resume_after_edhoc();
   test_gateway_resume_lookup_budget();
   test_edhoc_resend_exhaustion_deadlines();
+  test_end_local_refusal_preserves_resend_budget();
   test_end_delayed_reply_deadline();
   test_routed_end_exchange();
   test_resume_slot_replaced_before_commit();

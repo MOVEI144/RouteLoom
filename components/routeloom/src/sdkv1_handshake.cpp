@@ -3121,7 +3121,12 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
                         edhoc_flight_.owner_token == record.token && big_tx_size_ != 0 &&
                         big_tx_owner_ == record.token;
     if (!small_tx && !big_tx) continue;
-    if (record.retransmits >= kMaxRetransmits) {
+    const bool admitted_budget = record.scope == SecurityScope::EndToEnd &&
+        (record.state == RecordState::EdhocWaitM2 || record.state == RecordState::EdhocWaitM4);
+    // Routed initiator sends spend the retry budget only after transport
+    // admission; local route/pool refusals still retry within the same deadline.
+    const auto limit = admitted_budget ? kMaxRetransmits + 1U : kMaxRetransmits;
+    if (record.retransmits >= limit) {
       if (record.scope == SecurityScope::EndToEnd &&
           (record.state == RecordState::EdhocWaitM2 ||
            record.state == RecordState::EdhocWaitM4)) {
@@ -3143,7 +3148,7 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
       }
       return emit_failed(record, StatusCode::Expired);
     }
-    ++record.retransmits;
+    if (!admitted_budget) ++record.retransmits;
     record.retransmit_at =
         now + (record.last_phase == 5 ? kResumeRetransmitMs : kEdhocRetransmitMs);
     const ByteView bytes = small_tx ? ByteView{record.last_tx.data(), record.last_tx_size}
@@ -3230,6 +3235,13 @@ Status HandshakeEngine::accept_send(const std::uint32_t token, const std::uint8_
   if (entered_) return Status::error(StatusCode::Busy, "handshake re-entered");
   const EnterGuard guard(entered_);
   if (!configured_) return Status::error(StatusCode::InvalidState, "handshake not configured");
+  CarrierRecord* admitted = find_record_by_token(token);
+  if (admitted != nullptr && admitted->scope == SecurityScope::EndToEnd && phase == 4 &&
+      ((step == 1 && admitted->state == RecordState::EdhocWaitM2) ||
+       (step == 3 && admitted->state == RecordState::EdhocWaitM4))) {
+    if (admitted->retransmits < kMaxRetransmits + 1U) ++admitted->retransmits;
+    return Status::success();
+  }
   if (phase != 4 || step != 4) return Status::success();
   if (has_pending_) return Status::error(StatusCode::Busy, "handshake result pending");
   const Status local = refresh_local();
