@@ -361,8 +361,14 @@ void MeshNode::note_scoped_change(const RouteSelection& selection,
                                   const MonotonicMs now_ms) noexcept {
   const NodeId destination = selection.valid ? selection.destination : previous.destination;
   if (destination == kInvalidNodeId || destination == config_.node) return;
+  // A stable tree link carries metric/sequence refreshes on its periodic cycle.
+  // Loss and parent changes still trigger immediately; explicit repair requests
+  // keep their direct replies. This avoids propagating each load sample.
+  if (selection.valid && previous.valid && selection.next_hop == previous.next_hop) {
+    return;
+  }
   if (is_route_gateway(destination)) {
-    // Gateway route moved (next hop, sequence, metric or validity): the
+    // Gateway route moved (next hop or validity): the
     // children and interested neighbors hear it; a parent change also
     // restarts the upward cycle toward the new parent (run_scoped_triggered).
     scoped_down_dirty_ = true;
