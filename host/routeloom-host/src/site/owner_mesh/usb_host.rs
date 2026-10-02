@@ -23,9 +23,8 @@ pub(super) struct PendingFrame {
 /// stragglers, D04 §5.1).
 #[allow(dead_code)]
 pub(super) struct UsbHost {
-    /// Optional production receive-log/API1 endpoint for consumer scenarios.
-    pub(super) receive_state: Option<Arc<State>>,
     pub(super) session: DeviceSession,
+    pub(super) daemon: Option<daemon::MeshDaemon>,
     pub(super) decoder: StreamDecoder,
     pub(super) request: u64,
     pub(super) pending: Vec<PendingFrame>,
@@ -82,8 +81,8 @@ impl UsbHost {
         session.credentials =
             crate::HostlinkCredentials::Directory(hostlink_credentials.to_path_buf());
         Self {
-            receive_state: None,
             session,
+            daemon: None,
             decoder: StreamDecoder::default(),
             request: 1,
             pending: Vec::new(),
@@ -295,20 +294,19 @@ impl UsbHost {
             if inbound.session_lost {
                 self.session_losses += 1;
             }
+            if let Some(daemon) = &self.daemon {
+                let mut info = daemon.state.session.lock().unwrap();
+                info.authenticated = self.session.phase == SessionPhase::Active;
+                info.id = self.auth_sessions.last().copied();
+                info.node = self.hello_node;
+                info.boot = self.hello_boot;
+                info.network = self.hello_network;
+                info.capability = self.hello_capability;
+                info.version = Some(2);
+            }
             let Some(inner) = inbound.inner else { continue };
-            if let Some(state) = &self.receive_state {
-                *state.session.lock().expect("receive session") = crate::SessionInfo {
-                    authenticated: self.session.phase == SessionPhase::Active,
-                    id: Some(frame.session),
-                    node: self.hello_node,
-                    boot: self.hello_boot,
-                    network: self.hello_network,
-                    capability: self.hello_capability,
-                    version: Some(2),
-                };
-                if kind == FrameKind::DataFromMesh {
-                    crate::record_frame(state, &frame, &inner, crate::now_ms());
-                }
+            if let Some(daemon) = &self.daemon {
+                crate::record_frame(&daemon.state, &frame, &inner, now);
             }
             let request_at = |at: usize| {
                 inner
@@ -397,6 +395,14 @@ impl UsbHost {
                 FrameKind::DataFromMesh | FrameKind::DeliveryEvent => self.data_frames += 1,
                 FrameKind::Diagnostic => self.diagnostics += 1,
                 _ => {}
+            }
+        }
+        if let Some(daemon) = &mut self.daemon {
+            for frame in daemon.tick(now) {
+                self.pending.push(PendingFrame {
+                    frame,
+                    join_note: None,
+                });
             }
         }
         if self.gateway_registering
