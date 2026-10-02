@@ -293,8 +293,13 @@ tools/hil/build_image.sh reference_node esp32c3 lr-relay-r80-d100 \
     CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE=100 \
     CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY=y
 python3 tools/hil/flash.py --rig tools/hil/rigs.yaml --bench bench-a \
-    --board ref-a --app-only --image-dir artifacts/hil/images/lr-relay-r80-d100
+    --board ref-a --image-dir artifacts/hil/images/lr-relay-r80-d100
 ```
+
+Signed bundles require the complete flash layout. On an already provisioned
+PT-4M-v2 board, this writes bootloader, partition table, otadata and app without
+erasing the NVS partitions. Keep the chip, role and security profile unchanged;
+do not erase between conditions.
 
 Capture each reference console and the gateway's separate UART0 console
 if wired; never open the bridge USB host-protocol port for log capture.

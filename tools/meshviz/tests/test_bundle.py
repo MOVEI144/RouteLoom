@@ -817,6 +817,14 @@ class BundleTests(unittest.TestCase):
         guide = (root / 'docs/hil.md').read_text()
         self.assertIn('--image-dir artifacts/hil/images/ref-a', guide)
 
+    def test_weak_link_flash_uses_supported_signed_bundle_mode(self):
+        root = Path(__file__).resolve().parents[3]
+        guide = (root / 'docs/hil.md').read_text().split(
+            '## Indoor weak-link campaign', 1)[1].split('## Evidence', 1)[0]
+        command = guide.split('python3 tools/hil/flash.py', 1)[1].split('```', 1)[0]
+        self.assertIn('--image-dir artifacts/hil/images/lr-relay-r80-d100', command)
+        self.assertNotIn('--app-only', command)
+
     def test_c6_bundle_does_not_enter_mesh_lab_worker_before_h0(self):
         identity = Identity('esp32c6', '1', 'aa:bb:cc:dd:ee:01', None, '164020',
                             4 * 1024 * 1024, False, False)
