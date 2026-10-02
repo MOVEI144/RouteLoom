@@ -51,20 +51,31 @@ WaitingForEndReceipt. The existing queued-flow priority, outstanding hop
 exchange priority and foreground airtime hold are retained. No new timer,
 state, buffer or capacity is added.
 
+Spare-airtime object selection also preserves the foreground DRR cursor.
+Previously every object dispatch reset that cursor to Management, so a route
+update could take the next turn ahead of a newly arrived Normal control DATA.
+A frame-type-only host trace reproduced the extra turn; the required hop ACK
+lane continues to take priority. Ordinary Bulk DATA retains its DRR behavior.
+
 `M10-HFIX-OBJECT2` uses real Device/Owner/MeshNode peers, Member security, 5 ms
 virtual ticks, 10 ms frame/driver delays, 100 immediate 2 KiB objects and 1 Hz
 Reliable controls. The existing crypto worker model is enabled with 154 ms
 job latency, and every peer must have submitted and completed worker jobs.
-An accepted Reliable send to an absent destination every 30 seconds keeps a separate foreground delivery waiting. Its intentional
+An accepted Reliable send to an absent destination every 30 seconds keeps a
+separate foreground delivery waiting. Its intentional
 expiry is excluded from healthy-control End-failure accounting; every hop
 failure counter and healthy-control sender result remains checked.
 Before the correction, the first two objects expire at 10000 and 20000 ms and
-the test fails. After the correction: 100/100 objects and 728/728 healthy
-controls Delivered.
-A matched-duration baseline has the same 728 controls over 727110 ms.
-Control p99 is 120 ms without objects and 150 ms with objects (+25%);
-the required <=20% latency increase remains FAIL. This row stays `red`;
-no threshold was weakened. The PM permits deferring known failures.
+the test fails. With only the route-wait correction, an independent rerun
+still fails the unchanged p99 gate: 100/100 objects and 728/728 healthy controls
+Delivered, but control p99 is 120 ms without objects and 150 ms with objects
+(+25%). Both campaigns run 727110 ms.
+With the foreground DRR cursor preserved, 100/100 objects and 722/722 healthy
+controls deliver; control p99 is 120 ms in both campaigns (0% increase).
+The mixed campaign runs 721285 ms and the same-count control baseline runs
+721110 ms. No threshold was weakened. Existing immediate one/two-hop variants
+also use the mixed campaign's control count for their baseline, rather than
+only 100 baseline controls; periodic maintenance exposure is comparable.
 There are no added hop timeouts, healthy-control End failures, route flaps or
 duplicate object callbacks. These are virtual-time host measurements.
 
@@ -80,19 +91,24 @@ unchanged by this correction.
 
 ## Verification and limits
 
-- Sanitizer CTest: AppObject codec/assembler, endpoint boundaries and congestion
-  scheduler: 3/3 PASS.
+- Sanitizer CTest: AppObject codec/assembler, endpoint boundaries, congestion
+  scheduler and the mandatory session test: 4/4 PASS.
 - Rust 1.85.0 workspace fmt and clippy with warnings denied: PASS.
-- Worker-enabled M10 route-wait regression: FAIL on p99 only, actual peers.
-  Object progress and healthy-control delivery pass; the injected route-wait
-  expiry is excluded as described above. There are no added hop timeouts,
-  healthy-control End failures, route flaps or duplicate object callbacks.
+- Worker-enabled M10 route-wait regression: PASS, actual peers. The initial
+  route-wait-only implementation fails on p99 as reproduced above. The final
+  correction passes object progress, healthy-control delivery and p99; the
+  injected route-wait expiry is excluded as described above. There are no
+  added hop timeouts, healthy-control End failures, route flaps or duplicate
+  object callbacks.
 - Existing immediate variants: PASS on the final correction, no missing-peer
-  skip, 100/100 objects each. 2 KiB/two hop p99 120→130 ms,
+  skip, 100/100 objects each. 2 KiB/two hop p99 115→120 ms,
   2 KiB/one hop 50→55 ms and 4 KiB/one hop 50→60 ms. Healthy controls
-  deliver 751/751, 500/500 and 853/853 respectively.
-- Existing 4 KiB three-hop regression: PASS, actual peers, no skip.
-- Scenario table validation and `git diff --check`: PASS.
+  deliver 721/721, 500/500 and 853/853 respectively; each baseline has
+  the same control count as its mixed campaign.
+- Existing 4 KiB three-hop regression and the 1/121/122/2048/4096-byte
+  endpoint/airtime regression: PASS, actual peers, no skip.
+- Scenario table, documentation, manifest/reference generation checks,
+  review contracts and `git diff --check`: PASS.
 - `git clang-format --diff origin/main`: NOT_RUN, command unavailable locally.
 - Full CTest, Rust workspace live suite, quick/selfcheck/nightly, other firmware
   cells and on-board acceptance: NOT_RUN by the current PM scope.
@@ -113,8 +129,13 @@ The unchanged 27648 B static-RAM guard passes both builds. The complete
 `python3 tools/check.py firmware --cell bridge_node-esp32c3-normal-off-app_object`
 command fails both builds at the existing soft cell budget: app maximum
 1240976 B and static-free minimum 40480 B (even with the existing drift
-allowances). Those budget values were not loosened. Runtime heap and Owner
-CPU occupancy were not measured.
+allowances). Those budget values were not loosened. A fresh v6.0.3 container
+rebuild of this cell for the foreground-cursor correction still has app.bin 1258016 B
+and the same RAM values: no added flash or RAM relative to the route-wait-only
+implementation. `idf.py build` and the hard RAM guard pass;
+`tools/check.py size --cell bridge_node-esp32c3-normal-off-app_object` still
+fails the existing soft limits. Runtime heap and Owner CPU occupancy were
+not measured.
 
 Wire/API/Kconfig, security requirements, dedup/replay retention, object
 admission/completion records, no-progress and absolute deadlines, the single

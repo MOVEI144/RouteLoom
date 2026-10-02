@@ -385,7 +385,8 @@ MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
         selected_flow_ = flow;
         selected_ = head;
         selected_control_ = false;
-        cursor_ = (ci + 1) % kSchedClassCount;
+        // Spare-airtime objects do not change the foreground DRR turn.
+        if (!object) cursor_ = (ci + 1) % kSchedClassCount;
         return head;
       }
     }

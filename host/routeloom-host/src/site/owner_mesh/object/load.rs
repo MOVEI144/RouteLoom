@@ -170,7 +170,9 @@ fn control_load(
 fn mesh_m10_immediate_objects_with_1hz_control() {
     for (two_hop, bytes) in [(true, 2048), (false, 2048), (false, 4096)] {
         let mut p99 = Vec::new();
-        for with_object in [false, true] {
+        let mut control_samples = 100;
+        // Use the same number of periodic controls in both campaigns.
+        for with_object in [true, false] {
             let switch = if two_hop {
                 Switch::forced_multihop()
             } else {
@@ -193,8 +195,13 @@ fn mesh_m10_immediate_objects_with_1hz_control() {
                     world.step(5);
                 }
             }
-            let (latency, delivered, _) =
-                control_load(&mut world, with_object.then_some(bytes), false, 100);
+            let (latency, delivered, samples) = control_load(
+                &mut world,
+                with_object.then_some(bytes),
+                false,
+                control_samples,
+            );
+            control_samples = samples;
             eprintln!(
                 "M10 immediate: hops={} bytes={bytes} objects={delivered} p99={latency} ms",
                 if two_hop { 2 } else { 1 }
@@ -202,7 +209,7 @@ fn mesh_m10_immediate_objects_with_1hz_control() {
             p99.push(latency);
         }
         assert!(
-            p99[1] * 100 <= p99[0] * 120,
+            p99[0] * 100 <= p99[1] * 120,
             "control p99 increase exceeds 20%: two_hop={two_hop} bytes={bytes} p99={p99:?}"
         );
     }
