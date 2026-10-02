@@ -578,30 +578,15 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
     group_job_done(job, true, now_ms);
     return;
   }
-  if (job.owner == JobOwner::GatewayService) {
-    // The Service endpoint owns completion: the first authenticated
-    // HOP_ACCEPT resolves the exchange; the component tracks the rest.
-    // Deferred for the Owner's outside drive — never synchronously
-    // mid-call. The slot was held at send time, so this cannot be lost.
+  if (job.owner == JobOwner::GatewayService || job.owner == JobOwner::Config) {
+    // Completion stays deferred for the Owner's outside drive.
     if (component_jobs_outstanding_ > 0) --component_jobs_outstanding_;
-    if (gateway_sink_ != nullptr) {
+    const bool service = job.owner == JobOwner::GatewayService;
+    if (service ? gateway_sink_ != nullptr : config_sink_ != nullptr) {
       if (component_event_available()) {
-        publish_component_event(ComponentEventTarget::ServiceJobDone, job.peer,
-                                kInvalidTxnHandle, job.deadline_ms, nullptr,
-                                &job.ack.key.id, true, "HOP_ACCEPTED");
-      } else {
-        observer_.on_diagnostic("COMPONENT_EVENT_LOST", job.peer,
-                                &job.ack.key.id);
-      }
-    }
-    return;
-  }
-  if (job.owner == JobOwner::Config) {
-    if (component_jobs_outstanding_ > 0) --component_jobs_outstanding_;
-    if (config_sink_ != nullptr) {
-      if (component_event_available()) {
-        publish_component_event(ComponentEventTarget::ConfigJobDone, job.peer,
-                                kInvalidTxnHandle, job.deadline_ms, nullptr,
+        publish_component_event(service ? ComponentEventTarget::ServiceJobDone
+                                        : ComponentEventTarget::ConfigJobDone,
+                                job.peer, kInvalidTxnHandle, job.deadline_ms, nullptr,
                                 &job.ack.key.id, true, "HOP_ACCEPTED");
       } else {
         observer_.on_diagnostic("COMPONENT_EVENT_LOST", job.peer,
@@ -661,27 +646,14 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
     group_job_done(job, false, now_ms);
     return;
   }
-  if (job.owner == JobOwner::GatewayService) {
-    // Deferred completion, same held slot as the success path.
+  if (job.owner == JobOwner::GatewayService || job.owner == JobOwner::Config) {
     if (component_jobs_outstanding_ > 0) --component_jobs_outstanding_;
-    if (gateway_sink_ != nullptr) {
+    const bool service = job.owner == JobOwner::GatewayService;
+    if (service ? gateway_sink_ != nullptr : config_sink_ != nullptr) {
       if (component_event_available()) {
-        publish_component_event(ComponentEventTarget::ServiceJobDone, job.peer,
-                                kInvalidTxnHandle, job.deadline_ms, nullptr,
-                                &job.ack.key.id, false, reason);
-      } else {
-        observer_.on_diagnostic("COMPONENT_EVENT_LOST", job.peer,
-                                &job.ack.key.id);
-      }
-    }
-    return;
-  }
-  if (job.owner == JobOwner::Config) {
-    if (component_jobs_outstanding_ > 0) --component_jobs_outstanding_;
-    if (config_sink_ != nullptr) {
-      if (component_event_available()) {
-        publish_component_event(ComponentEventTarget::ConfigJobDone, job.peer,
-                                kInvalidTxnHandle, job.deadline_ms, nullptr,
+        publish_component_event(service ? ComponentEventTarget::ServiceJobDone
+                                        : ComponentEventTarget::ConfigJobDone,
+                                job.peer, kInvalidTxnHandle, job.deadline_ms, nullptr,
                                 &job.ack.key.id, false, reason);
       } else {
         observer_.on_diagnostic("COMPONENT_EVENT_LOST", job.peer,
@@ -719,7 +691,13 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
       now_ms < delivery->expires_at_ms &&
       static_cast<std::uint8_t>(delivery->round + 1U) < config_.max_end_to_end_rounds) {
     ++delivery->round;
-    delivery->next_round_at_ms = now_ms + 50;
+    // Keep the last bounded round for recovery after receiver admission pressure.
+    // Earlier hop/round retries stay fast; neither attempts nor lifetime increase.
+    delivery->next_round_at_ms = std::min(delivery->expires_at_ms, now_ms + 50);
+    if (delivery->round + 1U == config_.max_end_to_end_rounds &&
+        delivery->expires_at_ms - delivery->next_round_at_ms > 5000) {
+      delivery->next_round_at_ms = delivery->expires_at_ms - 5000;
+    }
     set_delivery_state(*delivery, DeliveryState::WaitingForRoute, reason);
     return;
   }

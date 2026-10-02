@@ -64,6 +64,8 @@ peer windowは初期2、最小1、最大4かつglobal awaiting-hop枠以内。BU
 
 同一jobのRF loss試行は既存2回、BUSYによる再入場は追加最大4回、全物理試行6回以内をAUTONOMY profileの初期上限とする。送信元round3回と元期限が先に尽きれば終了。peer/rate変更でも上限をリセットしない。callback結果不明は独立に安全処理する。
 
+送信元の hop 失敗からの早い round は従来の50ms後に試す。最後の round は、残りが十分なら元期限の5秒前に残し、受信側の有界な admission 圧力が解消する時間を確保する。元期限・試行回数・終端 dedup の保持期間は増減しない。送信元の live delivery table が満杯なら、受理前に `Busy` を返す。
+
 深い箇所の詰まりは、そこのadmission/window縮小→上流queue増加→更に上流のadmissionへ伝播する。初期実装では網全体の複雑なcredit台帳を新設しない。全経路の空き容量を端末が正確に知っているとはしない。
 
 ## 6. routing metricへの反映
