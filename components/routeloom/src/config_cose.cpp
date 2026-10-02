@@ -262,9 +262,14 @@ Status CoseEsp256AuthorityVerifier::verify_permit(
   if (!built.ok()) return built;
   ScopeDigest digest{};
   sha256(to_verify.view(), digest);
-  if (uECC_verify(public_key_.data(), digest.data(),
-                  static_cast<unsigned>(digest.size()),
-                  parts.signature.data, uECC_secp256r1()) == 0) {
+  sdkv1::Es256Signature signature{};
+  std::memcpy(signature.data(), parts.signature.data, signature.size());
+  bool signature_ok = false;
+  const auto& verifier =
+      signature_verifier_ == nullptr ? sdkv1::default_es256_verifier() : *signature_verifier_;
+  const Status checked = verifier.progress_digest(public_key_, digest, signature, signature_ok);
+  if (!checked) return checked;
+  if (!signature_ok) {
     return Status::success();  // bad signature: denied
   }
 
@@ -319,9 +324,14 @@ Status CoseEsp256AuthorityVerifier::verify_recovery(
   if (!built.ok()) return built;
   ScopeDigest digest{};
   sha256(to_verify.view(), digest);
-  if (uECC_verify(public_key_.data(), digest.data(),
-                  static_cast<unsigned>(digest.size()),
-                  parts.signature.data, uECC_secp256r1()) == 0) {
+  sdkv1::Es256Signature signature{};
+  std::memcpy(signature.data(), parts.signature.data, signature.size());
+  bool signature_ok = false;
+  const auto& verifier =
+      signature_verifier_ == nullptr ? sdkv1::default_es256_verifier() : *signature_verifier_;
+  const Status checked = verifier.progress_digest(public_key_, digest, signature, signature_ok);
+  if (!checked) return checked;
+  if (!signature_ok) {
     return Status::success();  // bad signature: denied
   }
 

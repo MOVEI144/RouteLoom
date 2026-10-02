@@ -47,6 +47,23 @@ bool all_zero(const ByteView view) noexcept {
 
 // --- ConfigTarget --------------------------------------------------------------
 
+Status ConfigTarget::bind_crypto_worker(CryptoWorker* worker) noexcept {
+  if (assembly_.active) return Status::error(StatusCode::Busy, "config assembly active");
+  const Status bound = signature_.bind(worker);
+  if (!bound) return bound;
+  asynchronous_ = worker != nullptr;
+  for (std::size_t i = 0; i < journal_count_; ++i) {
+    journals_[i]->bind_signature_verifier(asynchronous_ ? &signature_ : nullptr);
+  }
+  return Status::success();
+}
+
+Status ConfigTarget::cancel_crypto() noexcept {
+  drop_assembly();
+  return assembly_.active ? Status::error(StatusCode::Busy, "config crypto cancelling")
+                          : Status::success();
+}
+
 Status ConfigTarget::add_journal(const std::uint16_t config_namespace,
                                  ConfigJournal& journal) noexcept {
   if (journal_count_ >= config_wire_const::kMaxJournals ||
@@ -55,6 +72,7 @@ Status ConfigTarget::add_journal(const std::uint16_t config_namespace,
     return Status::error(StatusCode::InvalidArgument, "config journal add invalid");
   }
   namespaces_[journal_count_] = config_namespace;
+  journal.bind_signature_verifier(asynchronous_ ? &signature_ : nullptr);
   journals_[journal_count_] = &journal;
   ++journal_count_;
   return Status::success();
@@ -339,6 +357,10 @@ void ConfigTarget::handle_manifest(const NodeId peer, const wire::PlainFrame& fr
     }
   }
   slot.active = true;
+  slot.computing = false;
+  slot.cancelled = false;
+  slot.verify_charged = false;
+  slot.trust_epoch = trust_ == nullptr ? 0 : trust_->store_epoch();
   slot.kind = manifest.kind;
   slot.origin = origin;
   slot.journal = journal;  // null for kind 5 — the trust store owns it
@@ -369,6 +391,7 @@ void ConfigTarget::handle_chunk(const NodeId peer, const wire::PlainFrame& frame
     ++control_denied_;
     return;
   }
+  if (slot.cancelled) return;
   if (now_ms - slot.started_ms > kConfigReassemblyTimeoutMs) {
     const std::uint16_t progress = slot.received;
     drop_assembly();
@@ -405,7 +428,7 @@ void ConfigTarget::handle_chunk(const NodeId peer, const wire::PlainFrame& frame
     slot.buffer[at] = chunk.data[i];
     ++slot.received;
   }
-  if (slot.received >= slot.total_len) {
+  if (slot.received >= slot.total_len && !slot.computing) {
     dispatch_complete(now_ms);
     return;
   }
@@ -428,6 +451,7 @@ void ConfigTarget::dispatch_complete(const MonotonicMs now_ms) noexcept {
     return;
   }
   const ByteView object{slot.buffer.data(), total};
+  signature_.resume();
   Status status;
   if (slot.kind == autonomy::ControlObjectKind::ConfigPermit) {
     ConfigVerdict verdict{};
@@ -450,11 +474,18 @@ void ConfigTarget::dispatch_complete(const MonotonicMs now_ms) noexcept {
     if (trust_ == nullptr || trust_floor_ == nullptr) {
       status = Status::error(StatusCode::InvalidState,
                              "config trust not attached");
-    } else if (!limiter_.consume_expensive_verify(now_ms)) {
+    } else if (slot.trust_epoch != trust_->store_epoch()) {
+      status = Status::error(StatusCode::Expired, "trust verification epoch changed");
+    } else if (!slot.verify_charged && !limiter_.consume_expensive_verify(now_ms)) {
       status = Status::error(StatusCode::Busy, "trust verify intake budget");
     } else {
-      status = trust_manifest_accept(*trust_, object, *trust_floor_);
+      slot.verify_charged = true;
+      status = trust_manifest_accept(*trust_, object, *trust_floor_, signature_);
     }
+  }
+  if (status.code == StatusCode::WouldBlock || signature_.waiting()) {
+    slot.computing = true;
+    return;
   }
   drop_assembly();
   // Assembly finished (Ok) or the object refused (Failed): either way the
@@ -466,7 +497,14 @@ void ConfigTarget::dispatch_complete(const MonotonicMs now_ms) noexcept {
 }
 
 void ConfigTarget::drop_assembly() noexcept {
+  if (!signature_.cancel()) {
+    assembly_.cancelled = true;
+    return;
+  }
+  if (assembly_.journal != nullptr) assembly_.journal->cancel_verification();
   assembly_.active = false;
+  assembly_.computing = false;
+  assembly_.cancelled = false;
   assembly_.journal = nullptr;
 }
 
@@ -503,6 +541,10 @@ void ConfigTarget::on_config_job_done(const MessageId& id, const bool hop_accept
 }
 
 void ConfigTarget::poll(const MonotonicMs now_ms) noexcept {
+  if (assembly_.cancelled) {
+    drop_assembly();
+    return;
+  }
   for (std::size_t i = 0; i < journal_count_; ++i) {
     journals_[i]->poll(now_ms);
   }
@@ -520,6 +562,9 @@ void ConfigTarget::poll(const MonotonicMs now_ms) noexcept {
       assembly_.journal != nullptr &&
       (assembly_.journal->quarantined() || assembly_.journal->uncertain())) {
     drop_assembly();
+  }
+  if (assembly_.active && !assembly_.cancelled && assembly_.computing) {
+    dispatch_complete(now_ms);
   }
 }
 
