@@ -70,6 +70,7 @@ mod consumer;
 mod cutover;
 mod daemon;
 mod device;
+mod end;
 mod fault;
 mod join;
 mod kg;

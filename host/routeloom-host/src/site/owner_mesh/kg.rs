@@ -72,7 +72,7 @@ fn load_world(tag: &str, nodes: usize) -> Option<MeshWorld> {
 }
 
 #[test]
-#[ignore = "#195/#127: API1 rejects the authenticated epoch-qualified network"]
+#[ignore = "#195/#127: operations.open_epoch still rejects the full 64-bit network"]
 fn mesh_k01_periodic_latest_status_and_events() {
     let Some(mut world) = load_world("k01", 5) else {
         return;
@@ -142,7 +142,6 @@ fn mesh_k01_periodic_latest_status_and_events() {
 }
 
 #[test]
-#[ignore = "#195/#127: API1 rejects the authenticated epoch-qualified network"]
 fn mesh_k05_cursor_replay_gap_and_epoch_change() {
     let Some(mut world) = load_world("k05", 3) else {
         return;
@@ -189,7 +188,7 @@ fn mesh_k05_cursor_replay_gap_and_epoch_change() {
 }
 
 #[test]
-#[ignore = "#195/#127: API1 rejects the authenticated epoch-qualified network"]
+#[ignore = "#195/#127: operations.open_epoch still rejects the full 64-bit network"]
 fn mesh_k03_simultaneous_latest_and_group() {
     let nodes = if max_nodes() == 32 { 32 } else { 6 };
     let Some(mut world) = load_world("k03", nodes) else {
@@ -282,9 +281,14 @@ fn mesh_g7_authenticated_receive_reaches_daemon_store() {
     assert_eq!(batch.records[0].origin, NODE_A);
     drop(log);
     let response = read(&world, None);
+    let records = result(&response)
+        .get("records")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(records.len(), 1);
     assert_eq!(
-        response.get("error").unwrap().get("code").unwrap().as_str(),
-        Some("INVALID_ARGUMENT"),
-        "epoch-qualified network rejection is an explicit pending acceptance"
+        records[0].get("payload_hex").unwrap().as_str(),
+        Some(hex(b"authenticated-status").as_str())
     );
 }

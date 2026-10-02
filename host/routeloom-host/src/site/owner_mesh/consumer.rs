@@ -193,7 +193,7 @@ fn mesh_p06_k05_documented_consumer_commits_and_resumes() {
 fn documented_consumer(mut world: MeshWorld) {
     let network = world.usb_host.hello_network.unwrap();
     let endpoint = ConsumerEndpoint::start(&world.provision.site.dir, network);
-    world.usb_host.receive_state = Some(Arc::clone(&endpoint.state));
+    world.usb_host.daemon = Some(daemon::MeshDaemon::with_state(Arc::clone(&endpoint.state)));
     let db = world.provision.site.dir.join("consumer.db");
     let start = endpoint.read(network, None);
     let cursor_before_save = next_cursor(&start);
@@ -229,7 +229,7 @@ fn documented_consumer(mut world: MeshWorld) {
         .receive_log
         .lock()
         .unwrap()
-        .read(network, 0, 32, now_ms() + 301_000, false);
+        .read(network, 0, 32, world.now + 301_000, false);
     assert_eq!(
         error(&endpoint.read(network, Some(&cursor_before_save))),
         "CURSOR_GAP"
@@ -241,7 +241,7 @@ fn documented_consumer(mut world: MeshWorld) {
     drop(endpoint);
     world.daemon_restart();
     let restarted = ConsumerEndpoint::start(&world.provision.site.dir, network);
-    world.usb_host.receive_state = Some(Arc::clone(&restarted.state));
+    world.usb_host.daemon = Some(daemon::MeshDaemon::with_state(Arc::clone(&restarted.state)));
     assert_eq!(
         error(&restarted.read(network, Some(&committed.1))),
         "CURSOR_EPOCH_CHANGED"
@@ -282,7 +282,7 @@ fn display_load(mut world: MeshWorld, members: [usize; 2]) {
     world.pump_until(400, |_| false);
     let network = world.usb_host.hello_network.unwrap();
     let endpoint = ConsumerEndpoint::start(&world.provision.site.dir, network);
-    world.usb_host.receive_state = Some(Arc::clone(&endpoint.state));
+    world.usb_host.daemon = Some(daemon::MeshDaemon::with_state(Arc::clone(&endpoint.state)));
     world.switch.set_noise(
         LegNoise {
             loss_ppm: 10_000,

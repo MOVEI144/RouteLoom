@@ -73,12 +73,15 @@ All arithmetic is `RouteMetric` (u16), saturating at `kInfiniteRouteMetric = 655
 
 ```
 base = neighbor.metric                                              // nominal, add_neighbor input
-if (!metric_window_dirty && exchange_accepts >= kExchangeMinAccepts) // 4
-    base = measured_link_base(nominal, exchange_work, exchange_accepts)
+settled_work = max(0, exchange_work - pending_work)
+if (exchange_accepts >= kExchangeMinAccepts)                         // 4
+    base = measured_link_base(nominal, settled_work, exchange_accepts)
 //  = clamp_positive(ceil(nominal * work / accepts))  — ETX-like, dimensionless
 ```
 
 `work` counts every physical submission of a hop-accept job toward the peer — failures included, so success-only sampling cannot flatter the link. `accepts` counts authenticated `HOP_ACCEPT` completions. `accepts == 0` or `work <= accepts` keeps nominal. Driver service time never enters this term (retry double-count, 03 §6.1). A dirty window keeps the last-computed ratio from *falling*; work/accepts in it still count for worsening.
+
+Submission work arrives before its authenticated accept and must not be mistaken for loss. `pending_work` counts one latest unresolved attempt per physical or awaiting-hop exchange toward that peer; subtracting it leaves earlier failed attempts in the measured ratio even during continuous traffic. Subtraction saturates at zero after window decay. While an exchange is pending, cost relaxation is suppressed; measured loss and queue/refusal pressure can still worsen the cost. The pending count reads the existing bounded job storage and adds no persistent state.
 
 **Step 3 — queue penalty in units of base multiples** (new formulation, backward-compatible with `queue_penalized_cost`):
 
@@ -103,7 +106,8 @@ target = sat65535(base * (1 + m));  target == 0 → 1
 ```
 if (target >= link_cost) {
     link_cost = target                        // worsen immediately (bounded by saturation)
-} else if (!metric_window_dirty && now - last_cost_relax_ms >= kObservationWindowMs) {
+} else if (!exchange_pending && !metric_window_dirty &&
+           now - last_cost_relax_ms >= kObservationWindowMs) {
     excess = link_cost - target
     if (excess <= max(1, ceil(base / 4))) link_cost = target     // residual snaps
     else                                  link_cost -= max(1, excess / 2)
