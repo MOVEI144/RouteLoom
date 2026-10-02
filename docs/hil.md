@@ -32,6 +32,10 @@ self-tests alone are not hardware validation.
 
 ## Commands
 
+The shared E2E catalog has a hardware-free [scenario plan loader](development/e2e.md#hil-plans).
+Its `--dry-run <id>` checks board roles and chips without opening serial ports.
+
+
 ```sh
 # Resolve ports for a bench (read-only; --probe asks esptool for chip-id,
 # which resets the board)
