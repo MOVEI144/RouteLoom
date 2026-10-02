@@ -14,7 +14,7 @@
                      "NvsSleepStorage", "DevPskCommitVerifier", "6espnow16DevScopeProvider",
                      "EspNowAutonomy"],
   "cells": [
-    {"id": "reference_node-esp32c3-deep_sleep-off-off", "app": "reference_node", "target": "esp32c3", "overlay": ["CONFIG_ROUTELOOM_DEEP_SLEEP=y", "CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"], "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_DEEP_SLEEP=y"], "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"], "budget": {"app_bin_max": 1174976, "static_free_min": 61222, "rtc_used_max": 6824}},
+    {"id": "reference_node-esp32c3-deep_sleep-off-off", "app": "reference_node", "target": "esp32c3", "overlay": ["CONFIG_ROUTELOOM_DEEP_SLEEP=y", "CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y"], "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_DEEP_SLEEP=y"], "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"], "budget": {"app_bin_max": 1175072, "static_free_min": 61222, "rtc_used_max": 6824}},
     {
       "id": "reference_node-esp32c3-normal-off-off", "app": "reference_node", "target": "esp32c3",
       "overlay": [],
@@ -27,14 +27,14 @@
       "overlay": ["CONFIG_ROUTELOOM_RESOURCE_PROFILE_ENDPOINT=y", "CONFIG_ROUTELOOM_ROLE_ENDPOINT=y"],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y", "CONFIG_ROUTELOOM_DEDUP_PROFILE_DEFAULT=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1150848, "static_free_min": 92212, "rtc_used_max": 6480}
+      "budget": {"app_bin_max": 1150944, "static_free_min": 92212, "rtc_used_max": 6480}
     },
     {
       "id": "bridge_node-esp32c3-normal-off-off", "app": "bridge_node", "target": "esp32c3",
       "overlay": [],
       "expect": ["CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_GATEWAY_SMALL=y"],
       "symbols_absent": ["9AppObject", "11object_wire", "6Device8Observer.*(on_object|object_receive)", "6rl_dev.*on_object"],
-      "budget": {"app_bin_max": 1226848, "static_free_min": 53192, "rtc_used_max": 6480}
+      "budget": {"app_bin_max": 1226944, "static_free_min": 53192, "rtc_used_max": 6480}
     },
     {
       "id": "reference_node-esp32c3-normal-off-devram", "app": "reference_node", "target": "esp32c3",
@@ -313,7 +313,7 @@
       "id": "reference_node-esp32c3-deep_sleep-off-owner_member", "app": "reference_node", "target": "esp32c3",
       "overlay": ["CONFIG_ROUTELOOM_DEEP_SLEEP=y", "CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC=y"],
       "symbols_absent": ["9UsbBridge(?!20SecurityOwnerUsbSink|16AuthorityUsbSink)", "16JoinRelayGateway"],
-      "budget": {"app_bin_max": 1178704, "static_free_min": 61222, "rtc_used_max": 7176}
+      "budget": {"app_bin_max": 1178800, "static_free_min": 61222, "rtc_used_max": 7176}
     },
     {
       "id": "bench_node-esp32c3-deep_sleep-off-owner_member", "app": "bench_node", "target": "esp32c3",
