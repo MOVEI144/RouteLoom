@@ -189,7 +189,12 @@ fn mesh_k01_periodic_latest_status_and_events() {
             for index in [3, 4] {
                 let snap = &world.snaps[index];
                 if snap.rx_count != last_rx[index] && snap.rx.len() == 10 {
-                    last_view[index] = world.now;
+                    let generated_slot = u64::from_be_bytes(snap.rx[..8].try_into().unwrap());
+                    assert!(
+                        generated_slot <= slot,
+                        "view cannot come from a future slot"
+                    );
+                    last_view[index] = start + generated_slot * 5_000;
                 }
                 last_rx[index] = snap.rx_count;
                 assert!(
