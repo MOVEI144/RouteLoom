@@ -270,6 +270,9 @@ class SessionBank {
   // (never spending a counter); unknown RX ids refuse AuthRequired and
   // never start a handshake by themselves.
   Status tx_epoch(SecurityScope scope, NodeId peer, std::uint32_t& epoch) noexcept;
+  // Only the current usable RX context; no overlap and no establishment demand.
+  Status current_rx_epoch(SecurityScope scope, NodeId peer,
+                          std::uint32_t& epoch) const noexcept;
   ContextState context_state(SecurityScope scope, NodeId peer) const noexcept;
   Status next_counter(const SecurityContext& context, std::uint64_t& counter) noexcept;
   Status seal(const SecurityContext& context, std::uint64_t counter, ByteView aad,
@@ -388,6 +391,10 @@ class RamSessionProvider final : public SecurityProvider, public SessionInstalle
   bool ready() const noexcept override { return bank_.configured(); }
   Status tx_epoch(SecurityScope scope, NodeId peer, std::uint32_t& epoch) noexcept override {
     return bank_.tx_epoch(scope, peer, epoch);
+  }
+  Status current_rx_epoch(SecurityScope scope, NodeId peer,
+                          std::uint32_t& epoch) const noexcept override {
+    return bank_.current_rx_epoch(scope, peer, epoch);
   }
   ContextState context_state(SecurityScope scope, NodeId peer) const noexcept override {
     return bank_.context_state(scope, peer);

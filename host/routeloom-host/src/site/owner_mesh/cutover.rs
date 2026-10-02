@@ -632,11 +632,54 @@ pub(super) fn decider_requests_for(world: &MeshWorld, node: u64) -> usize {
 /// the ZT auto-reissue — Recovered, never Applied, with no decider
 /// request opened for them.
 pub(super) fn c2_once(tag: &str, island: bool) {
+    c2_with_policy(tag, island, false);
+}
+
+fn c2_with_policy(tag: &str, island: bool, closed: bool) {
     use routeloom_client::site::SiteAdmin;
     let Some(mut world) = MeshWorld::start(tag, Switch::forced_multihop()) else {
         return; // no C++ peers: skip (ignore-equivalent)
     };
     converge_gated(&mut world, 1, "c2 cutover");
+    if closed {
+        for peer in &mut world.peers {
+            peer.smart_join_policy(true, true, 60000);
+        }
+        world
+            .provision
+            .site
+            .service
+            .with(|a| {
+                a.update_policy(&crate::site::PolicyPatch {
+                    zero_touch_open: Some(false),
+                    ..crate::site::PolicyPatch::default()
+                })
+            })
+            .0
+            .expect("closed policy durable");
+        for _ in 0..1200 {
+            let distribution = world
+                .provision
+                .site
+                .service
+                .with(|a| a.policy_distribution())
+                .0;
+            if distribution.proxies > 0 && distribution.applied == distribution.proxies {
+                break;
+            }
+            world.step(25);
+        }
+        let distribution = world
+            .provision
+            .site
+            .service
+            .with(|a| a.policy_distribution())
+            .0;
+        assert_eq!(
+            distribution.applied, distribution.proxies,
+            "policy reached all proxies"
+        );
+    }
     let decider_a_before = decider_requests_for(&world, NODE_A);
     let decider_b_before = decider_requests_for(&world, NODE_B);
 
@@ -1006,6 +1049,12 @@ fn mesh_c2_commit_miss_and_reissue() {
     // G cut from the B/A island: G adopts alone, the island keeps
     // old-network comms, both stragglers recover.
     c2_once("c2-island", true);
+}
+
+/// J10-N: retained-site recovery bypasses the expected list and closed intake.
+#[test]
+fn mesh_j10_closed_policy_keeps_cutover_rescue() {
+    c2_with_policy("j10-closed", false, true);
 }
 
 /// Shared C3–C7 drive: converge, stage the cutover, drain every

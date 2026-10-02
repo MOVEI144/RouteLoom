@@ -237,6 +237,31 @@ def valid_discovery() -> list[bytes]:
     return frames
 
 
+def valid_smart_discovery() -> None:
+    """V4 keeps the legacy fields and adds a nonce-bound 16-byte mark."""
+    mark = hmac.new(bytes(range(16)), b"RouteLoom/join-probe/v1\x00" + NONCE,
+                    hashlib.sha256).digest()[:16]
+    claimed = int.from_bytes(NONCE[8:], "big")
+    body = discover_body(1, ORG_HINT, version=4) + mark
+    frame = rld1(KIND["discover"], 0, claimed, NONCE, body)
+    good("zt_smart_discover", "zt_discover_frame",
+         dict(frame_hex=frame.hex(), claimed_node=claimed, nonce_hex=NONCE.hex(),
+              profile_bits=1, org_hint=ORG_HINT, preferred_site_hint=0,
+              avoid0=0, avoid1=0, body_hex=body.hex()), frame, body)
+    bad("zt_smart_discover_short", "zt_discover_frame",
+        rld1(KIND["discover"], 0, claimed, NONCE, body[:-1]), "v4 mark truncated")
+    for expected in (0, 4):
+        ck = cookie(bytes([0x5A] * 32), DEVICE_MAC, NONCE, PROXY, NETWORK_LOW32, 0)
+        rn = bytes(range(0xA0, 0xB0))
+        body = offer_body(1, 1 | expected, ck, rn, ORG_HINT, SITE_HINT, 2, 0, version=4)
+        frame = rld1(KIND["offer"], NETWORK_LOW32, PROXY, NONCE, body)
+        good(f"zt_smart_offer_{expected}", "zt_offer_frame",
+             dict(frame_hex=frame.hex(), proxy=PROXY, network_low32=NETWORK_LOW32,
+                  nonce_hex=NONCE.hex(), density=1, flags=1 | expected, cookie_hex=ck.hex(),
+                  responder_nonce_hex=rn.hex(), org_hint=ORG_HINT, site_hint=SITE_HINT,
+                  authority_hops=2, load=0, body_hex=body.hex()), frame, body)
+
+
 def valid_cookies() -> None:
     for name, key, bucket in (("cookie_bucket_0", bytes([0x5A] * 32), 0),
                               ("cookie_bucket_large", bytes(range(32)), 0x0123456789)):
@@ -557,6 +582,7 @@ def main() -> None:
     CORPUS.mkdir(parents=True, exist_ok=True)
 
     discovery_frames = valid_discovery()
+    valid_smart_discovery()
     valid_cookies()
     valid_objects()
     rld1_frames = valid_rld1_sequences()

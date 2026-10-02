@@ -267,6 +267,8 @@ void Joiner::LinkObserver::on_offer(const ZtOfferView& offer) noexcept {
   // still current. The table is the cross-window bridge — Select and
   // connect re-validate (recovery match, nonce freshness), so tabling
   // early-or-late never binds a stale or foreign offer.
+  if (owner_.config_.same_site_only && !owner_.recovery_only_ &&
+      offer.body.site_hint != owner_.candidates_.preferred_hint(offer.body.org_hint)) return;
   JoinState state = owner_.state_;
   JoinCandidateKey key{};
   key.org_hint = offer.body.org_hint;
@@ -353,6 +355,9 @@ void Joiner::begin_run(const JoinBootInput& boot) noexcept {
   // A new run drops every pending output; the radio stays where it is and
   // the candidate holds survive a soft restart.  A staged sideband RRS is
   // attempt-scoped evidence and is re-staged by the next delivery.
+  search_deadline_ = 0;
+  search_attempts_ = counters_.attempts;
+  api_triggered_ = false;
   teardown_attempt();
   secure_clear(rrs_staged_);
   rrs_staged_len_ = 0;
@@ -387,11 +392,14 @@ Status Joiner::start(const JoinBootInput& boot, const MonotonicMs now) noexcept 
     return Status::error(StatusCode::InvalidState, "joiner already started");
   }
   if (!boot_valid(boot)) return Status::error(StatusCode::InvalidArgument, "joiner boot");
-  if (!channels_valid(config_) || !role_valid(config_)) {
+  if (!channels_valid(config_) || !role_valid(config_) ||
+      (config_.smart_join && (config_.listen_ms > 60000 || config_.search_ms < 1000 ||
+       config_.search_ms > 600000 || config_.start_jitter_ms > 60000))) {
     return Status::error(StatusCode::InvalidArgument, "joiner config");
   }
   if (!clock_ok(now)) return Status::error(StatusCode::ClockUncertain, "joiner clock");
   begin_run(boot);
+  if (config_.smart_join) search_deadline_ = sat_add(now, config_.search_ms);
   direct_ = false;
   direct_port_ = nullptr;
   set_state(JoinState::BootCheck);
@@ -453,8 +461,15 @@ Status Joiner::on_direct_message(const JoinAuthPhase phase, const std::uint8_t s
 Status Joiner::retry_now(const MonotonicMs now) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "joiner re-entry");
   InCall guard(in_call_);
-  if (state_ == JoinState::Stopped) return Status::error(StatusCode::InvalidState, "joiner stopped");
-  if (state_ == JoinState::Backoff && backoff_deadline_ > now) backoff_deadline_ = now;
+  if (state_ == JoinState::Stopped) {
+    if (!config_.smart_join || boot_witness_ == 0) return Status::error(StatusCode::InvalidState, "joiner not booted");
+    search_deadline_ = sat_add(now, config_.search_ms);
+    search_attempts_ = counters_.attempts;
+    api_triggered_ = true;
+    set_state(JoinState::BootCheck);
+  }
+  if ((!config_.smart_join || direct_) && state_ == JoinState::Backoff &&
+      backoff_deadline_ > now) backoff_deadline_ = now;
   return Status::success();
 }
 
@@ -467,8 +482,27 @@ Status Joiner::apply_policy(const JoinerConfig& policy) noexcept {
   next.avoid_not_here_ms = policy.avoid_not_here_ms;
   next.avoid_blocked_ms = policy.avoid_blocked_ms;
   next.retry_max_ms = policy.retry_max_ms;
+  if (policy.listen_ms > 60000 || policy.search_ms < 1000 || policy.search_ms > 600000 ||
+      policy.start_jitter_ms > 60000) {
+    return Status::error(StatusCode::InvalidArgument, "join search range");
+  }
   next.start_jitter_ms = policy.start_jitter_ms;
+  next.smart_join = policy.smart_join;
+  next.boot_join = policy.boot_join;
+  next.same_site_only = policy.same_site_only;
+  next.listen_ms = policy.listen_ms;
+  next.search_ms = policy.search_ms;
+  const bool enable_smart = !direct_ && !config_.smart_join && next.smart_join;
   config_ = next;
+  if (enable_smart && state_ != JoinState::Stopped && state_ != JoinState::Ready &&
+      state_ != JoinState::Removed && state_ != JoinState::RecoveryRequired) {
+    // A legacy scan has neither a smart nonce nor a finite deadline. Drop
+    // its offers before listening; an already started procedure consumes
+    // this search's single attempt even when the policy changes.
+    end_search(last_now_);
+    search_deadline_ = sat_add(last_now_, config_.search_ms);
+    if (counters_.attempts == search_attempts_) set_state(JoinState::BootCheck);
+  }
   candidates_.set_avoid(config_.avoid_not_here_ms, config_.avoid_blocked_ms);
   candidates_.set_retry_max(config_.retry_max_ms);
   return Status::success();
@@ -535,8 +569,30 @@ Status Joiner::poll(const MonotonicMs now) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "joiner re-entry");
   InCall guard(in_call_);
   if (!clock_ok(now)) return Status::error(StatusCode::ClockUncertain, "joiner clock");
+  if (!direct_ && config_.smart_join && search_deadline_ != 0 &&
+      state_ != JoinState::Ready && state_ != JoinState::Stopped &&
+      state_ != JoinState::Removed && state_ != JoinState::RecoveryRequired &&
+      (now >= search_deadline_ ||
+       (!attempt_.active && counters_.attempts > search_attempts_ &&
+        state_ == JoinState::Backoff))) {
+    end_search(now);
+    return Status::success();
+  }
   link_.poll(now);  // chunk retransmits and assembly expiry; callbacks only set flags
   return drive(now);
+}
+
+void Joiner::end_search(const MonotonicMs now) noexcept {
+  if (attempt_.active) {
+    candidates_.apply_outcome(attempt_, JoinAttemptOutcome::Pending, 0, now, entropy_);
+  }
+  teardown_attempt();
+  action_pending_ = false;
+  channel_waiting_ = false;
+  wipe_expectation();
+  secure_clear(rrs_staged_);
+  rrs_staged_len_ = 0;
+  set_state(JoinState::Stopped);
 }
 
 Status Joiner::on_rld1_rx(const JoinRxMeta& meta, const ByteView frame,
@@ -678,44 +734,53 @@ JoinSnapshot Joiner::snapshot() const noexcept {
 
 MonotonicMs Joiner::next_deadline() const noexcept {
   if (action_pending_) return last_now_;  // the Owner must take it first
-  switch (state_) {
-    case JoinState::Stopped:
-    case JoinState::Ready:
-    case JoinState::Removed:
-    case JoinState::RecoveryRequired:
-      return kJoinNoDeadline;
-    case JoinState::BootCheck:
-    case JoinState::Select:
-    case JoinState::SendM1:
-    case JoinState::SendM3:
-    case JoinState::Decided:
-    case JoinState::Commit:
-      return last_now_;
-    case JoinState::ScanTune:
-      return last_now_;
-    case JoinState::WaitChannel:
-      return channel_deadline_;
-    case JoinState::ScanWindow:
-      return window_deadline_;
-    case JoinState::RefreshWindow:
-      if (refresh_phase_ == RefreshPhase::RateWait) {
-        const MonotonicMs rate =
-            last_m1_ms_ == 0 ? last_now_ : sat_add(last_m1_ms_, kJoinMinM1IntervalMs);
-        return rate < last_now_ ? last_now_ : rate;
-      }
-      return window_deadline_;
-    case JoinState::WaitM2:
-      if (mailbox_valid_ || link_failed_) return last_now_;
-      return t2_deadline_ < overall_deadline_ ? t2_deadline_ : overall_deadline_;
-    case JoinState::WaitM4:
-      if (mailbox_valid_ || link_failed_) return last_now_;
-      return t4_deadline_ < overall_deadline_ ? t4_deadline_ : overall_deadline_;
-    case JoinState::Reconcile:
-      return reconcile_deadline_;
-    case JoinState::Backoff:
-      return backoff_deadline_;
+  const auto state_deadline = [this]() noexcept -> MonotonicMs {
+    switch (state_) {
+      case JoinState::Stopped:
+      case JoinState::Ready:
+      case JoinState::Removed:
+      case JoinState::RecoveryRequired:
+        return kJoinNoDeadline;
+      case JoinState::BootCheck:
+      case JoinState::Select:
+      case JoinState::SendM1:
+      case JoinState::SendM3:
+      case JoinState::Decided:
+      case JoinState::Commit:
+        return last_now_;
+      case JoinState::ScanTune:
+        return last_now_;
+      case JoinState::WaitChannel:
+        return channel_deadline_;
+      case JoinState::ScanWindow:
+        return window_deadline_;
+      case JoinState::RefreshWindow:
+        if (refresh_phase_ == RefreshPhase::RateWait) {
+          const MonotonicMs rate =
+              last_m1_ms_ == 0 ? last_now_ : sat_add(last_m1_ms_, kJoinMinM1IntervalMs);
+          return rate < last_now_ ? last_now_ : rate;
+        }
+        return window_deadline_;
+      case JoinState::WaitM2:
+        if (mailbox_valid_ || link_failed_) return last_now_;
+        return t2_deadline_ < overall_deadline_ ? t2_deadline_ : overall_deadline_;
+      case JoinState::WaitM4:
+        if (mailbox_valid_ || link_failed_) return last_now_;
+        return t4_deadline_ < overall_deadline_ ? t4_deadline_ : overall_deadline_;
+      case JoinState::Reconcile:
+        return reconcile_deadline_;
+      case JoinState::Backoff:
+        return backoff_deadline_;
+    }
+    return kJoinNoDeadline;
+  };
+  const MonotonicMs next = state_deadline();
+  if (!direct_ && config_.smart_join && search_deadline_ != 0 &&
+      state_ != JoinState::Stopped && state_ != JoinState::Ready &&
+      state_ != JoinState::Removed && state_ != JoinState::RecoveryRequired) {
+    return next < search_deadline_ ? next : search_deadline_;
   }
-  return kJoinNoDeadline;
+  return next;
 }
 
 bool Joiner::quiescent() const noexcept {
@@ -851,6 +916,20 @@ bool Joiner::retain_membership(const SiteRecord& site, const IdentityRecord& ide
     recovery_key_.network_low32 = static_cast<std::uint32_t>(site.network & 0xFFFFFFFFULL);
   }
   return true;
+}
+
+Status Joiner::wait_smart_probe(const MonotonicMs now) noexcept {
+  std::uint32_t draw = 0;
+  const Status random = entropy_.fill(
+      MutableByteView{reinterpret_cast<std::uint8_t*>(&draw), sizeof draw});
+  if (!random) {
+    last_error_ = random.code;
+    set_state(JoinState::Stopped);
+    return random;
+  }
+  backoff_deadline_ = sat_add(now, config_.listen_ms + draw % (config_.start_jitter_ms + 1U));
+  set_state(JoinState::Backoff);
+  return Status::success();
 }
 
 void Joiner::schedule_rescan(const MonotonicMs now) noexcept {
@@ -1052,6 +1131,8 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
       }
       if (direct_) {
         begin_direct_attempt();
+      } else if (config_.smart_join) {
+        return wait_smart_probe(now);
       } else {
         start_scan();
       }
@@ -1068,6 +1149,8 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
       }
       if (direct_) {
         begin_direct_attempt();
+      } else if (config_.smart_join) {
+        return wait_smart_probe(now);
       } else {
         start_scan();
       }
@@ -1090,6 +1173,13 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
   if (health.read_error_mask != 0 || health.uncertain) {
     reconcile_enter(false, now);  // re-read before classifying further
     return Status::success();
+  }
+  if (!direct_ && config_.smart_join) {
+    if (!config_.boot_join && !api_triggered_) {
+      set_state(JoinState::Stopped);
+      return Status::success();
+    }
+    return wait_smart_probe(now);
   }
   // Fresh, or a clean quarantine healing via full EDHOC. Direct runs skip
   // the scan: the attachment already selected the site.
@@ -1151,12 +1241,18 @@ bool Joiner::open_scan_window(const MonotonicMs now) noexcept {
     ZtDiscoverBody body{};
     body.profile_bits = kJoinProfileRljoin1 |
                         (recovery_only_ && evidence_valid_ ? kJoinProfileMembershipRecovery : 0u);
+    body.smart = config_.smart_join;
+    if (body.smart && !identity_join_mark(identity_.identity(), body.mark)) {
+      set_state(JoinState::Stopped);
+      return false;
+    }
     body.org_hint = step.org_hint;
     body.preferred_site_hint = candidates_.preferred_hint(step.org_hint);
     candidates_.avoid_hints(step.org_hint, now, body.avoid_site_hints);
     // First step of the cycle draws the nonce; later steps re-emit it,
     // so every step's proxy answer shares the current transaction.
     const Status sent = cycle_fresh_ ? link_.discover(body, now) : link_.rediscover(body, now);
+    secure_clear(body.mark);
     if (sent.ok()) {
       cycle_fresh_ = false;
       window_deadline_ = sat_add(now, kJoinScanWindowMs);
@@ -1245,6 +1341,10 @@ Status Joiner::drive_scan_window(const MonotonicMs now) noexcept {
 
 Status Joiner::drive_select(const MonotonicMs now) noexcept {
   if (action_pending_) return Status::success();
+  if (config_.smart_join && counters_.attempts > search_attempts_) {
+    end_search(now);
+    return Status::success();
+  }
   // At most one pass over the table per poll: a recovery join skips every
   // winner that is not the known site (parking it under a short hold so a
   // stronger foreign site cannot wedge the selection), then either binds
@@ -1330,10 +1430,17 @@ Status Joiner::drive_refresh(const MonotonicMs now) noexcept {
     ZtDiscoverBody body{};
     body.profile_bits = kJoinProfileRljoin1 |
                         (recovery_only_ && evidence_valid_ ? kJoinProfileMembershipRecovery : 0u);
+    body.smart = config_.smart_join;
+    if (body.smart && !identity_join_mark(identity_.identity(), body.mark)) {
+      finish_attempt(JoinAttemptOutcome::Failed, 0, now);
+      return Status::success();
+    }
     body.org_hint = attempt_key_.org_hint;
     body.preferred_site_hint = candidates_.preferred_hint(attempt_key_.org_hint);
     candidates_.avoid_hints(attempt_key_.org_hint, now, body.avoid_site_hints);
-    if (!link_.discover(body, now)) {
+    const Status discovered = link_.discover(body, now);
+    secure_clear(body.mark);
+    if (!discovered) {
       finish_attempt(JoinAttemptOutcome::Failed, 0, now);
       return Status::success();
     }

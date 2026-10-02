@@ -138,6 +138,12 @@ typedef struct rl_dev_join_policy {
   uint16_t start_jitter_ms;    /* 0..60000 */
   uint8_t role;                /* requested role bits, 0 = image default */
   uint8_t reserved;
+  uint8_t smart_join;          /* 0 legacy, 1 listen/probe/finite search */
+  uint8_t boot_join;           /* 0 API only, 1 boot trigger */
+  uint8_t same_site_only;
+  uint8_t reserved2;
+  uint32_t listen_ms;          /* 0..60000 */
+  uint32_t search_ms;          /* 1000..600000 */
 } rl_dev_join_policy_t;
 
 /* Callbacks run on the Owner task; arguments are borrowed for the call.
@@ -221,6 +227,8 @@ rl_status_code_t rl_dev_membership(rl_dev_t* device, rl_dev_membership_t* out);
 rl_status_code_t rl_dev_connectivity(rl_dev_t* device, rl_dev_connectivity_t* out);
 /* Unassigned: the zero-touch scan starts now. Member: re-verifies the
    membership with the site. Ends with on_operation. */
+/* Private opaque mark for ProxyPolicySet, never a permission. */
+rl_status_code_t rl_dev_join_mark(rl_dev_t* device, uint8_t out[16]);
 rl_status_code_t rl_dev_request_join(rl_dev_t* device, uint32_t* out_operation);
 /* Leaves the site: the intent is durable before anything is erased; the
    device then restarts unassigned (on_operation(LEFT) first). */

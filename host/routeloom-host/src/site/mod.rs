@@ -54,6 +54,7 @@ pub mod cutover;
 pub mod group_keys;
 pub mod p6_channel;
 mod proxy_policy;
+pub use proxy_policy::ExpectedJoins;
 pub mod records;
 pub mod revocation;
 pub mod store;
@@ -394,8 +395,9 @@ pub enum DecisionMode {
 
 /// One `join.policy.set` patch (07 §2): only `Some` fields change, the
 /// rest stay at whatever the policy holds when the patch applies.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default, Eq, PartialEq)]
 pub struct PolicyPatch {
+    pub expected: Option<proxy_policy::ExpectedJoins>,
     pub zero_touch_open: Option<bool>,
     pub decision_mode: Option<DecisionMode>,
     pub decision_timeout_ms: Option<u16>,
@@ -413,7 +415,7 @@ struct ReadmitPlan {
 }
 
 /// `join.policy.*` (07 §2).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct JoinPolicy {
     /// The radio intake intent: members answer ZeroTouch DISCOVER while
     /// open. The authority enforces `false` immediately for its own
@@ -428,6 +430,7 @@ pub struct JoinPolicy {
     /// Content version, minted by `set_policy` (0 = never set). Two sets
     /// with identical content share a generation; anything else bumps.
     pub policy_generation: u32,
+    pub expected: proxy_policy::ExpectedJoins,
 }
 
 impl Default for JoinPolicy {
@@ -438,11 +441,22 @@ impl Default for JoinPolicy {
             decision_timeout_ms: 2000,
             pending_retry_after_s: 60,
             policy_generation: 0,
+            expected: proxy_policy::ExpectedJoins::default(),
         }
     }
 }
 
 impl JoinPolicy {
+    fn snapshot(&self) -> Self {
+        Self {
+            zero_touch_open: self.zero_touch_open,
+            decision_mode: self.decision_mode,
+            decision_timeout_ms: self.decision_timeout_ms,
+            pending_retry_after_s: self.pending_retry_after_s,
+            policy_generation: self.policy_generation,
+            expected: self.expected.snapshot(),
+        }
+    }
     fn encode(&self) -> Vec<u8> {
         let mut out = vec![
             u8::from(self.zero_touch_open),
@@ -455,6 +469,8 @@ impl JoinPolicy {
         out.extend_from_slice(&self.decision_timeout_ms.to_be_bytes());
         out.extend_from_slice(&self.pending_retry_after_s.to_be_bytes());
         out.extend_from_slice(&self.policy_generation.to_be_bytes());
+        let tail = zeroize::Zeroizing::new(self.expected.tlv());
+        out.extend_from_slice(&tail);
         out
     }
 
@@ -462,7 +478,7 @@ impl JoinPolicy {
         // Pre-generation rows are 8 bytes; they decode as generation 0.
         let policy_generation = match bytes.len() {
             8 => 0,
-            12 => u32::from_be_bytes(bytes[8..12].try_into().ok()?),
+            12..=76 => u32::from_be_bytes(bytes[8..12].try_into().ok()?),
             _ => return None,
         };
         if bytes[0] > 1 || bytes[1] > 2 {
@@ -478,12 +494,14 @@ impl JoinPolicy {
             decision_timeout_ms: u16::from_be_bytes([bytes[2], bytes[3]]),
             pending_retry_after_s: u32::from_be_bytes(bytes[4..8].try_into().ok()?),
             policy_generation,
+            expected: proxy_policy::ExpectedJoins::decode(bytes.get(12..).unwrap_or(&[]))?,
         };
         policy.validate().ok()?;
         Some(policy)
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
+        self.expected.validate()?;
         if !(routeloom_join::DECISION_TIMEOUT_MIN_MS..=routeloom_join::DECISION_TIMEOUT_MAX_MS)
             .contains(&self.decision_timeout_ms)
         {
@@ -1654,7 +1672,7 @@ impl SiteAuthority {
     }
 
     pub fn policy(&self) -> JoinPolicy {
-        self.policy
+        self.policy.snapshot()
     }
 
     pub fn storage_durable(&self) -> bool {
@@ -2851,7 +2869,7 @@ impl SiteAuthority {
             }
         }
         self.tick_distribution(now_ms);
-        self.tick_policy(now_ms);
+        self.tick_policy(self.join_mono_ms);
     }
 
     /// Ends one relayed exchange as failed, keeping the reason, the
@@ -5493,6 +5511,7 @@ impl SiteAuthority {
     fn map_channel_event(&mut self, event: ChannelEvent, time: HostTime) {
         match event {
             ChannelEvent::ChannelReady { device } => {
+                self.policy_retry.remove(&device);
                 // The channel fenced the full binding before emitting
                 // this; the row DAMS is the ready incarnation.
                 let dams = self.devices.get(&device).map(|row| row.dams);
@@ -5898,13 +5917,16 @@ impl SiteAuthority {
             .policy_generation
             .checked_add(1)
             .ok_or_else(|| SiteError::new("AUTHORITY_ERROR", "policy generation exhausted"))?;
-        self.store
-            .commit(&Batch {
-                meta: vec![("policy", policy.encode())],
-                ..Batch::default()
-            })
-            .map_err(|e| store_failure(&e))?;
+        let mut batch = Batch {
+            meta: vec![("policy", policy.encode())],
+            ..Batch::default()
+        };
+        let committed = self.store.commit(&batch);
+        use zeroize::Zeroize;
+        batch.meta[0].1.zeroize();
+        committed.map_err(|e| store_failure(&e))?;
         self.policy = policy;
+        self.policy_retry.clear();
         Ok(self.policy_json())
     }
 
@@ -5967,7 +5989,10 @@ impl SiteAuthority {
         patch: &PolicyPatch,
         mono_ms: u64,
     ) -> Result<String, SiteError> {
-        let mut policy = self.policy;
+        let mut policy = self.policy.snapshot();
+        if let Some(expected) = &patch.expected {
+            policy.expected = expected.snapshot();
+        }
         if let Some(zero_touch_open) = patch.zero_touch_open {
             policy.zero_touch_open = zero_touch_open;
         }
@@ -6000,7 +6025,7 @@ impl SiteAuthority {
             return Err(error);
         }
         self.join_mono_ms = mono_ms;
-        if policy.decision_mode != DecisionMode::LabInventory {
+        if self.policy.decision_mode != DecisionMode::LabInventory {
             self.lab_enrollment_window = None;
         } else if patch.decision_mode == Some(DecisionMode::LabInventory) {
             // Fixed one-hour maximum, volatile across daemon restarts.
