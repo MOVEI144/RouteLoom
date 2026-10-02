@@ -460,6 +460,15 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       // using encoded length and fixed PHY cost, independently of service time.
       const auto cost_us = (tx_encoded_.size + kTxFrameFixedCostBytes) * 32;
       object_send_after_ms_ = now_ms + (cost_us + 49) / 50;
+    } else if ((submitted_header.type == FrameType::Data ||
+                submitted_header.type == FrameType::Service ||
+                submitted_header.type == FrameType::EndReceipt ||
+                submitted_header.type == FrameType::AppResult) &&
+               (submitted_header.traffic & wire::kTrafficPriorityMask) != wire::kTrafficBulk) {
+      // Leave the following airtime turn for the foreground exchange's
+      // forwarded data and receipt, which may not be queued here yet.
+      const auto cost_us = (tx_encoded_.size + kTxFrameFixedCostBytes) * 32;
+      object_send_after_ms_ = std::max(object_send_after_ms_, now_ms + (cost_us + 49) / 50);
     }
     ++submitted.physical_attempts;
     obs_tx_submitted(submitted, token, now_ms);

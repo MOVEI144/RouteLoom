@@ -249,7 +249,8 @@ fn mesh_m10_host_usb_object_upload() {
             break;
         }
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(20),
+            started.elapsed()
+                < std::time::Duration::from_millis(u64::from(record.request.deadline_ms)),
             "host state {}",
             ops.get(&principal, record.id).unwrap().state
         );
@@ -451,13 +452,16 @@ fn mesh_m10_object_queue_pressure() {
 #[test]
 #[ignore = "requires ON endpoints and an OFF relay"]
 fn mesh_m10_control_p99() {
-    let mut world = mesh::route_loss_world("m10-control", Switch::forced_multihop(), true)
-        .expect("M10 requires real Owner peers");
-    assert_eq!(world.peers[0].object_buffer(), 0);
-    mesh::deliver_each(&mut world, 1, 0, 1, b"warm");
-    let failed: Vec<_> = world.snaps.iter().map(|s| s.end_failed).collect();
+    let nightly = std::env::var_os("ROUTELOOM_E2E_NIGHTLY").is_some();
+    let object_count = if nightly { 10 } else { 1 };
     let mut p99 = Vec::new();
     for with_object in [false, true] {
+        let mut world = mesh::route_loss_world("m10-control", Switch::forced_multihop(), true)
+            .expect("M10 requires real Owner peers");
+        assert_eq!(world.peers[0].object_buffer(), 0);
+        mesh::deliver_each(&mut world, 1, 0, 1, b"warm");
+        let failed: Vec<_> = world.snaps.iter().map(|s| s.end_failed).collect();
+
         if with_object {
             assert_eq!(
                 world.peers[1].object_send(testkit::GATEWAY, &[0x61; 4096], 30000),
@@ -466,11 +470,34 @@ fn mesh_m10_control_p99() {
             world.switch.drop_wire_kind(1, 2, 65, 1);
         }
         let start = world.now;
+        let mut submitted = 1;
+        let mut advance = |world: &mut MeshWorld, millis| {
+            world.step(millis);
+            world.usb_host.object_frames.clear();
+            if with_object
+                && submitted < object_count
+                && world.now >= start + u64::from(submitted) * 18000
+            {
+                let (_, completed, state, _) = world.peers[1].object_snapshot();
+                if completed == 1 {
+                    assert_eq!(state, 1, "whole-object Delivered");
+                    let (received, _, _, payload) = world.peers[0].object_snapshot();
+                    assert_eq!(received, submitted, "one notification per object");
+                    assert_eq!(payload, vec![0x61; 4096]);
+                    assert_eq!(
+                        world.peers[1].object_send(testkit::GATEWAY, &[0x61; 4096], 30000),
+                        0
+                    );
+                    submitted += 1;
+                }
+            }
+        };
         let mut latency = Vec::new();
-        for sample in 0..18u64 {
+        for sample in 0..if nightly { 36u64 } else { 18 } {
             let scheduled = start + sample * 5000;
             while world.now < scheduled {
-                world.step((scheduled - world.now).min(25));
+                let millis = (scheduled - world.now).min(25);
+                advance(&mut world, millis);
             }
             let sent = world.now;
             let received = world.snaps[0].rx_count;
@@ -482,7 +509,7 @@ fn mesh_m10_control_p99() {
                 .unwrap_or(0);
             world.peers[1].app_send(testkit::GATEWAY, &sample.to_le_bytes());
             loop {
-                world.step(25);
+                advance(&mut world, 25);
                 if world.snaps[0].rx_count == received + 1
                     && world.snaps[1]
                         .app_tx
@@ -501,9 +528,21 @@ fn mesh_m10_control_p99() {
         latency.sort_unstable();
         p99.push(*latency.last().unwrap());
         if with_object {
+            while (world.peers[0].object_snapshot().0 < object_count
+                || world.peers[1].object_snapshot().1 == 0)
+                && world.now - start < 180000
+            {
+                advance(&mut world, 25);
+            }
             assert_eq!(world.peers[1].object_snapshot().2, 1);
-            assert_eq!(world.peers[0].object_snapshot().0, 1);
+            assert_eq!(world.peers[0].object_snapshot().3, vec![0x61; 4096]);
+            assert_eq!(world.peers[1].object_snapshot().1, 1);
+            assert_eq!(world.peers[0].object_snapshot().0, object_count);
         }
+        assert_eq!(
+            world.snaps.iter().map(|s| s.end_failed).collect::<Vec<_>>(),
+            failed
+        );
     }
     eprintln!(
         "M10 Reliable p99: baseline={} ms, object={} ms",
@@ -512,10 +551,6 @@ fn mesh_m10_control_p99() {
     assert!(
         p99[1] * 100 <= p99[0] * 120,
         "control p99 increase exceeds 20%"
-    );
-    assert_eq!(
-        world.snaps.iter().map(|s| s.end_failed).collect::<Vec<_>>(),
-        failed
     );
 }
 

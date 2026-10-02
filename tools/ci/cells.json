@@ -51,7 +51,7 @@
       "id": "reference_node-esp32c6-normal-off-app_object", "app": "reference_node", "target": "esp32c6",
       "overlay": ["CONFIG_ROUTELOOM_APP_OBJECT_TRANSFER=y"],
       "expect": ["CONFIG_ROUTELOOM_APP_OBJECT_RX_SLOTS=2", "CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM=y", "CONFIG_ROUTELOOM_RESOURCE_PROFILE_RELAY=y"],
-      "budget": {"app_bin_max": 1255328, "static_free_min": 154341, "rtc_used_max": 164}
+      "budget": {"app_bin_max": 1255440, "static_free_min": 154341, "rtc_used_max": 164}
     },
     {
       "id": "bench_node-esp32c3-normal-off-off", "app": "bench_node", "target": "esp32c3",

@@ -155,8 +155,8 @@ No RAM floor, RTC budget or drift allowance changes.
 
 | C3 bridge | app.bin before → after | static RAM before → after | static free after |
 |---|---:|---:|---:|
-| OFF | 1,220,464 → 1,220,688 B (+224 B) | 219,052 → 219,052 B (0 B) | 52,896 B |
-| ON | 1,231,648 → 1,231,872 B (+224 B) | 229,468 → 229,388 B (−80 B) | 42,560 B |
+| OFF | 1,220,464 → 1,220,800 B (+336 B) | 219,052 → 219,052 B (0 B) | 52,896 B |
+| ON | 1,231,648 → 1,231,968 B (+320 B) | 229,468 → 229,388 B (−80 B) | 42,560 B |
 
 ON adds 10,336 B of static RAM over OFF, 5,216 B above the 5 KiB target.
 The receiver now uses its reserved completion record for identity and manifest
@@ -168,11 +168,12 @@ also holds an immutable loan until its result. Sharing them would require an
 explicit loan/return contract across those lifetimes. Neither heap/stack
 relocation nor shortened dedup retention is used to meet the target.
 
-The 224 B flash increase makes AppObject yield to ready foreground flows,
+The flash increase makes AppObject yield to ready foreground flows,
 including at OFF relays. The real-Owner two-hop comparison measures Reliable
-p99 at 200 → 225 ms (+12.5%), with no control timeout or End failure increase;
+p99 at 200 → 200 ms for PR and 200 → 225 ms (+12.5%) for ten nightly objects,
+with no control timeout or End failure increase;
 these are host-harness measurements, not RF qualification. H3 remains separate.
 
-The C6 reference ON cell measures app.bin 1,255,328 B, static free 156,253 B
+The C6 reference ON cell measures app.bin 1,255,440 B, static free 156,253 B
 and RTC 136 B after main integration. Its flash soft baseline is updated from
 1,252,784 B to that measured value; RAM/RTC budgets and drift are unchanged.
