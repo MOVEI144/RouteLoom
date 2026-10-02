@@ -1,0 +1,1 @@
+- Delay gateway HostLink authentication completion while local membership boot checks and MeshNode startup are pending, preventing post-reset sends from being rejected with `node is not started`. USB remains available for unassigned and recovery states. The stricter repeated-reset first-delivery regression still exposes a separate end-session recovery deadline failure.

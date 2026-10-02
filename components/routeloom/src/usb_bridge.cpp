@@ -351,6 +351,12 @@ void UsbBridge::poll(const MonotonicMs now_ms) noexcept {
       now_ms - state_entered_ms_ > kHandshakeTimeoutMs) {
     reset_session_state();
   }
+  if (state_ == SessionState::Authenticating &&
+      (join_owner_ == nullptr || join_owner_->host_session_ready())) {
+    SessionProof proof = derive_proof();
+    begin_auth_session(proof.auth_ok_tag, now_ms);
+    clear_session_proof(proof);
+  }
   // Gateway lane: resolved endpoints become sends, outstanding ingress is
   // resent once inside its ack window, and stale slots expire.
   pump_gateway(now_ms);
@@ -538,7 +544,14 @@ void UsbBridge::handle_auth(const UsbFrame& frame, const MonotonicMs now_ms) noe
   // A valid AUTH supersedes queued pre-auth errors. Both AUTH_OK and the
   // initial receive grant must fit before the session becomes active.
   control_q_.clear();
-  begin_auth_session(proof.auth_ok_tag, now_ms);
+  // A restored member's worker may still be verifying its durable site.
+  // Keep sends on the host until the Owner has started the mesh node.
+  if (join_owner_ != nullptr && !join_owner_->host_session_ready()) {
+    state_ = SessionState::Authenticating;
+    state_entered_ms_ = now_ms;
+  } else {
+    begin_auth_session(proof.auth_ok_tag, now_ms);
+  }
   clear_session_proof(proof);
 }
 
