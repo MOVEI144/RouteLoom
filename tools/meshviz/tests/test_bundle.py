@@ -792,6 +792,26 @@ class BundleTests(unittest.TestCase):
                                      'review-c6'], env=env, capture_output=True)
             self.assertEqual(result.returncode, 7, result.stderr.decode())
 
+    def test_builder_accepts_negative_hil_rssi_only(self):
+        script = Path(__file__).resolve().parents[1] / 'build_bundle.sh'
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            rsync = root / 'rsync'
+            rsync.write_text('#!/bin/sh\nexit 7\n')
+            rsync.chmod(0o755)
+            env = {**os.environ, 'PATH': f'{root}:{os.environ["PATH"]}'}
+            for option, code in (
+                    ('CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI=-80', 7),
+                    ('CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI=-85', 7),
+                    ('CONFIG_ROUTELOOM_HIL_RX_DROP_PERMILLE=200', 7),
+                    ('CONFIG_ROUTELOOM_TX_POWER_QDBM=-8', 2),
+                    ('CONFIG_ROUTELOOM_HIL_RX_MIN_RSSI=-80\nCONFIG_SECURE_BOOT=y', 2)):
+                with self.subTest(option=option):
+                    result = subprocess.run([str(script), 'reference_node', 'esp32c3',
+                                             str(root / 'bundle'), str(root / 'key'),
+                                             'test', option], env=env, capture_output=True)
+                    self.assertEqual(result.returncode, code, result.stderr.decode())
+
     def test_hil_quickstart_uses_current_bundle_path(self):
         root = Path(__file__).resolve().parents[3]
         guide = (root / 'docs/hil.md').read_text()
