@@ -318,16 +318,10 @@ fn rejoin_history(occupied: bool, worker: bool) {
     );
 }
 
-#[test]
-fn mesh_hfinal_expired_terminal_pins_admit_before_sweep() {
-    let mut world = MeshWorld::start("hfinal-expiry", Switch::direct())
-        .expect("HFINAL requires real Owner peers");
-    world.pump_until(9000, all_ready);
-    assert!(all_ready(&world.snaps));
+fn fill_terminal_quota(world: &mut MeshWorld) {
     let source = world.macs[1];
     let destination = world.macs[0];
     let mut pins = 0;
-    // Fill the unchanged small, relay or full profile terminal quota.
     for _ in 0..224 {
         let frame =
             world.peers[1].craft_frame(testkit::GATEWAY, testkit::GATEWAY, WIRE_DATA, 0, 0, b"pin");
@@ -338,6 +332,76 @@ fn mesh_hfinal_expired_terminal_pins_admit_before_sweep() {
         pins += world.peers[0].receipts().len();
     }
     assert!(matches!(pins, 28 | 84 | 224), "terminal quota: {pins}");
+}
+
+#[test]
+fn mesh_hfinal_terminal_quota_retry_preserves_end_replay() {
+    let mut world = MeshWorld::start("hfinal-quota-retry", Switch::direct())
+        .expect("HFINAL requires real Owner peers");
+    world.pump_until(9000, all_ready);
+    assert!(all_ready(&world.snaps));
+    let filled_at = world.now;
+    fill_terminal_quota(&mut world);
+    let source = world.macs[1];
+    let destination = world.macs[0];
+    // Refuse a fresh End envelope while every pin is still retained.
+    world.now = filled_at + 34_990;
+    for peer in &mut world.peers {
+        assert_eq!(peer.sleep(4, world.now, 0).0, 0);
+    }
+    let frame = world.peers[1].craft_frame(
+        testkit::GATEWAY,
+        testkit::GATEWAY,
+        WIRE_DATA,
+        0,
+        0,
+        b"quota-retry",
+    );
+    world.peers[0].send_rx(&source, &destination, &frame);
+    world.step(1);
+    assert!(
+        world.peers[0].receipts().is_empty(),
+        "full quota refuses before expiry"
+    );
+    // The first pin expires at filled_at + 35_001 ms. The same End
+    // envelope must remain admissible after legitimate quota recovery.
+    for _ in 0..500 {
+        world.step(1);
+    }
+    // A bad End tag under a valid Link wrapper must release its reservation
+    // and leave the End counter available for the authenticated retry.
+    let invalid = world.peers[1].retry_crafted_frame(4_499, true);
+    world.peers[0].send_rx(&source, &destination, &invalid);
+    world.step(1);
+    assert!(world.peers[0].receipts().is_empty());
+    let retry = world.peers[1].retry_crafted_frame(4_498, false);
+    world.peers[0].send_rx(&source, &destination, &retry);
+    world.step(1);
+    let receipts = world.peers[0].receipts();
+    assert_eq!(
+        receipts.len(),
+        1,
+        "same End counter retries after quota expiry"
+    );
+    assert_eq!(receipts[0].3, b"quota-retry");
+    let duplicate = world.peers[1].retry_crafted_frame(4_497, false);
+    world.peers[0].send_rx(&source, &destination, &duplicate);
+    world.step(1);
+    assert!(
+        world.peers[0].receipts().is_empty(),
+        "accepted retry delivers once"
+    );
+}
+
+#[test]
+fn mesh_hfinal_expired_terminal_pins_admit_before_sweep() {
+    let mut world = MeshWorld::start("hfinal-expiry", Switch::direct())
+        .expect("HFINAL requires real Owner peers");
+    world.pump_until(9000, all_ready);
+    assert!(all_ready(&world.snaps));
+    fill_terminal_quota(&mut world);
+    let source = world.macs[1];
+    let destination = world.macs[0];
     // Advance the platform clock without an Owner poll, then deliver a fresh
     // authenticated RX. Its admission precedes the next periodic dedup sweep.
     world.now += 35_000;

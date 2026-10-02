@@ -60,6 +60,8 @@
 //                              Device::gateway(), then send once Ready;
 //                              the snapshot tail reports both outcomes
 //   Q                          quit (exit 0)
+//   O <remaining_ms u32le><corrupt_end u8>
+//                              retry the last End envelope with a fresh Link counter
 //   O <next_hop u64le><dst u64le><type u8><minor u8><traffic u8><payload>
 //                              seal one end-protected frame of any type
 //                              (P04: extension types, newer minors) with
@@ -2319,6 +2321,22 @@ int main(int argc, char** argv) {
         break;
       }
       case 'O': {
+        static wire::LinkOpenedFrame last_crafted{};
+        if (length == 6) {
+          std::uint32_t remaining = 0;
+          for (unsigned i = 0; i < 4; ++i) remaining |= std::uint32_t{payload[1 + i]} << (8 * i);
+          wire::LinkOpenedFrame retry = last_crafted;
+          if (payload[5] > 1 || retry.protected_payload_size == 0) fatal("bad crafted retry");
+          if (payload[5] != 0) retry.protected_payload[retry.protected_payload_size - 1] ^= 1;
+          wire::EncodedFrame encoded{};
+          status = wire::retry_local(retry, retry.header.next_hop, remaining,
+                                    owner.coordinator().session_provider(), encoded);
+          if (!status) fatal(status.detail);
+          Bytes reply{'o'};
+          reply.insert(reply.end(), encoded.bytes.begin(), encoded.bytes.begin() + encoded.size);
+          write_frame(reply);
+          break;
+        }
         if (length < 20 || length - 20 > kMaxApplicationPayload) fatal("bad O");
         NodeId next_hop = 0, dst = 0;
         for (int i = 0; i < 8; ++i) {
@@ -2343,7 +2361,7 @@ int main(int argc, char** argv) {
         plain.payload_size = length - 20;
         std::memcpy(plain.payload.data(), payload.data() + 20, plain.payload_size);
         wire::EncodedFrame encoded{};
-        status = wire::encode_new(plain, owner.coordinator().session_provider(), encoded);
+        status = wire::encode_new(plain, owner.coordinator().session_provider(), encoded, &last_crafted);
         if (!status) fatal(status.detail);
         Bytes reply{'o'};
         reply.insert(reply.end(), encoded.bytes.begin(),

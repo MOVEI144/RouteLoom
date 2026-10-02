@@ -1243,6 +1243,17 @@ impl MeshPeer {
         reply[1..].to_vec()
     }
 
+    /// Rewrap the last crafted End envelope with a fresh Link counter.
+    pub(super) fn retry_crafted_frame(&mut self, remaining_ms: u32, corrupt_end: bool) -> Vec<u8> {
+        let mut command = vec![b'O'];
+        command.extend_from_slice(&remaining_ms.to_le_bytes());
+        command.push(u8::from(corrupt_end));
+        self.send(&command);
+        let reply = self.recv().expect("crafted retry reply");
+        assert_eq!(reply[0], b'o');
+        reply[1..].to_vec()
+    }
+
     /// Arms one fault at the next write of NVS record `key` (F01/F02):
     /// 0 fails it once, 1 cuts power before it lands, 2 cuts power after
     /// its commit. A cut respawns the peer from the saved image.

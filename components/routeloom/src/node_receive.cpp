@@ -257,21 +257,10 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       observer_.on_diagnostic("ADMISSION_NO_ACK_SLOT", peer, &frame.header.message);
       return;
     }
-    // Probe reply capacity before opening End: a full queue must not
-    // consume its replay counter and poison the sender's same-round retry.
-    wire::PlainFrame plain{};
-    const auto status = wire::open_end(frame, config_.node, security_, plain);
-    if (!status) {
-      note_end_rx_refusal(status, frame, peer);
-      return;
-    }
     if (!rx.valid) {
       refuse_without_binding(peer, frame.header, "ADMISSION_NO_BINDING",
                              now_ms);
       return;
-    }
-    if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
-      observer_.on_verified_contact(frame.header.origin, now_ms);
     }
     // Lease first: fully rollbackable, so a later refusal leaves no victim.
     AdmissionReservation res{};
@@ -300,6 +289,36 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       observer_.on_diagnostic("ADMISSION_NO_ACK_SLOT", peer, &frame.header.message);
       return;
     }
+    // Terminal admission (sdk-completion/02 §2.3b): the delivered-DATA pin —
+    // never evictable, bounded by the transit reserve. A refusal is already
+    // counted + diagnosed inside allocate_dedup (DEDUP_OVERFLOW /
+    // DEDUP_TERMINAL_RESERVE); the sender still gets an honest BUSY/drop.
+    auto* entry = allocate_dedup(key, FrameType::Data, frame.header.delivery_round,
+                                 DedupPhase::Terminal, peer,
+                                 frame.header.remaining_deadline_ms, now_ms);
+    if (entry == nullptr) {
+      // Bounded dedup exhaustion is a capacity failure: the sender gets a
+      // pre-acceptance BUSY (when a reply slot is affordable) instead of a
+      // silent black hole.
+      res.rollback();
+      emit_busy_or_drop(peer, frame.header,
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                        rx, now_ms);
+      return;
+    }
+    res.dedup = entry;
+    // Reserve dedup and reply capacity before opening End: a refusal must
+    // not consume the counter needed by the sender's same-round retry.
+    // A failed authentication rolls these reservations back.
+    wire::PlainFrame plain{};
+    const auto status = wire::open_end(frame, config_.node, security_, plain);
+    if (!status) {
+      note_end_rx_refusal(status, frame, peer);
+      return;
+    }
+    if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
+      observer_.on_verified_contact(frame.header.origin, now_ms);
+    }
     // APPLIED (01 §1.4): the result record is part of admission — accepted
     // work must always have a place to store its verdict. An existing
     // record covers re-admission after the dedup record expired while the
@@ -325,24 +344,6 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
         res.applied_new = true;
       }
     }
-    // Terminal admission (sdk-completion/02 §2.3b): the delivered-DATA pin —
-    // never evictable, bounded by the transit reserve. A refusal is already
-    // counted + diagnosed inside allocate_dedup (DEDUP_OVERFLOW /
-    // DEDUP_TERMINAL_RESERVE); the sender still gets an honest BUSY/drop.
-    auto* entry = allocate_dedup(key, FrameType::Data, frame.header.delivery_round,
-                                 DedupPhase::Terminal, peer,
-                                 frame.header.remaining_deadline_ms, now_ms);
-    if (entry == nullptr) {
-      // Bounded dedup exhaustion is a capacity failure: the sender gets a
-      // pre-acceptance BUSY (when a reply slot is affordable) instead of a
-      // silent black hole.
-      res.rollback();
-      emit_busy_or_drop(peer, frame.header,
-                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
-                        rx, now_ms);
-      return;
-    }
-    res.dedup = entry;
     if (!queue_end_receipt(frame.header, res.txn, now_ms, entry)) {
       res.rollback();
       emit_busy_or_drop(peer, frame.header,
