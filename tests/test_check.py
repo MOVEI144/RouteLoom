@@ -504,9 +504,9 @@ class Scenarios(unittest.TestCase):
         self.assertTrue(any("mesh_j08_k1b_pull_answers_dropped" in c for c in cases[2]))
         all_cases = set.union(*cases)
         self.assertIn("site::owner_mesh::consumer::mesh_k01_display_direct_smoke", all_cases)
-        for row_id in ("K01", "K01-D", "K03", "M01-T3"):
+        for row_id in ("K01", "K01-D", "K03", "M08", "M01-T3"):
             for case in check.rust_cases(self.rows(row_id)[0]["test"]):
-                self.assertNotIn(case, all_cases)
+                self.assertIn(case, all_cases)
         self.assertIn("site::owner_mesh::kg::mesh_k05_cursor_replay_gap_and_epoch_change",
                       all_cases)
 

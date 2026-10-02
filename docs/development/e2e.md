@@ -52,21 +52,23 @@ These runs exceeded ten minutes and do not establish the CI budget. The
 redistributed 26/33/30-case layout preserves the same 89 cases; its wall time
 and the prepare job still need measurement on GitHub runners.
 
-K01/K03/K05 retain ignored reproducers: authenticated HelloAck reports an
-epoch-qualified network that API1 rejects as outside wire-v1's range
-(#195/#127). G7-RX proves the authenticated receive path into the production
-daemon store, and explicitly checks that API rejection. M08 retains a smaller
-three-node reproducer for loss of accepted concurrent Reliable sends (#54/#46).
-K02 retains a disabled CTest for excessive management airtime (#59). To reproduce
-these failures, provide both peer paths and use Rust `--ignored` with the exact
-case from the catalog, or execute `build/tests/cpp/routeloom_periodic_load_tests`
-directly. Do not interpret the later, blocked assertions as executed evidence.
-The mesh daemon calls the production API1 handler on the virtual clock; the
-existing joiner interop suite covers socket framing. The blocked periodic-load
-assertions do not establish a complete socket-to-radio campaign.
-V2-15/16/18/19 feature-dependent rows stay pending until their APIs and peer
-commands merge. Product timers, capacity limits and acceptance thresholds are
-unchanged.
+M08, K01/K03/K05 and M01-T3 run through real Owners. M08 checks the
+7/8/9 admission boundary, accounts for every burst request, verifies each
+Delivered result against a unique receive, and requires at least 99% sender
+receipts, active membership and a 30-second queue drain. K01 covers two/three
+hops, 127-byte content, periodic status/events and seeded noise. K03 exercises
+ALL group delivery, admission-response replay and a full gateway delivery
+table affecting the last destination. K05 additionally uses the documented
+consumer and production API1 socket for durable cursor restart coverage.
+
+K02 runs the 31-node product-timer model with churn, continuous view freshness
+and the authoritative mean per-node/total management airtime limits. Stable
+metric/sequence changes use periodic advertisements; topology repair stays
+triggered. The mesh daemon calls the production API1 handler on its virtual
+clock; the consumer cases cover socket framing. Nightly five/32-node and
+30-minute configurations are dry-run coverage until executed. The 24-hour,
+sleep and object variants remain with V2-15/16/18/19. No dry-run establishes
+radio or on-board acceptance.
 
 ## HIL plans
 
