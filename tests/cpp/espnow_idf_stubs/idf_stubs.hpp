@@ -61,6 +61,9 @@ struct TxFrame {
 bool take_tx(TxFrame& out) noexcept;
 std::size_t tx_pending() noexcept;
 unsigned tx_overruns() noexcept;
+// Run after driver admission, before esp_now_send returns, to model a
+// Wi-Fi task preempting Owner with RX and/or a completion.
+void set_send_hook(void (*hook)(void*), void* context) noexcept;
 
 // Called after every successful xQueueReceive (nullptr clears): lets a
 // test refill a queue while the Owner drains it, as the radio does.

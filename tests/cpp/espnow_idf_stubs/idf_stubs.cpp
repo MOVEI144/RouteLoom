@@ -80,6 +80,8 @@ unsigned g_send_outstanding = 0;
 unsigned g_tx_overruns = 0;
 
 void (*g_receive_hook)(void*) = nullptr;
+void (*g_send_hook)(void*) = nullptr;
+void* g_send_context = nullptr;
 void* g_receive_hook_context = nullptr;
 unsigned g_last_peek_ticks = 0;
 char g_logs[8192] = {};
@@ -98,6 +100,8 @@ struct FakeQueue {
 namespace idf_stub {
 
 void reset() noexcept {
+  g_send_hook = nullptr;
+  g_send_context = nullptr;
   g_random = 0;
   g_random_calls = 0;
   static const std::uint8_t kDefaultMac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
@@ -150,6 +154,11 @@ bool board_rf_before_wifi(int antenna_level) noexcept {
 void set_receive_hook(void (*hook)(void*), void* context) noexcept {
   g_receive_hook = hook;
   g_receive_hook_context = context;
+}
+
+void set_send_hook(void (*hook)(void*), void* context) noexcept {
+  g_send_hook = hook;
+  g_send_context = context;
 }
 
 unsigned last_peek_ticks() noexcept { return g_last_peek_ticks; }
@@ -491,6 +500,7 @@ esp_err_t esp_now_send(const uint8_t* peer_addr, const uint8_t* data,
   }
   ++g_send_outstanding;
   ++g_send_count;
+  if (g_send_hook != nullptr) g_send_hook(g_send_context);
   return ESP_OK;
 }
 

@@ -300,6 +300,19 @@ target_compile_definitions(routeloom_espnow_runtime_tests PRIVATE
     CONFIG_ROUTELOOM_TRACE=1 CONFIG_ROUTELOOM_HIL_HEAP_TELEMETRY=1)
 add_test(NAME routeloom_espnow_runtime_tests COMMAND routeloom_espnow_runtime_tests)
 
+foreach(trace IN ITEMS 0 1)
+  set(callback_test routeloom_espnow_callback_order_trace${trace}_tests)
+  add_executable(${callback_test} test_espnow_callback_order.cpp
+      espnow_idf_stubs/idf_stubs.cpp
+      ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp)
+  target_link_libraries(${callback_test} PRIVATE routeloom_core)
+  target_include_directories(${callback_test} PRIVATE espnow_idf_stubs
+      ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+  target_compile_definitions(${callback_test} PRIVATE CONFIG_ROUTELOOM_TRACE=${trace})
+  target_compile_options(${callback_test} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME ${callback_test} COMMAND ${callback_test})
+endforeach()
+
 foreach(mode IN ITEMS empty filtered)
   set(hil_test routeloom_hil_rx_${mode}_tests)
   add_executable(${hil_test} test_hil_rx_allow_list.cpp espnow_idf_stubs/idf_stubs.cpp

@@ -349,8 +349,9 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   MonotonicMs next_deadline(MonotonicMs now) const noexcept;
   // Pops the pending result (NotFound when empty).
   Status take_result(HandshakeResult& out) noexcept;
-  // A successful transport admission of responder m4 permits the final
-  // session install. A refused send leaves the flight pending for retry.
+  // Transport admission charges routed initiator m1/m3 against the resend
+  // budget and permits responder m4's final session install. Refusal leaves
+  // the flight pending for retry within its original deadline.
   Status accept_send(std::uint32_t token, std::uint8_t phase,
                      std::uint8_t step) noexcept;
   Status cancel(NodeId peer, HandshakeCancelReason reason) noexcept;
