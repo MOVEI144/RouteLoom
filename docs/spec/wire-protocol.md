@@ -157,6 +157,6 @@ ACK statusはIncomplete=0、Complete=1、Busy=2、NoBuffer=3、Conflict=4、Expi
 
 送信windowは1、同一frame最大5送信。初回ACK待ちは実送信のhop結果後に開始し、1秒から指数backoff最大4秒、±10% jitter。全体期限と10秒無進捗期限を優先する。受付前のBusy ACKには同じid／loanで1〜4秒のbackoff（±10% jitter）後にSTARTを自動再試行する。認証済みBusyは送信側の無進捗時計を更新するが、元の全体期限は延長しない。受付ACK後に遅れて届いたBusyは無視する。各typed frameのTTLは最大4秒。START／CHUNKは送信側の残りobject期限を超えない。新Bulkのqueue admissionは既存80% watermarkで拒否する。object START／CHUNK／ACKは全て既存Work ledgerに課金し、送信nodeごとの保守的LRモデルで50 ms/s、burst一frameにpacingする。OFF中継とhop再送にも実dispatch時に同じ予算を適用する（RF実測のairtimeではない）。
 
-制御のqueueが空になるまでobjectのdispatchを止める（送信windowやretry holdで待っている制御も含む）。制御の送信後もhop／end receipt待ちが終わるまで停止を続ける。HOP_ACCEPTは既存の予約laneで先に処理し、経路維持trafficもobjectより先に送る。
+制御のqueueが空になるまでobjectのdispatchを止める（送信windowやretry holdで待っている制御も含む）。制御の送信後もhop／end receipt待ちが終わるまで停止を続ける。HOP_ACCEPTは既存の予約laneで先に処理し、経路維持trafficもobjectより先に送る。objectを制御優先とairtime pacingで意図的に待たせた時間は、next-hopの混雑コストから除く。telemetryのenqueueからradio提出までの実queue遅延には、その待ち時間も含める。
 
 受付時にpayloadを持たない完了記録12枠の一つを予約し、最初の期限＋30秒まで保持する。同じSTARTには結果ACKを再返送し、異内容はConflict。USBなどの通知先がBusyの間、完成した受信loanは元の期限内で保持し、通知後すぐ組立枠を解放し、Complete ACKを送る。sourceごとのboot／context／highest admitted idのfloorは暗号context退役まで保持し、記録のない旧idはExpiredとして再通知しない。receiver再起動を跨ぐexactly-onceはアプリの永続IDが担当する。goldenは[protocol/app-object-golden](../../protocol/app-object-golden)。

@@ -344,6 +344,11 @@ MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
         }
         if (head->not_before_ms > now_ms ||
             (object && (now_ms < node.object_send_after_ms_ || foreground_pending))) {
+          if (object) {
+            // Deliberate spare-airtime holds are not peer congestion.
+            head->not_before_ms = std::max(head->not_before_ms,
+                                           std::max(now_ms, node.object_send_after_ms_));
+          }
           // Link-retry jitter hold (radio.md §8): the job waits for its
           // decorrelation delay — skipped like a window-blocked head and
           // revisited on a later pass.

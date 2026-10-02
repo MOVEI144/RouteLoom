@@ -1,17 +1,32 @@
 use super::*;
 
+fn next_hops(world: &mut MeshWorld) -> Vec<u64> {
+    // Issue all read-only route queries before waiting on the peers.
+    for (index, peer) in world.peers.iter_mut().enumerate() {
+        let destination = if index == 0 {
+            world.nodes[1]
+        } else {
+            testkit::GATEWAY
+        };
+        let mut command = [b'v'; 9];
+        command[1..].copy_from_slice(&destination.to_le_bytes());
+        peer.send(&command);
+    }
+    world
+        .peers
+        .iter_mut()
+        .map(|peer| {
+            let reply = peer.recv().expect("route selection");
+            assert_eq!(reply[0], b'v');
+            assert_eq!(reply.len(), 9);
+            u64::from_le_bytes(reply[1..].try_into().unwrap())
+        })
+        .collect()
+}
+
 fn control_load(world: &mut MeshWorld, object_bytes: Option<usize>) -> (u64, u32) {
     let start = world.now;
-    let hops: Vec<_> = (0..world.peers.len())
-        .map(|peer| {
-            let destination = if peer == 0 {
-                world.nodes[1]
-            } else {
-                testkit::GATEWAY
-            };
-            world.peers[peer].next_hop(destination)
-        })
-        .collect();
+    let hops = next_hops(world);
     let timeouts: Vec<_> = world
         .snaps
         .iter()
@@ -64,19 +79,9 @@ fn control_load(world: &mut MeshWorld, object_bytes: Option<usize>) -> (u64, u32
             world.peers[0].app_send(world.nodes[1], b"control");
             control_pending = Some((world.now, world.snaps[1].rx_count, last));
             next_control += 1000;
-            for (index, hop) in hops.iter().enumerate() {
-                assert_eq!(
-                    world.peers[index].next_hop(if index == 0 {
-                        world.nodes[1]
-                    } else {
-                        testkit::GATEWAY
-                    }),
-                    *hop,
-                    "route flap"
-                );
-            }
         }
         world.step(5);
+        assert_eq!(next_hops(world), hops, "route flap");
         world.usb_host.object_frames.clear();
         if let Some((sent, received, last)) = control_pending {
             if world.snaps[1].rx_count == received + 1
@@ -133,8 +138,7 @@ fn control_load(world: &mut MeshWorld, object_bytes: Option<usize>) -> (u64, u32
 #[test]
 #[ignore = "requires ROUTELOOM_APP_OBJECT_TRANSFER=ON real Owner mesh peer"]
 fn mesh_m10_immediate_objects_with_1hz_control() {
-    let mut regressions = Vec::new();
-    for (two_hop, bytes) in [(false, 2048), (true, 2048), (false, 4096)] {
+    for (two_hop, bytes) in [(true, 2048), (false, 2048), (false, 4096)] {
         let mut p99 = Vec::new();
         for with_object in [false, true] {
             let switch = if two_hop {
@@ -145,19 +149,19 @@ fn mesh_m10_immediate_objects_with_1hz_control() {
             let mut world = mesh::route_loss_world("m10-immediate", switch, two_hop)
                 .expect("M10 requires real Owner peers");
             assert_eq!(world.peers[0].object_buffer(), 0);
-            for _ in 0..30 {
-                mesh::deliver_each(&mut world, 1, 0, 1, b"warm");
-                for _ in 0..200 {
-                    world.step(5);
-                }
-            }
             // Model a 10 ms LR frame/driver turn independently of the 5 ms
-            // Owner clock. A zero-airtime switch measures tick quantisation.
+            // Owner clock. Warm the RTT estimator under the same delays.
             for row in &mut world.switch.delay_ms {
                 row.fill(10);
             }
             for row in &mut world.switch.callback_delay_ms {
                 row.fill(10);
+            }
+            for _ in 0..30 {
+                mesh::deliver_each(&mut world, 1, 0, 1, b"warm");
+                for _ in 0..200 {
+                    world.step(5);
+                }
             }
             let (latency, delivered) = control_load(&mut world, with_object.then_some(bytes));
             eprintln!(
@@ -166,12 +170,9 @@ fn mesh_m10_immediate_objects_with_1hz_control() {
             );
             p99.push(latency);
         }
-        if p99[1] * 100 > p99[0] * 120 {
-            regressions.push((two_hop, bytes, p99));
-        }
+        assert!(
+            p99[1] * 100 <= p99[0] * 120,
+            "control p99 increase exceeds 20%: two_hop={two_hop} bytes={bytes} p99={p99:?}"
+        );
     }
-    assert!(
-        regressions.is_empty(),
-        "control p99 increase exceeds 20%: {regressions:?}"
-    );
 }
