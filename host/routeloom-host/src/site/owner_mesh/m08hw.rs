@@ -2,7 +2,7 @@
 
 #[test]
 fn mesh_m08hw_contention_within_terminal_quota() {
-    super::uplink::star_burst(4, false, true);
+    super::uplink::star_burst(4, true, true);
 }
 
 #[test]

@@ -54,6 +54,11 @@ pub(super) fn star_burst(count: u8, small: bool, contention: bool) {
         .collect();
     for _ in 0..30_000 {
         world.step(1);
+        if contention && world.now >= world.owner_blocked_until[0] {
+            // Model a 25 ms gateway pump cadence throughout the burst, while
+            // driver callbacks continue to enqueue between Owner passes.
+            world.owner_blocked_until[0] = world.now + 25;
+        }
     }
     let received = world.peers[0].receipts();
     let keys: std::collections::BTreeSet<_> = received
@@ -64,7 +69,7 @@ pub(super) fn star_burst(count: u8, small: bool, contention: bool) {
     if contention {
         assert!(world.switch.collision_dropped > 0, "contention fault fired");
         eprintln!(
-            "M08 contention: collision_dropped={} callback_delay=10ms owner_hold=25ms",
+            "M08 contention: collision_dropped={} callback_delay=10ms owner_period=25ms",
             world.switch.collision_dropped
         );
     } else {

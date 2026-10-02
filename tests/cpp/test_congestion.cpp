@@ -1458,7 +1458,7 @@ void test_link_retry_jitter() {
   drive_tx(h, 1, data.sequence, 1);
   h.now += 70;   // awaiting deadline crossed
   h.step(1);     // expiry processed -> retry re-queued with jitter
-  // The deterministic first jitter on node 1 is nonzero (17 ms): at a
+  // The deterministic first jitter on node 1 is nonzero: at a
   // frozen clock the retry stays queued, unlike the old immediate path.
   h.step(1);
   h.step(1);
@@ -1490,6 +1490,50 @@ void test_link_retry_jitter() {
   h2.now += 100;                             // not_before <= +100
   drive_tx(h2, 1, j2.sequence, 2);
   CHECK(h2.data_sights(j2.sequence) == 2);
+}
+
+// Nodes in the same modulo-21 class must recover from a simultaneous MAC
+// loss rather than selecting identical retry slots for their entire budget.
+void test_colliding_node_ids_recover() {
+  Harness h;
+  for (const NodeId id : {1ULL, 22ULL, 2ULL}) (void)h.add(id, 1, 2);
+  h.link(1, 2);
+  h.link(22, 2);
+  for (; h.now < 100; ++h.now) {
+    for (const NodeId id : {1ULL, 22ULL, 2ULL}) h.step(id);
+  }
+  MessageId first{}, second{};
+  CHECK_OK(h.at(1)->send(2, payload_view(), SendOptions{}, h.now, first));
+  CHECK_OK(h.at(22)->send(2, payload_view(), SendOptions{}, h.now, second));
+  unsigned collisions = 0;
+  for (; h.now < 500; ++h.now) {
+    for (const NodeId id : {1ULL, 22ULL, 2ULL}) h.at(id)->poll(h.now);
+    const auto* pending = h.net.first_pending();
+    FrameSight sight{};
+    if (pending != nullptr &&
+        sight_frame(ByteView{pending->frame.data(), pending->frame.size()}, sight) &&
+        sight.type == FrameType::Data) {
+      SimNetwork::Pending a{}, b{};
+      CHECK(h.net.pop_first_pending(a));
+      pending = h.net.first_pending();
+      if (pending != nullptr && pending->from != a.from && pending->to == a.to &&
+          sight_frame(ByteView{pending->frame.data(), pending->frame.size()}, sight) &&
+          sight.type == FrameType::Data) {
+        CHECK(h.net.pop_first_pending(b));
+        ++collisions;
+        CHECK_OK(h.at(a.from)->on_radio_tx_result(a.token, false, h.now));
+        CHECK_OK(h.at(b.from)->on_radio_tx_result(b.token, false, h.now));
+        continue;
+      }
+      CHECK_OK(h.net.enqueue(a.from, a.to, a.token,
+                            ByteView{a.frame.data(), a.frame.size()}));
+    }
+    h.net.flush(h.now);
+  }
+  CHECK(collisions > 0);
+  CHECK(h.at(1)->delivery(first).state == DeliveryState::Delivered);
+  CHECK(h.at(22)->delivery(second).state == DeliveryState::Delivered);
+  CHECK(h.observer(2)->messages.size() == 2);
 }
 
 // radio.md §8 (#45): the adaptive floor is also the config floor — a
@@ -1870,6 +1914,7 @@ int main() {
   test_retransmitted_exchange_not_rtt_sampled();
   test_telemetry_hop_rtt_validity_bit();
   test_link_retry_jitter();
+  test_colliding_node_ids_recover();
   test_hop_timeout_config_floor();
   test_charge_fixed_cost();
   test_airtime_ledger_domains();
