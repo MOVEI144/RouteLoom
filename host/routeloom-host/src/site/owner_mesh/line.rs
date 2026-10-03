@@ -94,7 +94,9 @@ fn pair(world: &mut MeshWorld, round: u32, gap_ms: u64) -> ([bool; 2], [Option<u
     }
     let mut received_ms = [None; 2];
     let start = world.now;
-    while world.now - start < 30000 {
+    // A 30 s lifetime expires between Owner pumps; allow its next 25 ms
+    // poll to publish the terminal outcome before inspecting the snapshot.
+    while world.now - start < 30025 {
         step(world);
         for (direction, &(from, _)) in submitted.iter().enumerate() {
             if received_ms[direction].is_none()
@@ -285,7 +287,7 @@ fn mesh_line_relay_reset_recovers() {
 }
 
 #[test]
-#[ignore = "V2-HFIX-LINE: contended relay reset still misses the 6s BOUND gate"]
+#[ignore = "V2-HFIX-LINE: contended relay reset still misses the delivery acceptance"]
 fn mesh_line_relay_reset_contention() {
     relay_reset(true);
 }
