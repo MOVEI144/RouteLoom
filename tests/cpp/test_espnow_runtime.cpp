@@ -631,6 +631,8 @@ void test_owner_wait_rounds_up_to_a_tick() {
   EspNowRuntime runtime(make_config(), security, observer);
   CHECK(runtime.initialize().ok());
   CHECK(runtime.start().ok());
+  runtime.wait_for_event(0);
+  CHECK(idf_stub::last_peek_ticks() == 1);
   runtime.wait_for_event(routeloom::kOwnerPollPeriodMs);
   CHECK(idf_stub::last_peek_ticks() == 1);
   runtime.wait_for_event(15);
@@ -663,6 +665,25 @@ void test_notification_keeps_external_and_racing_wakes() {
   const auto empty = runtime.owner_stats().empty_polls;
   runtime.poll_once();
   CHECK(runtime.owner_stats().empty_polls == empty);
+  runtime.stop();
+}
+
+void test_unknown_rx_does_not_wake_owner() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  runtime.bind_wake_task(xTaskGetCurrentTaskHandle());
+  idf_stub::enable_notify_clock();
+  const std::uint8_t junk = 0;
+  for (unsigned i = 0; i < 1000; ++i) {
+    CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), &junk, 1));
+    runtime.wait_for_event(0);
+  }
+  const auto stats = idf_stub::notify_wait_stats();
+  CHECK(stats.wakes == 0 && stats.blocks == 1000);
+  CHECK(runtime.unknown_peer_rx() == 1000);
   runtime.stop();
 }
 
@@ -1530,6 +1551,7 @@ void test_hil_rx_diagnostics_are_owner_serialized() {
 
 int main() {
   test_notification_keeps_external_and_racing_wakes();
+  test_unknown_rx_does_not_wake_owner();
   test_wake_budget_stops_radio_submissions();
   test_idle_deadline_poll_equivalence();
   test_active_deadline_noop();

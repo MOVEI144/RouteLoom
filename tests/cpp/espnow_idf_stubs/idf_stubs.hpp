@@ -72,6 +72,16 @@ void set_receive_hook(void (*hook)(void* context), void* context) noexcept;
 void set_notify_wait_hook(void (*hook)(void*), void* context) noexcept;
 // Ticks passed to the most recent blocking notification take (0 if signalled).
 unsigned last_peek_ticks() noexcept;
+// Opt-in virtual RTOS time: only a blocking wait advances the clock.
+// Owner passes charge their modeled CPU cost explicitly.
+struct NotifyWaitStats {
+  unsigned waits{0};
+  unsigned blocks{0};
+  unsigned wakes{0};
+  std::uint64_t max_running_us{0};
+};
+void enable_notify_clock() noexcept;
+NotifyWaitStats notify_wait_stats() noexcept;
 bool log_contains(const char* text) noexcept;
 void set_random(std::uint32_t value) noexcept;
 unsigned random_calls() noexcept;

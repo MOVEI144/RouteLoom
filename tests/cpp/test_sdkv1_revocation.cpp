@@ -1241,6 +1241,23 @@ void test_rrs_exchange_timeouts_and_demux() {
         StatusCode::InvalidArgument);
 }
 
+void test_gossip_deadline_respects_control_gap() {
+  for (const bool refuse : {false, true}) {
+    NodeFixture node{};
+    CHECK(node.provision(3, 16));
+    node.peer.sent.clear();
+    node.peer.refuse = refuse;
+    CHECK_OK(node.dispatch(LifecycleInput::PeerBound(stamp_for(kNodeB, 3)), 1000));
+    CHECK_OK(node.dispatch(LifecycleInput::PeerBound(stamp_for(kNodeC, 3)), 1000));
+    CHECK_OK(node.dispatch(LifecycleInput::Poll(), 1000));
+    CHECK(node.lifecycle.next_deadline() == 1000 + rrs_const::kGossipControlGapMs);
+    CHECK_OK(node.dispatch(LifecycleInput::Poll(), 1001));
+    CHECK(node.lifecycle.next_deadline() == 1000 + rrs_const::kGossipControlGapMs);
+    CHECK_OK(node.dispatch(LifecycleInput::Poll(), 1000 + rrs_const::kGossipControlGapMs));
+    CHECK(node.lifecycle.next_deadline() > 1000 + rrs_const::kGossipControlGapMs);
+  }
+}
+
 void test_rrs_backpressure_releases_sender() {
   // Exercise the real lifecycle's sole TX slot before the manifest and
   // between the manifest and chunks. A lost peer cannot block another peer.
@@ -1256,6 +1273,7 @@ void test_rrs_backpressure_releases_sender() {
                                                        {request.data(), request.size()}),
                            1000));
     CHECK_OK(node.dispatch(LifecycleInput::Poll(), 1001));
+    CHECK(node.lifecycle.next_deadline() > 1001);
     CHECK_OK(node.dispatch(LifecycleInput::Poll(), 1000 + rrs_const::kFetchWindowMs));
     node.peer.refuse = node.peer.refuse_chunks = false;
     node.peer.sent.clear();
@@ -3520,6 +3538,7 @@ int main() {
   test_rrs_exchange_roundtrip();
   test_rrs_exchange_timeouts_and_demux();
   test_rrs_backpressure_releases_sender();
+  test_gossip_deadline_respects_control_gap();
   test_owns_rrs_chunk_demux();
   test_reentry_is_busy_and_changelss();
   test_gossip_line_propagates();

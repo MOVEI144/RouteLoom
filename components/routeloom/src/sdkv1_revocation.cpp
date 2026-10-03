@@ -3,6 +3,7 @@
 // SelfRevoked/Recovering). See sdkv1_revocation.hpp.
 
 #include "routeloom/sdkv1_revocation.hpp"
+#include "routeloom/owner_pump.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -345,7 +346,7 @@ void RrsExchange::on_ack(const NodeId peer, const std::uint32_t binding,
     // The peer is progressing: rewind to its frontier and retransmit from
     // the next poll. Progress never consumes an attempt.
     tx_.sent = ack.received_len;
-    tx_.ack_deadline_ms = add_sat(now_ms, rrs_const::kAckTimeoutMs);
+    tx_.ack_deadline_ms = now_ms;
   }
 }
 
@@ -374,6 +375,9 @@ Status RrsExchange::publish(const NodeId dest, const std::uint32_t binding, cons
 }
 
 void RrsExchange::transmit_tx(const MonotonicMs now_ms) noexcept {
+  // While unsent, the existing ACK timestamp is the port retry deadline.
+  // Backpressure keeps the same bytes/attempt budget and absolute lifetime.
+  tx_.ack_deadline_ms = add_sat(now_ms, kOwnerPollPeriodMs);
   if (!tx_.manifest_sent) {
     autonomy::ControlObjectPayload manifest{};
     manifest.kind = autonomy::ControlObjectKind::RevocationSet;
@@ -429,7 +433,7 @@ void RrsExchange::poll(const MonotonicMs now_ms) noexcept {
     return;
   }
   if (!tx_.manifest_sent || tx_.sent < tx_.total_len) {
-    transmit_tx(now_ms);
+    if (now_ms >= tx_.ack_deadline_ms) transmit_tx(now_ms);
     return;
   }
   if (now_ms >= tx_.ack_deadline_ms) {
@@ -458,11 +462,10 @@ void RrsExchange::abort() noexcept {
 }
 
 MonotonicMs RrsExchange::next_deadline() const noexcept {
-  if (tx_.used && (!tx_.manifest_sent || tx_.sent < tx_.total_len)) return 0;
   MonotonicMs next = 0xFFFFFFFFFFFFFFFFULL;
   if (rx_.used) next = rx_.deadline_ms;
   if (tx_.used && tx_.deadline_ms < next) next = tx_.deadline_ms;
-  if (tx_.used && tx_.manifest_sent && tx_.sent >= tx_.total_len && tx_.ack_deadline_ms < next) {
+  if (tx_.used && tx_.ack_deadline_ms < next) {
     next = tx_.ack_deadline_ms;
   }
   return next;
@@ -733,9 +736,12 @@ MonotonicMs MembershipLifecycle::next_deadline() const noexcept {
   if (need_rrs() && next_get_allowed_ < next) next = next_get_allowed_;
   if (pending_ack_ && pending_ack_due_ < next) next = pending_ack_due_;
   if (fetch_outstanding_ && fetch_deadline_ < next) next = fetch_deadline_;
-  if (phase_ == LifecyclePhase::Active) {
+  if (phase_ == LifecyclePhase::Active && gossip_tx_enabled()) {
     for (const Neighbor& neighbor : neighbors_) {
-      if (neighbor.used && neighbor.notify_due < next) next = neighbor.notify_due;
+      // One peer per control gap, including refusals. Another peer's old
+      // notification cannot make work runnable while the gap is closed.
+      const MonotonicMs due = std::max(neighbor.notify_due, next_gossip_allowed_);
+      if (neighbor.used && due < next) next = due;
     }
   }
   const MonotonicMs exchange_due = exchange_.next_deadline();

@@ -1357,7 +1357,9 @@ bool EspNowRuntime::sleep_quiescent() const noexcept {
 }
 
 void EspNowRuntime::wait_for_event(const MonotonicMs timeout_ms) noexcept {
-  if (timeout_ms == 0) return;
+  // A due timer is not evidence of queued work: a blocked retry or an
+  // expiry reached during the pass must still release CPU to IDLE/worker.
+  // Staged events and racing notifications retain their immediate wake.
   if (wake_task_.load() == nullptr) bind_wake_task(xTaskGetCurrentTaskHandle());
   // Do not clear before inspecting staging: USB/post/worker queues belong
   // to the Device. The atomic blocking take consumes their notification
@@ -2768,10 +2770,7 @@ bool EspNowRuntime::classify_bootstrap(const std::uint8_t* data,
 void EspNowRuntime::enqueue_rx(
     const esp_now_recv_info_t* info, const std::uint8_t* data,
     const int length) noexcept {
-  struct WakeOnExit {
-    EspNowRuntime& runtime;
-    ~WakeOnExit() { runtime.notify_owner(); }
-  } wake{*this};
+  // Only retained input wakes Owner; filters and overflow add no runnable work.
   if (event_queue_ == nullptr || info == nullptr ||
       info->src_addr == nullptr || data == nullptr || length <= 0 ||
       length > static_cast<int>(kMaxEspNowBody)) {
@@ -2842,6 +2841,8 @@ void EspNowRuntime::enqueue_rx(
       portENTER_CRITICAL(&callback_lock_);
       ++bootstrap_rx_dropped_;
       portEXIT_CRITICAL(&callback_lock_);
+    } else {
+      notify_owner();
     }
     return;
   }
@@ -2896,6 +2897,8 @@ void EspNowRuntime::enqueue_rx(
     portENTER_CRITICAL(&callback_lock_);
     ++rx_dropped_;
     portEXIT_CRITICAL(&callback_lock_);
+  } else {
+    notify_owner();
   }
 }
 

@@ -1315,6 +1315,40 @@ void test_repair_demand_keeps_rediscovery_backoff() {
   CHECK(rediscoveries() - before <= 6);
 }
 
+// A re-authenticated responder can send its first probe before the
+// initiator installs the context. A lower-counter probe from that initiator
+// permits a prompt confirmation retry, while DATA remains gated on Result.
+void test_bound_older_peer_probe_retries_confirmation() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true);
+  Unit& b = world.add(2, 0xB2, true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+  world.medium.drop_wire = true;
+  CHECK_OK(a.engine.begin_discovery(world.medium.now));
+  world.run(500);
+  NeighborPhase phase{};
+  CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Bound);
+  BindingGeneration generation{};
+  CHECK(b.engine.binding_generation_of(a.node, generation));
+  CHECK(generation.value > 1);
+  autonomy::NeighborProbePayload probe{};
+  probe.binding_generation = BindingGeneration{generation.value - 1};
+  probe.probe_sequence = 903;
+  probe.sent_ms = world.medium.now;
+  probe.requested_lease_ms = 30000;
+  autonomy::EncodedPayload encoded{};
+  CHECK_OK(autonomy::neighbor_probe_encode(probe, encoded));
+  const auto before = b.port.count_wire(FrameType::NeighborProbe);
+  b.engine.on_wire_rx(a.mac, FrameType::NeighborProbe, encoded.view(), world.medium.now);
+  b.engine.poll(world.medium.now + 1);
+  CHECK(b.port.count_wire(FrameType::NeighborProbe) == before + 1);
+  CHECK(!b.engine.data_permitted(a.node));
+  CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Bound);
+}
+
 // An authenticated peer may have a lower local binding counter after an
 // independent re-authentication. Its probe still needs a Result carrying our
 // current generation so it can advance rather than losing its route.
@@ -2085,6 +2119,7 @@ int main() {
   test_stale_reprobe_recovers();
   test_repair_demand_emits_bounded_early_probe();
   test_repair_demand_keeps_rediscovery_backoff();
+  test_bound_older_peer_probe_retries_confirmation();
   test_older_peer_probe_gets_current_generation_result();
   test_stale_reprobe_bounded();
   test_stale_reprobe_never_targets_dead();

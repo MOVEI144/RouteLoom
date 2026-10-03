@@ -728,7 +728,16 @@ MonotonicMs SecurityCoordinator::next_deadline(const MonotonicMs now) const noex
         // the same mailbox. Completion/RX/TX wakes retry it, not a due-now
         // deadline that starves the executor. Keep real authority timers.
         const bool retry_port = deps_.crypto_worker == nullptr || deps_.crypto_worker->idle();
-        sooner(small().authority.next_deadline(retry_port));
+        const MonotonicMs authority_due = small().authority.next_deadline(retry_port);
+        // Zero denotes a carrier/ACK retry, not a timer. After a refused
+        // port send, allow the existing compatibility wait before retrying.
+        // Handshake, confirmation and retirement timers remain authoritative.
+        if (authority_due == 0) {
+          sooner(now > kJoinNoDeadline - 2 ? kJoinNoDeadline : now + 2);
+          sooner(small().authority.next_deadline(false));
+        } else {
+          sooner(authority_due);
+        }
       }
     }
   }
@@ -1905,7 +1914,8 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
         } else {
           JoinReply reply{};
           if (join_reply_decode(JoinCarrier::WireRelay, payload, reply).ok() &&
-              reply.lane == ObjectLane::EndSession) {
+              reply.lane == ObjectLane::EndSession &&
+              frame.meta.origin == member().end_tx_peer) {
             const auto due = member().end_tx.pending_mask();
             const auto outcome = member().end_tx.on_reply(reply, now);
             if ((outcome == JoinObjectSlot::ReplyOutcome::Progress &&
