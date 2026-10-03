@@ -149,7 +149,8 @@ struct SecurityCoordinatorTestAccess {
     return coordinator.pump_end_tx(now);
   }
   static Status acknowledge_end_prefix(SecurityCoordinator& coordinator,
-                                       std::uint16_t received, MonotonicMs now) noexcept {
+                                       std::uint16_t received, MonotonicMs now,
+                                       NodeId peer = sdkv1_test::kNode + 1) noexcept {
     JoinReply reply{};
     reply.lane = ObjectLane::EndSession;
     reply.phase = JoinAuthPhase::EdhocMessage;
@@ -159,6 +160,7 @@ struct SecurityCoordinatorTestAccess {
     reply.received = received;
     SecurityCoordinator::StagedFrame frame{};
     frame.type = FrameType::BootstrapReply;
+    frame.meta.origin = peer;
     std::size_t written = 0;
     const Status encoded = join_reply_encode(JoinCarrier::WireRelay, reply,
         {frame.payload.data(), frame.payload.size()}, written);
@@ -2984,6 +2986,10 @@ void test_end_chunks_progress_without_prefix_reply() {
                                      f.mesh.sends[1].bytes.size()}, chunk).ok());
     CHECK(chunk.offset == grid);
   }
+  CHECK(SecurityCoordinatorTestAccess::acknowledge_end_prefix(
+            coordinator, static_cast<std::uint16_t>(grid), now + 251, kNode + 2).ok());
+  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + 251).ok());
+  CHECK(f.mesh.sends.size() == 2);  // another peer cannot release this chunk's retry wait
   CHECK(SecurityCoordinatorTestAccess::acknowledge_end_prefix(
             coordinator, static_cast<std::uint16_t>(grid), now + 251).ok());
   CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + 251).ok());

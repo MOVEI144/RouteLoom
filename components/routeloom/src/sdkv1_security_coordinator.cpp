@@ -1914,7 +1914,8 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
         } else {
           JoinReply reply{};
           if (join_reply_decode(JoinCarrier::WireRelay, payload, reply).ok() &&
-              reply.lane == ObjectLane::EndSession) {
+              reply.lane == ObjectLane::EndSession &&
+              frame.meta.origin == member().end_tx_peer) {
             const auto due = member().end_tx.pending_mask();
             const auto outcome = member().end_tx.on_reply(reply, now);
             if ((outcome == JoinObjectSlot::ReplyOutcome::Progress &&

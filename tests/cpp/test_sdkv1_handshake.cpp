@@ -460,7 +460,7 @@ bool roundtrip_ok(From& from, To& to, const HandshakeResult& est_from,
                   const HandshakeResult& est_to) {
   if (est_from.tx_context_id == 0 || est_from.tx_context_id != est_to.rx_context_id) return false;
   SecurityContext seal_ctx{};
-  seal_ctx.scope = SecurityScope::Link;
+  seal_ctx.scope = est_from.scope;
   seal_ctx.network = kNet;
   seal_ctx.sender = from.self;
   seal_ctx.receiver = to.self;
@@ -478,7 +478,7 @@ bool roundtrip_ok(From& from, To& to, const HandshakeResult& est_from,
     return false;
   }
   SecurityContext open_ctx{};
-  open_ctx.scope = SecurityScope::Link;
+  open_ctx.scope = est_to.scope;
   open_ctx.network = kNet;
   open_ctx.sender = from.self;
   open_ctx.receiver = to.self;
@@ -833,10 +833,18 @@ void test_m1_park_yields_to_live_m4() {
 
 // Admitted m4 may be lost over the air. Its exact m3 retry must still
 // retrieve m4 while another peer uses the single crypto flight.
-void test_admitted_m4_releases_crypto_flight(const SecurityScope next_scope) {
+void test_admitted_m4_releases_crypto_flight(const SecurityScope next_scope,
+                                            const SecurityScope first_scope = SecurityScope::Link) {
   Pair pair = Pair::make();
   const FrozenLink ab = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
-  CHECK_OK(request_link(*pair.a, *pair.b, ab, kT0));
+  if (first_scope == SecurityScope::Link) {
+    CHECK_OK(request_link(*pair.a, *pair.b, ab, kT0));
+  } else {
+    HandshakeRequest first{};
+    first.scope = first_scope;
+    first.peer = kNodeB;
+    CHECK_OK(pair.a->engine.request(first, kT0));
+  }
   HandshakeResult m1{}, m2{}, m3{}, m4{}, out{};
   CHECK_OK(pair.a->engine.take_result(m1));
   CHECK_OK(deliver_to(*pair.b, *pair.a, m1, ab, kT0 + 50));
@@ -887,12 +895,12 @@ void test_admitted_m4_releases_crypto_flight(const SecurityScope next_scope) {
   CHECK_OK(pair.a->engine.take_result(out));
   CHECK(out.event == HandshakeEvent::Established);
   CHECK(pair.b->sink.installs == 1);
-  // Only a real authenticated frame in the new link proves m4 arrived.
+  // Only a real authenticated frame in the new context proves m4 arrived.
   // Neither the flight release nor C's m1 counts as that proof.
   CHECK(roundtrip_ok(*pair.a, *pair.b, out, established_b));
-  CHECK(pair.b->bank.has_authenticated_rx(SecurityScope::Link, kNodeA,
+  CHECK(pair.b->bank.has_authenticated_rx(first_scope, kNodeA,
                                            established_b.rx_context_id));
-  CHECK(!pair.b->bank.has_authenticated_rx(SecurityScope::Link, kNodeA,
+  CHECK(!pair.b->bank.has_authenticated_rx(first_scope, kNodeA,
                                             established_b.rx_context_id + 1));
   CHECK_OK(pair.b->engine.poll(kT0 + 2230));
   CHECK_OK(deliver_to(*pair.b, *pair.a, m3, ab, kT0 + 2235));
@@ -2343,6 +2351,7 @@ int main() {
   for (const auto scope : {SecurityScope::EndToEnd, SecurityScope::Link}) {
     test_admitted_m4_releases_crypto_flight(scope);
   }
+  test_admitted_m4_releases_crypto_flight(SecurityScope::EndToEnd, SecurityScope::EndToEnd);
   test_resume_after_edhoc();
   test_gateway_resume_lookup_budget();
   test_edhoc_resend_exhaustion_deadlines();

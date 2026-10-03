@@ -3285,6 +3285,9 @@ Status HandshakeEngine::accept_send(const std::uint32_t token, const std::uint8_
   responder_done.proof = pending_commit_proof_;
   record->state = RecordState::EdhocM4Sent;
   stage_established(responder_done);
+  // M4 and its duplicate evidence now live in the record's small cache.
+  // Retain that retry duty, but release the crypto workspace for other peers.
+  end_edhoc_flight();
   return Status::success();
 }
 
