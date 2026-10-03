@@ -1,4 +1,5 @@
 - Advance the first End chunk sweep on successive Owner polls, retain unsent tails under queue pressure, and keep the 250 ms retry gap and handshake deadline.
 - Preserve forwarded scoped repair targets and reply to newly learned sequences before stable-link refresh suppression.
 - Keep unbound neighbors eligible for the existing bounded discovery sweep even when their scoped DISCOVER was recently heard.
+- Prioritize queued Link recovery over End EDHOC while preserving the single crypto flight and ECC gap.
 - Add retained five/six-hop line coverage and a contended relay-reset reproducer. The contended reset acceptance remains open; this change does not qualify H7R3/H7R4 hardware recovery.
