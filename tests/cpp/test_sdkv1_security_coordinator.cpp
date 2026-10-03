@@ -258,6 +258,7 @@ class FakeMesh final : public CoordinatorMeshPort {
                         MessageId& id) noexcept override {
     (void)lifetime_ms;
     (void)now_ms;
+    if (sends.size() >= send_limit) return Status::error(StatusCode::NoCapacity, "mesh full");
     sends.push_back({destination, type, std::vector<std::uint8_t>(payload.data,
                                                                   payload.data + payload.size)});
     id = MessageId{1, static_cast<std::uint32_t>(sends.size())};
@@ -269,6 +270,7 @@ class FakeMesh final : public CoordinatorMeshPort {
     std::vector<std::uint8_t> bytes{};
   };
   std::vector<Send> sends{};
+  std::size_t send_limit{SIZE_MAX};
 };
 
 class FakeUsb final : public CoordinatorUsbPort {
@@ -2970,37 +2972,41 @@ void test_end_chunks_progress_without_prefix_reply() {
   object.fill(0xB6);
   CHECK(SecurityCoordinatorTestAccess::stage_end_chunks(
             coordinator, kNode + 1, ByteView{object.data(), object.size()}, now).ok());
-  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now).ok());
-  CHECK(f.mesh.sends.size() == 1);
-  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + 20).ok());
-  CHECK(f.mesh.sends.size() == 1);
+  f.mesh.send_limit = 0;
+  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now).code == StatusCode::NoCapacity);
+  CHECK(f.mesh.sends.empty());
+  f.mesh.send_limit = SIZE_MAX;
   const std::size_t grid = join_chunk_data_max(JoinCarrier::WireRelay);
-  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + 250).ok());
-  CHECK(f.mesh.sends.size() == 2);
-  if (f.mesh.sends.size() == 2) {
-    CHECK(f.mesh.sends[1].dest == kNode + 1);
-    CHECK(f.mesh.sends[1].type == FrameType::BootstrapChunk);
+  const std::size_t chunks = (object.size() + grid - 1) / grid;
+  for (std::size_t i = 0; i < chunks; ++i) {
+    CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + (i + 1) * 25).ok());
+    CHECK(f.mesh.sends.size() == i + 1);
     JoinChunk chunk{};
     CHECK(join_chunk_decode(JoinCarrier::WireRelay,
-                            ByteView{f.mesh.sends[1].bytes.data(),
-                                     f.mesh.sends[1].bytes.size()}, chunk).ok());
-    CHECK(chunk.offset == grid);
+                            ByteView{f.mesh.sends[i].bytes.data(),
+                                     f.mesh.sends[i].bytes.size()}, chunk).ok());
+    CHECK(chunk.offset == i * grid);
   }
+  const MonotonicMs retry = now + chunks * 25 + 250;
+  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, retry - 1).ok());
+  CHECK(f.mesh.sends.size() == chunks);
+  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, retry).ok());
+  CHECK(f.mesh.sends.size() == chunks + 1);
   CHECK(SecurityCoordinatorTestAccess::acknowledge_end_prefix(
-            coordinator, static_cast<std::uint16_t>(grid), now + 251, kNode + 2).ok());
-  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + 251).ok());
-  CHECK(f.mesh.sends.size() == 2);  // another peer cannot release this chunk's retry wait
+            coordinator, static_cast<std::uint16_t>(grid), retry + 1, kNode + 2).ok());
+  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, retry + 1).ok());
+  CHECK(f.mesh.sends.size() == chunks + 1);  // another peer cannot release the retry wait
   CHECK(SecurityCoordinatorTestAccess::acknowledge_end_prefix(
-            coordinator, static_cast<std::uint16_t>(grid), now + 251).ok());
-  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + 251).ok());
-  CHECK(f.mesh.sends.size() == 3);
+            coordinator, static_cast<std::uint16_t>(grid), retry + 1).ok());
+  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, retry + 1).ok());
+  CHECK(f.mesh.sends.size() == chunks + 2);
   CHECK(SecurityCoordinatorTestAccess::acknowledge_end_prefix(
-            coordinator, static_cast<std::uint16_t>(grid), now + 252).ok());
-  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + 252).ok());
-  CHECK(f.mesh.sends.size() == 3);  // duplicate progress cannot accelerate retries
+            coordinator, static_cast<std::uint16_t>(grid), retry + 2).ok());
+  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, retry + 2).ok());
+  CHECK(f.mesh.sends.size() == chunks + 2);  // duplicate progress cannot accelerate retries
   CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(
             coordinator, now + HandshakeEngine::kLinkTimeoutMs).ok());
-  CHECK(f.mesh.sends.size() == 3);  // expired objects do not keep sending
+  CHECK(f.mesh.sends.size() == chunks + 2);  // expired objects do not keep sending
 }
 
 // --- Join milestones (observation_v1) --------------------------------------------
