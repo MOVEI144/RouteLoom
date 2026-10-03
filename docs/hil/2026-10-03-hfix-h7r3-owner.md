@@ -1,4 +1,4 @@
-# H7R3 Owner waiting — host regressions, hardware pending
+# H7R3 focused recovery — host regressions, hardware pending
 
 ## Target and change
 
@@ -12,6 +12,9 @@ including H7R2 through `83057228085e3e356c93ad86c0c44b437b7b4dc7`.
 It merged without conflicts. Both H7R2's send/callback hook and this change's
 notification-clock hook remain; its admitted End retry accounting is retained.
 
+The focused review started at `bc22c46621cc4e28650e4ef0826e798e74a2fe0d`.
+A fresh fetch/merge found main already integrated.
+
 This change fixes idle Owner execution in the existing ESP-NOW runtime,
 SecurityCoordinator and MembershipLifecycle. It adds IDF-stub wait accounting
 and a three-hop AppObject/foreground-control row to the existing real Owner
@@ -22,8 +25,9 @@ harness. It does not qualify the archived C6 hardware failure.
 No capacity/profile default, terminal/dedup/replay retention, authentication,
 boot/session/generation/context check, API/wire/storage format, transmission
 attempt limit or operation lifetime changes. No production state or buffer
-is added. M08 admission versus terminal capacity remains the PM's separate
-capacity decision. STATUS is unchanged.
+is added; the existing outbound filter byte now distinguishes unbound and
+unconfirmed peers. M08 receiver quota/source admission remains a separate
+design decision. STATUS and implementation-plan section 08 are unchanged.
 
 | Wait source | Result of the audit/change |
 | --- | --- |
@@ -51,16 +55,43 @@ cmake --build build-v2 -j2 --target routeloom_usb_tests routeloom_usb_boot_gate_
 ctest --test-dir build-v2 -j2 -R '^routeloom_usb(_boot_gate|_state_gate)?_tests$' --output-on-failure
 ```
 
-These filters were executed in smaller dependency groups: nine Owner/core
-CTest cases and three USB boot/state/security cases PASS. There was no full
-CTest run. The USB cases retain pre-authenticated DATA and old-session gates.
+The original filters ran in smaller dependency groups. After the focused
+fixes, the final ASan filter below passed **17/17** CTests, including the
+mandatory session test and USB pre-authentication/old-session gates:
 
-After final integration, nine affected CTests PASS again: Owner reapply,
-runtime, TRACE=0/1 callback ordering, empty/filtered RX, coordinator,
-revocation and session. Fmt/clippy also PASS again. Both cold five-hop
-profiles and the new 30-object three-hop row were rerun with rebuilt peers
-and reproduce the results below. Older load and USB results above precede
-the integration; no full suite was run.
+```sh
+cmake --build build-v2 -j4 --target routeloom_discovery_tests routeloom_scope_tests routeloom_sdkv1_handshake_tests routeloom_sdkv1_coordinator_tests
+ctest --test-dir build-v2 -j4 -R '^routeloom_(discovery|scope|sdkv1_handshake|espnow_owner_reapply|espnow_runtime|hil_rx_filtered|hil_rx_empty|sdkv1_revocation|sdkv1_authority|sdkv1_coordinator|session|deadline|usb|usb_boot_gate|usb_state_gate|espnow_callback_order_trace0|espnow_callback_order_trace1)_tests$' --output-on-failure
+ctest --test-dir build-v2-object -j2 -R '^routeloom_app_object(_endpoint)?_tests$' --output-on-failure
+```
+
+The two AppObject CTests also passed: **19/19 related CTests** in total.
+No full suite was run.
+
+## Focused recovery fixes and fail-before evidence
+
+- A cold discovery round could accept a late scoped OFFER from a peer that
+  became Reachable while MAC verification was queued, replacing the newly
+  confirmed context. Cold recovery now filters Reachable peers both before
+  and after verification; Bound peers may still retry. The queued-OFFER
+  regression fails before and passes after, covering both states.
+- A responder's initial Probe could precede the initiator's context install.
+  An authenticated lower local binding-counter Probe now schedules a prompt
+  retry of an outstanding Bound confirmation. It neither refreshes the lease
+  nor permits DATA before the matching Result. Its regression fails one
+  assertion before and passes after. Membership generation/boot checks are
+  unchanged.
+- Committed End M4 retained the shared crypto workspace until confirmation
+  or timeout, blocking handshakes with other peers. It now releases that
+  workspace while retaining the existing small M4 cache, exact M1/M3 hashes,
+  context evidence and retry deadline. The existing lost-M4 regression gains
+  one End-to-End row: twelve assertions fail before and pass after. It checks
+  an unrelated peer's progress, rejection of altered M3, identical cached M4,
+  and retirement only after authenticated RX in the exact installed context.
+- End chunk replies previously matched the transfer ID without checking the
+  origin peer. A different peer's matching-ID reply is now ignored. The
+  existing chunk progression regression fails one assertion before and
+  passes after; genuine replies still advance immediately.
 
 Fail-before/pass-after uses the real Member Owner/coordinator/runtime and
 an Authority port that refuses admission. Only the stub clock assigns a
@@ -114,7 +145,7 @@ for the required ON peer were explicitly executed with `--ignored`.
 
 - Cold five-hop, AppObject OFF and ON/no-object: PASS, 100/100 each direction,
   no duplicate receive or terminal. Both reach all End/Authority readiness
-  in **165825 ms virtual time**. This is a readiness observation, not a
+  in **166300 ms virtual time**. This is a readiness observation, not a
   45-second hardware-window success or a claim of watchdog qualification.
 - Existing three-hop AppObject/control smoke: PASS, one 4 KiB object.
 - New `M10-HFIX-H7R3`: 30/30 immediate 2 KiB objects and 271/271 foreground
@@ -132,27 +163,28 @@ for the required ON peer were explicitly executed with `--ignored`.
   >=99%/<=20% gates; its injected absent-route expiry is the only excluded
   End failure. The shared helper now also verifies the 1 Hz submission
   cadence. These two tests took 397.92 s wall time together.
-- Gateway reset before final main integration: **FAIL before and after**
-  the Owner fix, 96/100 Delivered and first send
-  9/10. The same first-send gate fails on an archived, separately built
-  `091114ba` peer. Cycle 8 is authenticated at 775 ms with zero gateway
-  Link/End sessions; Link is visible at 4775 ms, End still absent, and
-  End setup expires before eventual recovery. The first accepted send
-  expires. Authentication alone does not establish route/End readiness;
-  the exact setup delay remains unresolved. No warm-up probe or fixed
-  waiting period was added, and the acceptance gate was not weakened.
-- After final main integration: gateway reset still **FAILS**, 99/100
-  Delivered and first send 9/10. The cycle with nine deliveries first
-  delivers at 7350 ms; its immediate first request expires (reason 273).
-  This matches [H7R2's result](2026-10-03-h7r2-software.md); the improvement
-  belongs to its admitted End retry accounting, not this Owner wait fix.
-- M08 existing contention boundaries, after main integration: below-quota
-  **PASS**, 20/20 unique receipts, 15 modeled collision losses and no
-  terminal refusal. Explicitly executed small32 overload **FAILS**, 28/40
-  accepted messages delivered, 25 terminal refusals and 13 collision losses;
-  each source delivers 6/8, 5/8, 6/8, 5/8, 6/8. Gateway capacity remains
-  32 dedup entries / 28 terminal pins. These match the previous M08HW
-  boundary results; no capacity, admission or retention design was changed.
+- Gateway reset before the focused recovery fixes: **FAIL**, 99/100
+  Delivered and first send 9/10 after H7R2 integration (96/100 before it).
+  The failing cycle's first request expired; its first Delivered arrived
+  at 7350 ms. The Owner wait fix alone did not resolve this failure.
+- Gateway reset after the focused fixes: **PASS**, 100/100 Delivered and
+  first send 10/10. The real Owner/UsbBridge test submits immediately after
+  authenticated boot/session, without a warm-up probe or fixed extra wait.
+  Each accepted request has exactly one terminal within its original 5 s
+  lifetime plus one 25 ms observation poll. Admission and terminal events
+  are checked separately; the daemon lane is retained.
+- Final M08 contention boundaries: below-quota **PASS**, 20/20 unique
+  receipts, two modeled collision losses and no terminal refusal. The
+  explicitly executed small32 overload still **FAILS**, 28/40 accepted
+  messages delivered, 47 terminal refusals and 12 collision losses; each
+  source delivers 8/8, 8/8, 2/8, 2/8, 8/8. Every accepted request terminates
+  exactly once and source queues are empty by 30 s. Gateway capacity remains
+  32 dedup entries / 28 terminal pins. No capacity or retention was changed.
+
+Final related Rust runs therefore pass five configurations (reset, cold OFF,
+cold ON, three-hop 30-object/control, below-quota M08) and fail one known
+M08 overload configuration. The older smoke/load results above are retained
+as earlier evidence and were not repeated in the final pass.
 
 ## C3 footprint and remaining qualification
 
@@ -160,21 +192,23 @@ ESP-IDF v6.0.3, only `bridge_node-esp32c3-normal-off-off`, TRACE OFF and
 worker ON. `python3 tools/check.py firmware --cell` built the same cell
 before/after; the final RX change was rebuilt incrementally with `idf.py
 build`, followed by JSON size, RAM guard and the same cell budget check.
-Ninja used four jobs for cell builds and two for the final incremental build.
+Ninja used at most four jobs; the final focused-review rebuild used four.
 After main integration, the same cell was rebuilt incrementally. A clean
 archive of final main `83057228` was separately built with the same cell
 command and two jobs, to keep its incoming code size out of this PR's delta.
 
-| C3 metric | Final main baseline | Integrated H7R3 | Difference |
+| C3 metric | Final main baseline | Reviewed H7R3 | Difference |
 | --- | ---: | ---: | ---: |
-| app.bin | 1243984 B | 1244048 B | +64 B |
+| app.bin | 1243984 B | 1244208 B | +224 B |
 | static BSS | 211976 B | 211976 B | 0 B |
 | static data | 13348 B | 13348 B | 0 B |
 | static free | 46624 B | 46624 B | 0 B |
 | RTC SLOW used | 6552 B | 6552 B | 0 B |
 
-Before H7R2 integration, the same comparison was 1243888 to 1243952 B
-(also +64 B); all RAM figures above were unchanged.
+Before focused review, integrated H7R3 was 1244048 B; these additional fixes
+add 160 B. The retained main archive was checked against tracked main source
+files before using its measured binary as the baseline. DRAM used is
+274672 B in both builds; all RAM figures above are unchanged.
 
 IDF compile and the 27648 B hard static-RAM floor PASS both builds. The
 complete firmware/size check **FAILS both builds** at the existing app budget
@@ -187,7 +221,8 @@ cells, quick/selfcheck/nightly and on-board campaigns: NOT_RUN under the PM
 scope. No serial port, flash or eFuse action was performed. Hardware C6
 watchdog/TRACE qualification, product OFF/ON five-hop membership/BOUND and
 45-second readiness observations remain for the combined main campaign and
-H7R2 coordination. Gateway first-send recovery remains red. Formal M08
+H7R2 coordination. Gateway first-send recovery passes the software harness
+but has not been rerun on hardware. Formal M08
 receiver-quota/admission design and sustained five-minute >=99% acceptance
 are unchanged and unresolved; no shortened retention or larger pool is used.
 The three-hop host load adds coverage, not a claim that the archived product
