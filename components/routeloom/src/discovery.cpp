@@ -381,12 +381,12 @@ Status NeighborDiscovery::start(const MonotonicMs now_ms) noexcept {
 
 Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms,
                                           const NodeId preferred_peer) noexcept {
-  return begin_discovery_filtered(now_ms, preferred_peer, false);
+  return begin_discovery_filtered(now_ms, preferred_peer, OfferFilter::Any);
 }
 
 Status NeighborDiscovery::begin_discovery_filtered(const MonotonicMs now_ms,
                                                    const NodeId preferred_peer,
-                                                   const bool unbound_only,
+                                                   const OfferFilter offer_filter,
                                                    const bool sweep) noexcept {
   if (!started_) {
     return Status::error(StatusCode::InvalidState, "discovery not started");
@@ -435,7 +435,7 @@ Status NeighborDiscovery::begin_discovery_filtered(const MonotonicMs now_ms,
   }
   outbound_ = Outbound{};
   outbound_.active = true;
-  outbound_.unbound_only = unbound_only;
+  outbound_.offer_filter = offer_filter;
   outbound_.sweep = sweep;
   outbound_.transient_held = true;
   if (preferred != nullptr) {
@@ -930,9 +930,14 @@ void NeighborDiscovery::handle_offer(const DiscoveryRxMetadata& rx,
   }
   // The OFFER echoes our transaction nonce; anything else is not ours.
   if (!nonce_equal(env.transaction_nonce, outbound_.our_nonce)) return;
-  if (outbound_.unbound_only) {
+  if (outbound_.offer_filter != OfferFilter::Any) {
     const Neighbor* known = find_neighbor(env.claimed_node);
-    if (known != nullptr && resolvable_phase(known->phase)) return;
+    if (known != nullptr &&
+        (outbound_.offer_filter == OfferFilter::Unbound
+             ? resolvable_phase(known->phase)
+             : known->phase == NeighborPhase::Reachable)) {
+      return;
+    }
   }
 
   if (env.body_size >= 1 && env.body[0] == endpoint::kScopeBodyVersion) {
@@ -1036,6 +1041,15 @@ void NeighborDiscovery::accept_scoped_offer(PendingVerify& pending,
       pending.generation != outbound_.exchange.generation ||
       pending.discover_digest != outbound_.exchange.discover_digest) {
     return;
+  }
+  if (outbound_.offer_filter != OfferFilter::Any) {
+    const Neighbor* known = find_neighbor(pending.env.claimed_node);
+    if (known != nullptr &&
+        (outbound_.offer_filter == OfferFilter::Unbound
+             ? resolvable_phase(known->phase)
+             : known->phase == NeighborPhase::Reachable)) {
+      return;
+    }
   }
   ++scope_stats_.scope_accepted;
   outbound_.have_offer = true;
@@ -1474,7 +1488,15 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
     ++stats_.send_failures;
     reject_event("RESULT_SLOTS_FULL", neighbor.node);
   }
-  if (older_generation) return;
+  if (older_generation) {
+    // The peer can now open this context. Our first probe may have left
+    // before its install; re-confirm promptly without refreshing the lease
+    // or accepting the older generation as current liveness evidence.
+    if (neighbor.phase == NeighborPhase::Bound && neighbor.probe_outstanding != 0) {
+      neighbor.probe_deadline_ms = now_ms;
+    }
+    return;
+  }
   // If we were stale/bound and have no outstanding probe of our own, start
   // one — bidirectional confirmation still requires our own Result.
   if (neighbor.probe_outstanding == 0 &&
@@ -2572,7 +2594,7 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
   }
   if (sweep_due_ms_ != 0 && now_ms >= sweep_due_ms_ && !outbound_.active) {
     sweep_retry_ = false;
-    const Status swept = begin_discovery_filtered(now_ms, kInvalidNodeId, true, true);
+    const Status swept = begin_discovery_filtered(now_ms, kInvalidNodeId, OfferFilter::Unbound, true);
     if (outbound_.active) {
       sweep_due_ms_ = 0;  // the round is open; its window decides
       if (++sweep_rounds_ >= kSweepRounds) sweep_armed_ = false;
@@ -2788,7 +2810,7 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
     });
     // A member with no usable neighbor, or with neighbors but no route to
     // its gateway, still needs a new peer. Keep the bounded cadence toward
-    // broadcast; route recovery ignores OFFERs from already-bound peers.
+    // broadcast; recovery ignores peers that bind while the round is in flight.
     const bool route_stranded =
         gateway_route_missing_since_ms_ != kNoDiscover && any_reachable &&
         now_ms >= gateway_route_missing_since_ms_ &&
@@ -2828,8 +2850,13 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
       }
       const NodeId target_node =
           target != nullptr ? target->node : kInvalidNodeId;  // begin_discovery may mutate
-      if (begin_discovery_filtered(now_ms, target_node,
-                                   bootstrap_stranded && route_stranded).ok()) {
+      // A cold binding still awaiting Result may need repair; a confirmed
+      // peer must not replace its context in response to a late OFFER.
+      OfferFilter filter = OfferFilter::Any;
+      if (bootstrap_stranded) {
+        filter = route_stranded ? OfferFilter::Unbound : OfferFilter::NotReachable;
+      }
+      if (begin_discovery_filtered(now_ms, target_node, filter).ok()) {
         if (target_node == repair_demand_) {
           if (Neighbor* attempted = find_neighbor(target_node)) {
             attempted->repair_rediscovery_used = true;

@@ -636,8 +636,9 @@ class NeighborDiscovery {
   std::size_t neighbor_count() const noexcept { return neighbors_.size(); }
 
  private:
+  enum class OfferFilter : std::uint8_t { Any, Unbound, NotReachable };
   Status begin_discovery_filtered(MonotonicMs now_ms, NodeId preferred_peer,
-                                  bool unbound_only, bool sweep = false) noexcept;
+                                  OfferFilter offer_filter, bool sweep = false) noexcept;
   enum class OutboundStage : std::uint8_t {
     Idle = 0,
     AwaitingOffers,    // DISCOVER sent, collecting OFFERs in the window
@@ -703,7 +704,7 @@ class NeighborDiscovery {
 
   struct Outbound {
     bool active{false};
-    bool unbound_only{false};
+    OfferFilter offer_filter{OfferFilter::Any};
     // A start-sweep round: one attempt; an empty window ends the sweep.
     bool sweep{false};
     NodeId preferred_peer{kInvalidNodeId};

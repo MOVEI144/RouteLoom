@@ -1172,6 +1172,59 @@ void test_scoped_send_failures() {
   CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Reachable);
 }
 
+// Cold recovery permits an unconfirmed binding to retry but rejects a
+// peer confirmed after its OFFER was queued for MAC verification.
+void test_bootstrap_offer_rechecks_bound_peer_after_verify() {
+  for (const bool confirmed : {false, true}) {
+    ScopeWorld world;
+    ScopeUnit& a = world.add(1, 0xA1, true, ScopeMode::Required, 0x42);
+    ScopeUnit& b = world.add(2, 0xB2, true, ScopeMode::Required, 0x42);
+    a.engine.set_member_handshake_mode(true);
+    world.start_all();
+    world.medium.drop_rld1 = true;
+    world.run(205);
+    const auto discover = std::find_if(a.port.sent.rbegin(), a.port.sent.rend(),
+        [](const ScopePort::Sent& sent) { return !sent.wire && sent.kind == FrameType::Discover; });
+    CHECK(discover != a.port.sent.rend());
+    if (discover == a.port.sent.rend()) return;
+    b.engine.on_rld1_rx({a.mac, discovery_const::kBroadcastMac},
+        {discover->bytes.data(), discover->bytes.size()}, world.medium.now);
+    world.run(200);
+    const auto offer = std::find_if(b.port.sent.rbegin(), b.port.sent.rend(),
+        [](const ScopePort::Sent& sent) { return !sent.wire && sent.kind == FrameType::Offer; });
+    CHECK(offer != b.port.sent.rend());
+    if (offer == b.port.sent.rend()) return;
+    a.engine.on_rld1_rx({b.mac, a.mac}, {offer->bytes.data(), offer->bytes.size()}, world.medium.now);
+    NeighborDiscovery::MemberStartRequest restored{};
+    restored.peer = b.node;
+    restored.peer_mac = b.mac;
+    restored.initiator = true;
+    restored.expires_at_ms = world.medium.now + 1000;
+    CHECK_OK(a.engine.confirm_sleep_parent(restored, world.medium.now));
+    if (confirmed) {
+      const auto probe = std::find_if(a.port.sent.rbegin(), a.port.sent.rend(),
+          [](const ScopePort::Sent& sent) {
+            return sent.wire && sent.kind == FrameType::NeighborProbe;
+          });
+      CHECK(probe != a.port.sent.rend());
+      if (probe == a.port.sent.rend()) return;
+      autonomy::NeighborProbePayload request{};
+      CHECK_OK(autonomy::neighbor_probe_decode({probe->bytes.data(), probe->bytes.size()}, request));
+      autonomy::NeighborResultPayload result{};
+      result.binding_generation = request.binding_generation;
+      result.probe_sequence = request.probe_sequence;
+      result.result = autonomy::NeighborResultCode::Reachable;
+      autonomy::EncodedPayload response{};
+      CHECK_OK(autonomy::neighbor_result_encode(result, response));
+      a.engine.on_wire_rx(b.mac, FrameType::NeighborResult, response.view(), world.medium.now);
+    }
+    CHECK(a.engine.data_permitted(b.node) == confirmed);
+    a.engine.poll(world.medium.now);
+    NeighborDiscovery::MemberStartRequest start{};
+    CHECK(a.engine.take_member_start(start, world.medium.now).ok() == !confirmed);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1189,6 +1242,7 @@ int main() {
   test_dedup_legacy_flood_scoped_wins();
   test_dedup_replay_past_ttl();
   test_pending_verify_generation_recheck();
+  test_bootstrap_offer_rechecks_bound_peer_after_verify();
   test_scoped_send_failures();
   test_hmac_sha256_split_equivalence();
 

@@ -245,18 +245,34 @@ fn gateway_reset_cycles(cycles: u32) {
         let mut sends = Vec::new();
         for index in 0..10_u64 {
             key += 1;
-            sends.push(legacy_send(&mut world, key, NODE_A, &index.to_be_bytes()));
+            sends.push((
+                legacy_send(&mut world, key, NODE_A, &index.to_be_bytes()),
+                world.now,
+            ));
             world.pump_until(80, |_| false);
         }
         world.pump_until(((DEADLINE_MS + GRACE_MS) / 25) as u32, |_| false);
-        let first_outcome = terminals(&world, sends[0]);
+        let first_outcome = terminals(&world, sends[0].0);
         assert_eq!(first_outcome.len(), 1, "first send ends exactly once");
         first_outcomes.push(first_outcome[0]);
         let mut got = 0;
         let mut first = None;
-        for request in &sends {
+        for (request, submitted_at) in &sends {
             let outcome = terminals(&world, *request);
-            assert!(!outcome.is_empty(), "send {request} ended terminal");
+            assert_eq!(outcome.len(), 1, "send {request} ends exactly once");
+            assert!(
+                world
+                    .usb_host
+                    .outcomes
+                    .iter()
+                    .any(|(r, state, _, _)| r == request && state.is_some_and(|s| s < 7)),
+                "send {request} admitted before its terminal outcome"
+            );
+            let terminal_at = terminal_events(&world, *request).next().unwrap().2;
+            assert!(
+                terminal_at - submitted_at <= DEADLINE_MS + 25,
+                "send {request} finishes within its original lifetime and one poll"
+            );
             if outcome.iter().any(|(s, _)| *s == Some(DELIVERY_DELIVERED)) {
                 got += 1;
                 if first.is_none() {
