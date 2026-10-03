@@ -7,6 +7,11 @@ fetch/merge of main. The authoritative H7R3 observations were made on
 `ede5dda32c85e6bbabf4617765ce35d5088f7487`; their failures remain recorded in
 [the H7R3 report](2026-10-03-h7r3.md).
 
+The final main integration is `5e207ed78b83c3d154e982e1bc57ab589a1ac3c7`,
+including H7R2 through `83057228085e3e356c93ad86c0c44b437b7b4dc7`.
+It merged without conflicts. Both H7R2's send/callback hook and this change's
+notification-clock hook remain; its admitted End retry accounting is retained.
+
 This change fixes idle Owner execution in the existing ESP-NOW runtime,
 SecurityCoordinator and MembershipLifecycle. It adds IDF-stub wait accounting
 and a three-hop AppObject/foreground-control row to the existing real Owner
@@ -50,6 +55,13 @@ These filters were executed in smaller dependency groups: nine Owner/core
 CTest cases and three USB boot/state/security cases PASS. There was no full
 CTest run. The USB cases retain pre-authenticated DATA and old-session gates.
 
+After final integration, nine affected CTests PASS again: Owner reapply,
+runtime, TRACE=0/1 callback ordering, empty/filtered RX, coordinator,
+revocation and session. Fmt/clippy also PASS again. Both cold five-hop
+profiles and the new 30-object three-hop row were rerun with rebuilt peers
+and reproduce the results below. Older load and USB results above precede
+the integration; no full suite was run.
+
 Fail-before/pass-after uses the real Member Owner/coordinator/runtime and
 an Authority port that refuses admission. Only the stub clock assigns a
 100 us CPU charge to each pass; a blocking RTOS wait advances virtual time.
@@ -89,6 +101,12 @@ CARGO_BUILD_JOBS=4 cargo +1.85.0 test --manifest-path host/Cargo.toml -p routelo
 CARGO_BUILD_JOBS=4 cargo +1.85.0 test --manifest-path host/Cargo.toml -p routeloom-host --bins mesh_m10_three_hop_with_control -- --ignored --nocapture --test-threads=2
 CARGO_BUILD_JOBS=2 cargo +1.85.0 test --manifest-path host/Cargo.toml -p routeloom-host --bins mesh_h7r3_thirty_three_hop_objects_with_1hz_control -- --ignored --nocapture --test-threads=2
 CARGO_BUILD_JOBS=4 cargo +1.85.0 test --manifest-path host/Cargo.toml -p routeloom-host --bins site::owner_mesh::object::load::mesh_m10_ -- --ignored --nocapture --test-threads=2
+cmake -S . -B build-v2-small -DROUTELOOM_ENABLE_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug -DROUTELOOM_RESOURCE_PROFILE=gateway_small
+cmake --build build-v2-small -j2 --target routeloom_owner_mesh_peer routeloom_joiner_interop_peer
+export ROUTELOOM_MESH_PEER="$PWD/build-v2/tests/cpp/routeloom_owner_mesh_peer"
+export ROUTELOOM_MESH_PEER_GW="$PWD/build-v2-small/tests/cpp/routeloom_owner_mesh_peer"
+export ROUTELOOM_OWNER_PEER_GW="$PWD/build-v2-small/tests/cpp/routeloom_joiner_interop_peer"
+CARGO_BUILD_JOBS=2 cargo +1.85.0 test --manifest-path host/Cargo.toml -p routeloom-host --bins site::owner_mesh::m08hw::mesh_m08hw_contention_ -- --include-ignored --nocapture --test-threads=2
 ```
 
 No missing-peer skip was treated as success. AppObject tests marked ignored
@@ -114,7 +132,8 @@ for the required ON peer were explicitly executed with `--ignored`.
   >=99%/<=20% gates; its injected absent-route expiry is the only excluded
   End failure. The shared helper now also verifies the 1 Hz submission
   cadence. These two tests took 397.92 s wall time together.
-- Gateway reset: **FAIL before and after**, 96/100 Delivered and first send
+- Gateway reset before final main integration: **FAIL before and after**
+  the Owner fix, 96/100 Delivered and first send
   9/10. The same first-send gate fails on an archived, separately built
   `091114ba` peer. Cycle 8 is authenticated at 775 ms with zero gateway
   Link/End sessions; Link is visible at 4775 ms, End still absent, and
@@ -122,6 +141,18 @@ for the required ON peer were explicitly executed with `--ignored`.
   expires. Authentication alone does not establish route/End readiness;
   the exact setup delay remains unresolved. No warm-up probe or fixed
   waiting period was added, and the acceptance gate was not weakened.
+- After final main integration: gateway reset still **FAILS**, 99/100
+  Delivered and first send 9/10. The cycle with nine deliveries first
+  delivers at 7350 ms; its immediate first request expires (reason 273).
+  This matches [H7R2's result](2026-10-03-h7r2-software.md); the improvement
+  belongs to its admitted End retry accounting, not this Owner wait fix.
+- M08 existing contention boundaries, after main integration: below-quota
+  **PASS**, 20/20 unique receipts, 15 modeled collision losses and no
+  terminal refusal. Explicitly executed small32 overload **FAILS**, 28/40
+  accepted messages delivered, 25 terminal refusals and 13 collision losses;
+  each source delivers 6/8, 5/8, 6/8, 5/8, 6/8. Gateway capacity remains
+  32 dedup entries / 28 terminal pins. These match the previous M08HW
+  boundary results; no capacity, admission or retention design was changed.
 
 ## C3 footprint and remaining qualification
 
@@ -130,14 +161,20 @@ worker ON. `python3 tools/check.py firmware --cell` built the same cell
 before/after; the final RX change was rebuilt incrementally with `idf.py
 build`, followed by JSON size, RAM guard and the same cell budget check.
 Ninja used four jobs for cell builds and two for the final incremental build.
+After main integration, the same cell was rebuilt incrementally. A clean
+archive of final main `83057228` was separately built with the same cell
+command and two jobs, to keep its incoming code size out of this PR's delta.
 
-| C3 metric | Before | After | Difference |
+| C3 metric | Final main baseline | Integrated H7R3 | Difference |
 | --- | ---: | ---: | ---: |
-| app.bin | 1243888 B | 1243952 B | +64 B |
+| app.bin | 1243984 B | 1244048 B | +64 B |
 | static BSS | 211976 B | 211976 B | 0 B |
 | static data | 13348 B | 13348 B | 0 B |
 | static free | 46624 B | 46624 B | 0 B |
 | RTC SLOW used | 6552 B | 6552 B | 0 B |
+
+Before H7R2 integration, the same comparison was 1243888 to 1243952 B
+(also +64 B); all RAM figures above were unchanged.
 
 IDF compile and the 27648 B hard static-RAM floor PASS both builds. The
 complete firmware/size check **FAILS both builds** at the existing app budget
