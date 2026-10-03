@@ -361,6 +361,15 @@ void MeshNode::note_scoped_change(const RouteSelection& selection,
                                   const MonotonicMs now_ms) noexcept {
   const NodeId destination = selection.valid ? selection.destination : previous.destination;
   if (destination == kInvalidNodeId || destination == config_.node) return;
+  // Explicit repair replies must precede stable-link refresh suppression.
+  if (selection.valid && (!previous.valid || selection.sequence != previous.sequence)) {
+    neighbors_.for_each([&](Neighbor& neighbor) {
+      if (neighbor.active && neighbor.tree.scoped.interest_until_ms > now_ms &&
+          neighbor.tree.scoped.pull_target == destination) {
+        neighbor.pull_answer_pending = true;
+      }
+    });
+  }
   // A stable tree link carries metric/sequence refreshes on its periodic cycle.
   // Loss and parent changes still trigger immediately; explicit repair requests
   // keep their direct replies. This avoids propagating each load sample.

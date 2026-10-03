@@ -301,6 +301,8 @@ void MeshNode::handle_seqno_request(const wire::PlainFrame& frame, const NodeId 
     observer_.on_diagnostic("SEQNO_REQUEST_NO_PATH", peer, &frame.header.message);
     return;
   }
+  // Retain the target while a fresher sequence is fetched upstream.
+  if (requesting != nullptr) requesting->tree.scoped.pull_target = destination;
   (void)queue_seqno_request(next, requester, destination, requested_sequence,
                             request_id, static_cast<std::uint8_t>(ttl - 1U), now_ms);
 }
