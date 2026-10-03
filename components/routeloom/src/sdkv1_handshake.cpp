@@ -3159,29 +3159,34 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
     const bool cookie = step == 1 && record.scope == SecurityScope::Link;
     return emit_send(record, phase, step, bytes, cookie);
   }
-  for (auto& record : records_) {
-    if (!record.used ||
-        (record.state != RecordState::EdhocQueued &&
-         record.state != RecordState::EdhocM1Parked) ||
-        now < record.retransmit_at || now >= record.deadline) {
-      continue;
+  // Link recovery enables the routed End carrier. Give an eligible Link
+  // the single crypto flight before an End request, regardless of slot order.
+  // Expired records were drained above; an unused record is in state Free.
+  for (unsigned pass = 2; pass-- != 0;) {
+    for (auto& record : records_) {
+      if ((record.scope == SecurityScope::Link) != (pass != 0) ||
+          (record.state != RecordState::EdhocQueued &&
+           record.state != RecordState::EdhocM1Parked) ||
+          now < record.retransmit_at) {
+        continue;
+      }
+      finish_confirmed_exchange(record.scope, record.peer);
+      if (edhoc_flight_.active || !ecc_budget_ok(now)) return Status::success();  // wait
+      if (record.state == RecordState::EdhocQueued) {
+        const Status begun = begin_edhoc(record, now);
+        if (!begun) return emit_failed(record, map_commit_failure(begun));
+        return Status::success();
+      }
+      // Parked m1: only the stash owner may start it — a clobbered
+      // stash drops silently and the initiator's retransmit re-parks.
+      if (big_tx_owner_ != record.token || big_tx_size_ == 0) {
+        drop_record(record);
+        return Status::success();
+      }
+      // process_message_1 consumes the stash before compose_message_2
+      // overwrites it, so no copy is needed.
+      return responder_begin_m1(record, ByteView{big_tx_.data(), big_tx_size_}, now);
     }
-    finish_confirmed_exchange(record.scope, record.peer);
-    if (edhoc_flight_.active || !ecc_budget_ok(now)) return Status::success();  // wait
-    if (record.state == RecordState::EdhocQueued) {
-      const Status begun = begin_edhoc(record, now);
-      if (!begun) return emit_failed(record, map_commit_failure(begun));
-      return Status::success();
-    }
-    // Parked m1: only the stash owner may start it — a clobbered
-    // stash drops silently and the initiator's retransmit re-parks.
-    if (big_tx_owner_ != record.token || big_tx_size_ == 0) {
-      drop_record(record);
-      return Status::success();
-    }
-    // process_message_1 consumes the stash before compose_message_2
-    // overwrites it, so no copy is needed.
-    return responder_begin_m1(record, ByteView{big_tx_.data(), big_tx_size_}, now);
   }
   return Status::success();
 }

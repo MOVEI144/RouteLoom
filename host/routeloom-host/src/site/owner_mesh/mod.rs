@@ -77,6 +77,7 @@ mod h7;
 mod hfinal;
 mod join;
 mod kg;
+mod line;
 mod load;
 mod m08hw;
 mod membership;

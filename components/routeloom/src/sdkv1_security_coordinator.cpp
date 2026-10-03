@@ -1732,11 +1732,16 @@ Status SecurityCoordinator::emit_end_send(const HandshakeResult& result,
                                       HandshakeEngine::kLinkTimeoutMs, now, id);
   }
   JoinObjectSlot& slot = member().end_tx;
-  // Same retransmit rule as the link slot: a repeated Send for the
-  // occupant re-emits due chunks, anything else loads (evicting).
+  // A repeated Send keeps the occupant's progress. A new exchange may
+  // replace it after the first sweep has reached the bounded queue.
   const bool same = slot.mode() == JoinObjectSlot::Mode::Sending &&
                     slot.phase() == object.phase && slot.step() == object.step &&
                     slot.id() == exchange && slot.lane() == ObjectLane::EndSession;
+  // Queue pressure must not let another exchange evict an unsent tail.
+  if (!same && slot.mode() == JoinObjectSlot::Mode::Sending &&
+      slot.sends() < slot.chunk_total()) {
+    return Status::error(StatusCode::WouldBlock, "end tx busy");
+  }
   if (!same && !slot.load(JoinCarrier::WireRelay, object.phase, object.step, exchange, 0, 0,
                            ByteView{encoded.data(), encoded_size}, now, ObjectLane::EndSession)
                     .ok()) {
@@ -1757,22 +1762,26 @@ Status SecurityCoordinator::emit_end_send(const HandshakeResult& result,
 }
 
 Status SecurityCoordinator::pump_end_tx(const MonotonicMs now) noexcept {
-  JoinObjectSlot& slot = member().end_tx;
+  MemberEngine& state = member();
+  JoinObjectSlot& slot = state.end_tx;
   if (slot.mode() != JoinObjectSlot::Mode::Sending) return Status::success();
   if (now - slot.started_ms() >= HandshakeEngine::kLinkTimeoutMs) {
     slot.reset();
     return Status::success();
   }
-  if (member().end_tx_last_attempt_ms != 0 &&
-      now - member().end_tx_last_attempt_ms < 250) {
+  const std::size_t total = slot.chunk_total();
+  const std::size_t sends = slot.sends();
+  // Send the first sweep on successive polls; the gap is for retries.
+  // Serial 250 ms first sends consume the End deadline on long paths.
+  if (sends >= total && state.end_tx_last_attempt_ms != 0 &&
+      now - state.end_tx_last_attempt_ms < 250) {
     return Status::success();
   }
-  member().end_tx_last_attempt_ms = now;
+  state.end_tx_last_attempt_ms = now;
   const std::uint16_t pending = slot.pending_mask();
   // Rotate unconfirmed chunks while earlier replies are in flight,
   // so a delayed prefix receipt cannot starve the tail.
-  const std::size_t total = slot.chunk_total();
-  std::size_t i = slot.sends() % total;
+  std::size_t i = sends % total;
   for (std::size_t offset = 0; offset < total; ++offset, i = i + 1 == total ? 0 : i + 1) {
     if ((pending & static_cast<std::uint16_t>(1U << i)) == 0) continue;
     JoinChunk chunk{};
@@ -1785,7 +1794,7 @@ Status SecurityCoordinator::pump_end_tx(const MonotonicMs now) noexcept {
     }
     if (!encoded.ok()) return encoded;
     MessageId id{};
-    const Status sent = deps_.mesh->send_bootstrap(member().end_tx_peer,
+    const Status sent = deps_.mesh->send_bootstrap(state.end_tx_peer,
                                                    FrameType::BootstrapChunk,
                                                    ByteView{body.data(), written},
                                                    HandshakeEngine::kLinkTimeoutMs,

@@ -976,6 +976,40 @@ void test_resume_after_edhoc() {
               resumed.r3_size);
 }
 
+void test_queued_link_precedes_end_after_ecc_gap() {
+  Pair pair = Pair::make();
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsEdhocOnly, kCapsEdhocOnly);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  const PumpResult first = pump(*pair.a, *pair.b, frozen);
+  CHECK(first.established_a && first.established_b);
+
+  HandshakeRequest end{};
+  end.scope = SecurityScope::EndToEnd;
+  end.peer = kNodeB;
+  end.reason = HandshakeReason::ResumeRetry;
+  CHECK_OK(pair.a->engine.request(end, kT0 + 300));
+  FrozenLink next = frozen;
+  next.carrier.requester_nonce[0] ^= 1;
+  CHECK_OK(pair.b->cookie.seal(pair.a->mac_self, next.carrier.requester_nonce, kNet,
+                              kT0 + 300, next.cookie));
+  next.carrier.cookie = next.cookie;
+  CHECK_OK(request_link(*pair.a, *pair.b, next, kT0 + 300));
+  HandshakeResult out{};
+  CHECK_OK(pair.a->engine.poll(kT0 + HandshakeEngine::kEccMinGapMs - 1));
+  CHECK(pair.a->engine.take_result(out).code == StatusCode::NotFound);
+  CHECK_OK(pair.a->engine.poll(kT0 + HandshakeEngine::kEccMinGapMs));
+  CHECK_OK(pair.a->engine.take_result(out));
+  CHECK(out.event == HandshakeEvent::Send && out.scope == SecurityScope::Link && out.step == 1);
+  CHECK_OK(deliver_to(*pair.b, *pair.a, out, next, kT0 + 2050));
+  const PumpResult link = pump(*pair.a, *pair.b, next, kT0 + 2050);
+  CHECK(link.established_a && link.established_b);
+  CHECK_OK(pair.a->engine.poll(kT0 + 2 * HandshakeEngine::kEccMinGapMs - 1));
+  CHECK(pair.a->engine.take_result(out).code == StatusCode::NotFound);
+  CHECK_OK(pair.a->engine.poll(kT0 + 2 * HandshakeEngine::kEccMinGapMs));
+  CHECK_OK(pair.a->engine.take_result(out));
+  CHECK(out.event == HandshakeEvent::Send && out.scope == SecurityScope::EndToEnd && out.step == 1);
+}
+
 void test_gateway_resume_lookup_budget() {
   {
     Pair pair = Pair::make(kGk, kGk, true);
@@ -2353,6 +2387,7 @@ int main() {
   }
   test_admitted_m4_releases_crypto_flight(SecurityScope::EndToEnd, SecurityScope::EndToEnd);
   test_resume_after_edhoc();
+  test_queued_link_precedes_end_after_ecc_gap();
   test_gateway_resume_lookup_budget();
   test_edhoc_resend_exhaustion_deadlines();
   test_end_local_refusal_preserves_resend_budget();

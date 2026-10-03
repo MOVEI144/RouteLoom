@@ -1068,12 +1068,15 @@ void NeighborDiscovery::note_sweep_offer(const std::array<std::uint8_t, 16>& non
                                          const NodeId peer, const MacAddress& source,
                                          const MonotonicMs now_ms) noexcept {
   // Unverified evidence: it can only ask for one more bounded round.
-  if (!sweep_armed_ || !member_handshake_mode_ || !nonce_equal(nonce, sweep_nonce_) ||
-      dedup_.heard_recently(source, now_ms)) {
+  if (!sweep_armed_ || !member_handshake_mode_ || !nonce_equal(nonce, sweep_nonce_)) {
     return;
   }
+  // Hearing a scoped DISCOVER does not establish a binding. An unbound
+  // neighbor still needs the bounded follow-up round after its OFFER is lost.
   const Neighbor* known = find_neighbor(peer);
   if (known != nullptr && resolvable_phase(known->phase)) return;
+  (void)source;
+  (void)now_ms;
   if (sweep_first_peer_ == kInvalidNodeId) {
     sweep_first_peer_ = peer;
   } else if (peer != sweep_first_peer_) {
