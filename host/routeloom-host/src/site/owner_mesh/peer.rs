@@ -1421,12 +1421,23 @@ impl MeshPeer {
         same_site: bool,
         search_ms: u32,
     ) {
+        self.join_policy_with_listen(smart, boot, same_site, 1000, search_ms);
+    }
+
+    pub(super) fn join_policy_with_listen(
+        &mut self,
+        smart: bool,
+        boot: bool,
+        same_site: bool,
+        listen_ms: u32,
+        search_ms: u32,
+    ) {
         let mut command = vec![b'X'];
         command.extend_from_slice(&600u32.to_le_bytes());
         command.extend_from_slice(&0u32.to_le_bytes());
         command.extend_from_slice(&0u32.to_le_bytes());
         command.extend_from_slice(&[u8::from(smart), u8::from(boot), u8::from(same_site), 0]);
-        command.extend_from_slice(&1000u32.to_le_bytes());
+        command.extend_from_slice(&listen_ms.to_le_bytes());
         command.extend_from_slice(&search_ms.to_le_bytes());
         self.send(&command);
         let reply = self.recv().expect("smart policy reply");
